@@ -1,0 +1,27 @@
+---
+name: Logout Flow
+inherits: [Auth]
+on_error: -> Force Clear
+---
+
+Invalidate Token
+  id: 8c0e2a4b-6d8e-4e0c-a2d4-a6c8e0a2c4e6
+  pos: 60, 100, 210, 88
+  description: "Calls auth API to revoke the token"
+  updates: [Auth]
+  -> Clear Local Storage
+
+Clear Local Storage
+  id: 0e2a4c6d-8f0a-4f2e-b4d6-c8e0a2c4e6a8
+  pos: 350, 108, 200, 72
+  -> Clear Cookies
+
+Clear Cookies
+  id: 2a4c6e8f-0b2c-4a4f-b6d8-e0a2c4e6a8c0
+  pos: 630, 108, 180, 72
+
+Force Clear
+  id: 4c6e8a0b-2d4e-4b6a-b8e0-a2c4e6a8c0e2
+  pos: 350, 280, 220, 88
+  description: "Fallback: clears all local state even if API call failed"
+  updates: [Auth]

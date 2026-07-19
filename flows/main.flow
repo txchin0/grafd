@@ -1,0 +1,58 @@
+---
+name: User Authentication App
+context: [Auth]
+description: "Simple app with login, dashboard, and logout"
+---
+
+# Entry point — user opens the app
+
+Open App
+  id: 6f1d2a3e-9c4b-4f8a-b1e2-0d5c7a9e3f11
+  pos: 60, 240, 170, 72
+  -> Check Session
+
+Check Session
+  id: 2b8e4c6a-1d3f-4a5b-8c7d-9e0f1a2b3c4d
+  pos: 310, 232, 210, 88
+  description: "Reads token from secure storage"
+  -> Load Dashboard : "session valid"
+  -> Show Login : "no valid session"
+
+Show Login
+  id: 7c9a1b3d-5e7f-4a2c-9b4d-6e8f0a1c3e5b
+  pos: 620, 360, 180, 80
+  -> Submit Credentials : "user fills form and taps login"
+
+Submit Credentials
+  id: 4d6f8a0c-2e4b-4c6d-8e0f-1a3b5c7d9e2f
+  pos: 900, 352, 220, 96
+  expand: [Login Flow](auth/login.flow)
+  -> Load Dashboard : "login success"
+  -> Show Login Error : "login failed"
+    data:
+      errorCode: string
+      message: string
+
+Show Login Error
+  id: 9e1a3c5b-7d9f-4b1a-a3c5-b7d9f1a3c5e7
+  pos: 910, 560, 200, 88
+  description: "Displays error message with retry option"
+  -> Show Login : "user retries"
+
+Load Dashboard
+  id: 1a3c5e7b-9d1f-4c3a-b5e7-d9f1b3d5f7a9
+  pos: 620, 120, 200, 80
+  expand: [Dashboard](dashboard.flow)
+
+Logout
+  id: 3c5e7a9d-1f3b-4d5c-a7e9-f1b3d5e7a9c1
+  pos: 60, 80, 170, 72
+  entrypoint: true
+  expand: [Logout Flow](auth/logout.flow)
+  -> Show Login
+
+Refresh Token
+  id: 5f893bf4-b2ee-4f62-9403-6ceb12b8408a
+  pos: 40, 544, 296, 144
+  description: "Silently renews the JWT before expiry"
+  -> Check Session : "token renewed"

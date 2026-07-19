@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Graf — .flow canvas</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header id="sidebar-header">
+        <span class="logo">✎ Graf</span>
+        <span class="tagline">.flow canvas</span>
+      </header>
+      <ul id="file-list"></ul>
+      <button id="new-file-button" type="button">+ New flow</button>
+      <footer id="sidebar-footer">
+        <button id="help-toggle" type="button">? Shortcuts</button>
+        <span id="connection-dot" title="Server connection"></span>
+      </footer>
+    </aside>
+
+    <main id="workspace">
+      <div id="topbar">
+        <nav id="breadcrumb"></nav>
+        <div id="view-controls">
+          <button id="zoom-out-button" type="button" title="Zoom out">−</button>
+          <button id="zoom-level-button" type="button" title="Reset zoom">100%</button>
+          <button id="zoom-in-button" type="button" title="Zoom in">+</button>
+          <button id="zoom-fit-button" type="button" title="Zoom to fit (Ctrl+0)">⛶</button>
+        </div>
+      </div>
+
+      <div id="canvas-container">
+        <canvas id="canvas"></canvas>
+
+        <div id="empty-state">
+          <h1>✎ Graf</h1>
+          <p>Select a flow from the sidebar, or create a new one.</p>
+        </div>
+
+        <div id="node-editor" class="floating hidden">
+          <input id="ne-title" placeholder="Node title" spellcheck="false" autocomplete="off" />
+          <textarea id="ne-description" rows="3" placeholder="Description — guidance for the LLM" spellcheck="false"></textarea>
+          <details id="ne-advanced">
+            <summary>Advanced</summary>
+            <label>expand <input id="ne-expand" placeholder="Graph name or [Label](path.flow)" spellcheck="false" /></label>
+            <label>on_error <input id="ne-on-error" placeholder='-&gt; Handler : "label"' spellcheck="false" /></label>
+            <label>updates <input id="ne-updates" placeholder="Auth, Cart" spellcheck="false" /></label>
+            <label class="check-row"><input type="checkbox" id="ne-entrypoint" /> entrypoint</label>
+          </details>
+          <div class="editor-actions">
+            <button id="ne-open-expand" type="button" class="quiet-button hidden">Open ⤢</button>
+            <span class="spacer"></span>
+            <button id="ne-delete" type="button" class="danger-button">Delete</button>
+          </div>
+        </div>
+
+        <div id="edge-editor" class="floating hidden">
+          <input id="ee-label" placeholder='edge label, e.g. "on success"' spellcheck="false" autocomplete="off" />
+          <div class="editor-actions">
+            <button id="ee-delete" type="button" class="danger-button">Delete edge</button>
+          </div>
+        </div>
+
+        <div id="graph-panel" class="floating collapsed">
+          <button id="gp-toggle" type="button">graph info</button>
+          <div id="gp-body">
+            <label>name <input id="gp-name" spellcheck="false" /></label>
+            <label>description <textarea id="gp-description" rows="2" spellcheck="false"></textarea></label>
+            <label>context <input id="gp-context" placeholder="Auth, Cart" spellcheck="false" /></label>
+            <label>on_error <input id="gp-on-error" placeholder='-&gt; Handler' spellcheck="false" /></label>
+            <label class="check-row"><input type="checkbox" id="gp-entrypoint" /> entrypoint</label>
+          </div>
+        </div>
+
+        <div id="help-overlay" class="hidden">
+          <h2>Shortcuts</h2>
+          <table>
+            <tr><td>Drag empty canvas</td><td>create a node</td></tr>
+            <tr><td>Click a node</td><td>edit title &amp; description</td></tr>
+            <tr><td>Drag a node / its corners</td><td>move / resize</td></tr>
+            <tr><td>Hover a node, drag a port ○</td><td>draw an edge (drop on empty space to spawn a node)</td></tr>
+            <tr><td>Double-click an edge</td><td>edit its label</td></tr>
+            <tr><td>Double-click empty canvas</td><td>quick-create a node</td></tr>
+            <tr><td>Click ⤢ badge</td><td>open a node's expansion</td></tr>
+            <tr><td>Shift + drag / click</td><td>multi-select</td></tr>
+            <tr><td>Delete</td><td>delete selection</td></tr>
+            <tr><td>Ctrl+Z / Ctrl+Y</td><td>undo / redo</td></tr>
+            <tr><td>Wheel</td><td>zoom</td></tr>
+            <tr><td>Space + drag, middle drag</td><td>pan</td></tr>
+            <tr><td>Ctrl+0</td><td>zoom to fit</td></tr>
+          </table>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

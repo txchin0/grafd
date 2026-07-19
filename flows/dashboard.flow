@@ -1,0 +1,40 @@
+---
+name: Dashboard
+inherits: [Auth]
+---
+
+Fetch User Profile
+  id: 6e8a0c2d-4f6a-4c8e-a0b2-c4e6a8c0e2a4
+  pos: 60, 100, 200, 72
+  -> Render Dashboard
+
+Fetch Notifications
+  id: 8a0c2e4f-6b8c-4d0a-b2c4-e6a8c0e2a4c6
+  pos: 60, 280, 200, 72
+  -> Render Dashboard
+
+Render Dashboard
+  id: 0c2e4a6b-8d0e-4e2c-b4c6-a8e0c2a4c6e8
+  pos: 360, 180, 220, 96
+  description: "Displays profile, notifications, and quick actions"
+  -> Handle Logout Button : "user taps logout"
+
+Handle Logout Button
+  id: 2e4a6c8d-0f2a-4f4e-b6c8-e0a2c4c6e8a0
+  pos: 680, 188, 210, 80
+  expand: Logout Confirmation
+
+graph: Logout Confirmation
+  Show Confirmation Dialog
+    id: 4a6c8e0f-2b4c-4a6a-b8e0-c2a4c6e8a0c2
+    pos: 80, 120, 220, 88
+    -> Confirm Logout : "user confirms"
+    -> Dismiss : "user cancels"
+
+  Confirm Logout
+    id: 6c8e0a2b-4d6e-4b8c-a0c2-a4c6e8a0c2e4
+    pos: 420, 60, 180, 72
+
+  Dismiss
+    id: 8e0a2c4d-6f8a-4c0e-b2c4-c6e8a0c2e4a6
+    pos: 420, 240, 180, 72
