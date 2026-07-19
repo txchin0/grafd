@@ -1,6 +1,10 @@
 // Canvas rendering (rough.js) and pointer interaction for the flow editor. The view owns
-// the pan/zoom transform, hover/selection state, and in-flight gestures; every document
-// mutation is delegated to the `actions` callbacks supplied by main.js.
+// the pan/zoom transform, the active tool, hover/selection state, in-flight gestures, and
+// camera animations; every document mutation is delegated to the `actions` callbacks
+// supplied by main.js. When an ExpansionLayer is attached it decorates each model with
+// per-frame display geometry (`model.display`), which the view must prefer over a node's
+// authored `pos` (see rectOf) so inline-expanded frames and warp offsets never touch the
+// document itself.
 
 import rough from '/vendor/roughjs/rough.esm.js';
 
@@ -34,6 +38,11 @@ const SNAP = 8;
 const PORT_RADIUS = 5;
 const PORT_HIT_RADIUS = 11;
 const EDGE_HIT_DISTANCE = 8;
+const BADGE_HIT_RADIUS = 12;
+const BADGE_SLOT_SPACING = 24;
+const BADGE_SYMBOLS = { open: '⤢', inline: '⊞', collapse: '⊟' };
+const DIVE_IN_MS = 650;
+const BACK_OUT_MS = 560;
 
 function snap(value) {
   return Math.round(value / SNAP) * SNAP;
@@ -45,6 +54,14 @@ function seedFrom(text) {
     hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
   }
   return (hash >>> 0) % 2147483646 + 1;
+}
+
+function lerp(from, to, t) {
+  return from + (to - from) * t;
+}
+
+function easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
 function rectCenter(rect) {
@@ -107,6 +124,9 @@ export class CanvasView {
     this.hoverNode = null;
     this.hoverPoint = null;
     this.gesture = null;
+    this.tool = 'select';
+    this.expansionLayer = null;
+    this.sceneTransition = null;
     this.spaceDown = false;
     this.devicePixelRatio = window.devicePixelRatio || 1;
     this.renderQueued = false;
@@ -172,6 +192,19 @@ export class CanvasView {
     this.requestRender();
   }
 
+  setTool(tool) {
+    this.tool = tool;
+    this.updateCursor(this.hoverPoint ?? undefined);
+  }
+
+  rectOf(model, node) {
+    return model.display?.rects.get(node) ?? node.pos;
+  }
+
+  rect(node) {
+    return this.rectOf(this.model, node);
+  }
+
   select(node) {
     this.selection = new Set([node]);
     this.selectedEdge = null;
@@ -217,36 +250,146 @@ export class CanvasView {
     this.zoomAt({ x: bounds.width / 2, y: bounds.height / 2 }, scale / this.view.scale);
   }
 
-  fitToContent(padding = 80) {
-    const rects = [...this.model.nodes, ...this.model.ghosts]
-      .map((node) => node.pos)
-      .filter(Boolean);
+  setViewNow(view) {
+    this.view = { ...view };
+    this.requestRender();
+    this.actions.viewChanged?.();
+  }
+
+  computeFitView(padding = 80) {
+    const rects = [
+      ...this.model.nodes.map((node) => this.rect(node)),
+      ...this.model.ghosts.map((ghost) => ghost.pos),
+    ].filter(Boolean);
     const bounds = this.canvas.getBoundingClientRect();
     if (rects.length === 0) {
-      this.view = { x: bounds.width / 2 - 200, y: bounds.height / 2 - 150, scale: 1 };
-      this.requestRender();
-      this.actions.viewChanged?.();
-      return;
+      return { x: bounds.width / 2 - 200, y: bounds.height / 2 - 150, scale: 1 };
     }
     const minX = Math.min(...rects.map((rect) => rect.x)) - padding;
     const minY = Math.min(...rects.map((rect) => rect.y)) - padding;
     const maxX = Math.max(...rects.map((rect) => rect.x + rect.w)) + padding;
     const maxY = Math.max(...rects.map((rect) => rect.y + rect.h)) + padding;
-    const scale = Math.min(bounds.width / (maxX - minX), bounds.height / (maxY - minY), 1.4);
-    this.view.scale = Math.max(MIN_SCALE, scale);
-    this.view.x = (bounds.width - (maxX - minX) * this.view.scale) / 2 - minX * this.view.scale;
-    this.view.y = (bounds.height - (maxY - minY) * this.view.scale) / 2 - minY * this.view.scale;
+    const scale = Math.max(MIN_SCALE, Math.min(bounds.width / (maxX - minX), bounds.height / (maxY - minY), 1.4));
+    return {
+      scale,
+      x: (bounds.width - (maxX - minX) * scale) / 2 - minX * scale,
+      y: (bounds.height - (maxY - minY) * scale) / 2 - minY * scale,
+    };
+  }
+
+  fitToContent(padding = 80) {
+    this.setViewNow(this.computeFitView(padding));
+  }
+
+  // --- Seamless subgraph navigation ------------------------------------------------------
+  //
+  // A zoom transition renders TWO scenes at once with mathematically linked cameras: the
+  // "parent" scene (where the expandable node lives) and the "child" scene (its subgraph).
+  // The child camera is always derived from the parent camera so that the child's content
+  // bounds track the node's rectangle — scaled down by `growth` and pinned to the node's
+  // center. Interpolating only the parent camera therefore makes the subgraph ride inside
+  // the node while it inflates past the viewport, and a crossfade swaps which scene is
+  // solid. Diving in ends exactly on the child's fitted view; backing out ends exactly on
+  // the stored parent view.
+  //
+  // beginSceneHold freezes rendering on a captured copy of the outgoing scene so the app
+  // can swap its state (async file loads included) without a single frame of the new graph
+  // flashing at the old camera.
+
+  beginSceneHold(model, view) {
+    this.sceneTransition = { phase: 'hold', outgoing: { model, view: { ...view } } };
     this.requestRender();
-    this.actions.viewChanged?.();
+  }
+
+  releaseSceneHold() {
+    if (this.sceneTransition?.phase === 'hold') this.sceneTransition = null;
+    this.requestRender();
+  }
+
+  zoomDiveIn({ nodeRect, duration = DIVE_IN_MS }) {
+    return this.startZoomTransition({ mode: 'in', nodeRect, duration });
+  }
+
+  zoomBackOut({ nodeRect, targetView, duration = BACK_OUT_MS }) {
+    return this.startZoomTransition({ mode: 'out', nodeRect, targetView, duration });
+  }
+
+  startZoomTransition({ mode, nodeRect, targetView, duration }) {
+    const held = this.sceneTransition?.phase === 'hold' ? this.sceneTransition.outgoing : null;
+    if (!held) {
+      this.sceneTransition = null;
+      this.setViewNow(mode === 'in' ? this.computeFitView() : targetView);
+      return Promise.resolve();
+    }
+    const bounds = this.canvas.getBoundingClientRect();
+    const childModel = mode === 'in' ? this.model : held.model;
+    const contentRect = contentBoundsOf(childModel);
+    const growth = Math.max(1.05, contentRect.w / nodeRect.w, contentRect.h / nodeRect.h);
+    const nodeCenter = rectCenter(nodeRect);
+    const contentCenter = rectCenter(contentRect);
+    const link = { growth, nodeCenter, contentCenter };
+
+    let parentFrom;
+    let parentTo;
+    let incomingEnd;
+    if (mode === 'in') {
+      const fit = this.computeFitView();
+      parentFrom = held.view;
+      parentTo = parentViewLinkedTo(fit, link);
+      incomingEnd = fit;
+    } else {
+      parentFrom = parentViewLinkedTo(held.view, link);
+      parentTo = targetView;
+      incomingEnd = targetView;
+    }
+
+    return new Promise((resolve) => {
+      this.sceneTransition = {
+        phase: 'run',
+        mode,
+        outgoing: held,
+        incoming: { model: this.model },
+        parentFrom,
+        parentTo,
+        incomingEnd,
+        nodeRect,
+        link,
+        bounds,
+        duration,
+        startTime: performance.now(),
+        resolve,
+      };
+      this.requestRender();
+    });
+  }
+
+  finishSceneTransition() {
+    const transition = this.sceneTransition;
+    if (!transition) return;
+    this.sceneTransition = null;
+    if (transition.phase === 'run') {
+      this.view = { ...transition.incomingEnd };
+      transition.resolve();
+      this.actions.viewChanged?.();
+    }
+    this.requestRender();
   }
 
   onWheel(event) {
     event.preventDefault();
+    if (this.sceneTransition) {
+      this.finishSceneTransition();
+      return;
+    }
     const factor = Math.exp(-event.deltaY * (event.ctrlKey ? 0.008 : 0.0016));
     this.zoomAt(this.eventPoint(event), factor);
   }
 
   onPointerDown(event) {
+    if (this.sceneTransition) {
+      this.finishSceneTransition();
+      return;
+    }
     const screen = this.eventPoint(event);
     const world = this.screenToWorld(screen);
     this.canvas.setPointerCapture(event.pointerId);
@@ -297,7 +440,7 @@ export class CanvasView {
         startScreen: screen,
         moved: false,
         pressedNode: node,
-        pressedBadge: this.hitExpandBadge(node, world),
+        pressedBadge: this.hitBadge(world),
       };
       this.requestRender();
       return;
@@ -323,9 +466,10 @@ export class CanvasView {
       this.selectedEdge = null;
       this.actions.canvasClicked();
     }
-    this.gesture = event.shiftKey
-      ? { type: 'marquee', startWorld: world, rect: null }
-      : { type: 'create', startWorld: world, startScreen: screen, rect: null };
+    const wantsCreate = this.tool === 'node' && !event.shiftKey;
+    this.gesture = wantsCreate
+      ? { type: 'create', startWorld: world, startScreen: screen, rect: null }
+      : { type: 'marquee', startWorld: world, rect: null };
     this.requestRender();
   }
 
@@ -409,10 +553,8 @@ export class CanvasView {
     if (gesture.type === 'move') {
       if (gesture.moved) {
         this.actions.moveCommitted();
-      } else if (gesture.pressedBadge && this.hitExpandBadge(gesture.pressedNode, world)) {
-        this.actions.openExpand(gesture.pressedNode);
       } else {
-        this.actions.nodeClicked(gesture.pressedNode);
+        this.dispatchNodePress(gesture, world);
       }
     } else if (gesture.type === 'resize') {
       this.actions.moveCommitted();
@@ -432,10 +574,21 @@ export class CanvasView {
       }
     } else if (gesture.type === 'marquee' && gesture.rect) {
       for (const node of this.model.nodes) {
-        if (rectsIntersect(gesture.rect, node.pos)) this.selection.add(node);
+        if (rectsIntersect(gesture.rect, this.rect(node))) this.selection.add(node);
       }
     }
     this.requestRender();
+  }
+
+  dispatchNodePress(gesture, world) {
+    const badge = this.hitBadge(world);
+    const pressedBadge = gesture.pressedBadge;
+    if (badge && pressedBadge && badge.node === pressedBadge.node && badge.kind === pressedBadge.kind) {
+      if (badge.kind === 'open') this.actions.openExpand(badge.node);
+      else this.actions.toggleExpand(badge.node);
+      return;
+    }
+    this.actions.nodeClicked(gesture.pressedNode);
   }
 
   snapCreateRect(rect) {
@@ -448,6 +601,7 @@ export class CanvasView {
   }
 
   onDoubleClick(event) {
+    if (this.sceneTransition) return;
     const world = this.screenToWorld(this.eventPoint(event));
     if (this.hitNode(world) || this.hitGhost(world)) return;
     const edge = this.hitEdge(world);
@@ -463,7 +617,7 @@ export class CanvasView {
   hitNode(world) {
     for (let index = this.model.nodes.length - 1; index >= 0; index -= 1) {
       const node = this.model.nodes[index];
-      if (rectContains(node.pos, world)) return node;
+      if (rectContains(this.rect(node), world)) return node;
     }
     return null;
   }
@@ -473,7 +627,7 @@ export class CanvasView {
   }
 
   portPositions(node) {
-    const { x, y, w, h } = node.pos;
+    const { x, y, w, h } = this.rect(node);
     return [
       { x: x + w / 2, y },
       { x: x + w, y: y + h / 2 },
@@ -498,7 +652,7 @@ export class CanvasView {
     if (this.selection.size !== 1) return null;
     const [node] = this.selection;
     const hitRadius = 9 / this.view.scale;
-    const { x, y, w, h } = node.pos;
+    const { x, y, w, h } = this.rect(node);
     const corners = [
       { corner: 'nw', x, y },
       { corner: 'ne', x: x + w, y },
@@ -513,14 +667,48 @@ export class CanvasView {
     return null;
   }
 
-  expandBadgeCenter(node) {
-    return { x: node.pos.x + node.pos.w - 16, y: node.pos.y + 15 };
+  // Badge slots run right-to-left from the node's top-right corner. Embedded (inline
+  // expanded) subgraphs only offer the inline toggle: full-page navigation from inside a
+  // frame would skip levels of the breadcrumb trail.
+  nodeBadges(model, node) {
+    if (!model.traits.get(node)?.expand) return [];
+    const rect = this.rectOf(model, node);
+    const slotCenter = (slot) => ({ x: rect.x + rect.w - 16 - slot * BADGE_SLOT_SPACING, y: rect.y + 15 });
+    if (this.expansionLayer?.isOpen(node.id)) {
+      return [{ kind: 'collapse', ...slotCenter(0) }];
+    }
+    if (model.embedded) return [{ kind: 'inline', ...slotCenter(0) }];
+    return [
+      { kind: 'open', ...slotCenter(0) },
+      { kind: 'inline', ...slotCenter(1) },
+    ];
   }
 
-  hitExpandBadge(node, world) {
-    if (!this.model.traits.get(node)?.expand) return false;
-    const center = this.expandBadgeCenter(node);
-    return Math.hypot(world.x - center.x, world.y - center.y) <= 12 / Math.min(this.view.scale, 1);
+  hitBadge(world) {
+    return this.hitBadgeIn(this.model, world, this.view.scale);
+  }
+
+  hitBadgeIn(model, world, effectiveScale) {
+    const hitRadius = BADGE_HIT_RADIUS / Math.min(effectiveScale, 1);
+    for (let index = model.nodes.length - 1; index >= 0; index -= 1) {
+      const node = model.nodes[index];
+      for (const badge of this.nodeBadges(model, node)) {
+        if (Math.hypot(world.x - badge.x, world.y - badge.y) <= hitRadius) {
+          return { kind: badge.kind, node };
+        }
+      }
+      const expansion = model.display?.expansions.get(node);
+      if (expansion && rectContains(expansion.inner, world)) {
+        const transform = expansion.transform;
+        const subWorld = {
+          x: (world.x - transform.tx) / transform.scale,
+          y: (world.y - transform.ty) / transform.scale,
+        };
+        const hit = this.hitBadgeIn(expansion.subModel, subWorld, effectiveScale * transform.scale);
+        if (hit) return hit;
+      }
+    }
+    return null;
   }
 
   hitEdge(world) {
@@ -535,10 +723,11 @@ export class CanvasView {
   }
 
   updateCursor(world) {
-    let cursor = 'default';
+    let cursor = this.tool === 'node' ? 'crosshair' : 'default';
     if (this.spaceDown || this.gesture?.type === 'pan') cursor = 'grab';
     else if (world) {
-      if (this.hitPort(world)) cursor = 'crosshair';
+      if (this.hitBadge(world)) cursor = 'pointer';
+      else if (this.hitPort(world)) cursor = 'crosshair';
       else if (this.hitResizeHandle(world)) cursor = 'nwse-resize';
       else if (this.hitNode(world) || this.hitGhost(world)) cursor = 'move';
     }
@@ -556,35 +745,112 @@ export class CanvasView {
 
   render() {
     const { ctx } = this;
-    const dpr = this.devicePixelRatio;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
+    if (this.sceneTransition) {
+      this.renderSceneTransition(this.sceneTransition);
+      return;
+    }
+
+    const expansionState = this.expansionLayer?.layout(this.model, performance.now()) ?? { animating: false };
+    const dpr = this.devicePixelRatio;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.drawGrid();
+    this.drawGrid(this.view);
 
     const { x, y, scale } = this.view;
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * x, dpr * y);
 
-    this.computeEdgeGeometry();
-    for (const edge of this.model.edges) this.drawEdge(edge);
-    for (const node of this.model.nodes) this.drawNode(node);
-    for (const ghost of this.model.ghosts) this.drawGhost(ghost);
+    this.drawScene(this.model);
     this.drawSelectionDecorations();
     this.drawPorts();
     this.drawGestureOverlay();
 
     this.actions.afterRender?.();
+    if (expansionState.animating) this.requestRender();
   }
 
-  drawGrid() {
+  renderSceneTransition(transition) {
     const { ctx } = this;
-    const spacing = 32 * this.view.scale;
+    const dpr = this.devicePixelRatio;
+    const now = performance.now();
+
+    if (transition.phase === 'hold') {
+      this.expansionLayer?.layout(transition.outgoing.model, now);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      this.drawGrid(transition.outgoing.view);
+      this.drawWorldScene(transition.outgoing.model, transition.outgoing.view, 1);
+      return;
+    }
+
+    const t = Math.min(1, (now - transition.startTime) / transition.duration);
+    const eased = easeInOutCubic(t);
+    const parentView = interpolateView(transition.parentFrom, transition.parentTo, eased, transition.bounds);
+    const childView = childViewLinkedTo(parentView, transition.link);
+    const parentIsIncoming = transition.mode === 'out';
+
+    const parentModel = parentIsIncoming ? transition.incoming.model : transition.outgoing.model;
+    const childModel = parentIsIncoming ? transition.outgoing.model : transition.incoming.model;
+    this.expansionLayer?.layout(parentModel, now);
+    this.expansionLayer?.layout(childModel, now);
+
+    this.view = { ...(parentIsIncoming ? parentView : childView) };
+    const parentAlpha = parentIsIncoming ? eased : 1 - eased;
+    const childAlpha = parentIsIncoming ? 1 - eased : eased;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.drawGrid(this.view);
+    this.drawWorldScene(parentModel, parentView, parentAlpha);
+
+    // The child scene is clipped to the node's on-screen rectangle so the subgraph reads
+    // as living inside the node; by the end of the dive that rectangle exceeds the
+    // viewport and the clip becomes a no-op.
+    const nodeScreen = {
+      x: transition.nodeRect.x * parentView.scale + parentView.x,
+      y: transition.nodeRect.y * parentView.scale + parentView.y,
+      w: transition.nodeRect.w * parentView.scale,
+      h: transition.nodeRect.h * parentView.scale,
+    };
+    this.drawWorldScene(childModel, childView, childAlpha, nodeScreen);
+
+    this.actions.viewChanged?.();
+    this.actions.afterRender?.();
+    if (t >= 1) this.finishSceneTransition();
+    else this.requestRender();
+  }
+
+  drawWorldScene(model, view, alpha, clipScreenRect = null) {
+    if (alpha <= 0.01) return;
+    const { ctx } = this;
+    const dpr = this.devicePixelRatio;
+    ctx.save();
+    if (clipScreenRect) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.beginPath();
+      ctx.rect(clipScreenRect.x, clipScreenRect.y, clipScreenRect.w, clipScreenRect.h);
+      ctx.clip();
+    }
+    ctx.setTransform(dpr * view.scale, 0, 0, dpr * view.scale, dpr * view.x, dpr * view.y);
+    ctx.globalAlpha = alpha;
+    this.drawScene(model);
+    ctx.restore();
+  }
+
+  drawScene(model) {
+    this.computeEdgeGeometry(model);
+    for (const edge of model.edges) this.drawEdge(model, edge);
+    for (const node of model.nodes) this.drawNode(model, node);
+    for (const ghost of model.ghosts) this.drawGhost(ghost, { clickable: !model.embedded });
+  }
+
+  drawGrid(view) {
+    const { ctx } = this;
+    const spacing = 32 * view.scale;
     if (spacing < 9) return;
     const bounds = this.canvas.getBoundingClientRect();
     ctx.fillStyle = COLORS.grid;
-    const offsetX = ((this.view.x % spacing) + spacing) % spacing;
-    const offsetY = ((this.view.y % spacing) + spacing) % spacing;
+    const offsetX = ((view.x % spacing) + spacing) % spacing;
+    const offsetY = ((view.y % spacing) + spacing) % spacing;
     for (let gridX = offsetX; gridX < bounds.width; gridX += spacing) {
       for (let gridY = offsetY; gridY < bounds.height; gridY += spacing) {
         ctx.fillRect(gridX - 0.75, gridY - 0.75, 1.5, 1.5);
@@ -592,23 +858,25 @@ export class CanvasView {
     }
   }
 
-  computeEdgeGeometry() {
+  computeEdgeGeometry(model) {
     const pairCounts = new Map();
-    for (const edge of this.model.edges) {
+    for (const edge of model.edges) {
       if (!edge.to?.pos || !edge.from?.pos) {
         edge.geometry = null;
         continue;
       }
       if (edge.to === edge.from) {
-        edge.geometry = this.selfLoopGeometry(edge.from);
+        edge.geometry = this.selfLoopGeometry(model, edge.from);
         continue;
       }
-      const pairKey = [edge.from.name, edge.to.name].sort().join(' ');
+      const fromRect = this.rectOf(model, edge.from);
+      const toRect = edge.to.ghost ? edge.to.pos : this.rectOf(model, edge.to);
+      const pairKey = [edge.from.name, edge.to.name].sort().join(' ');
       const occurrence = pairCounts.get(pairKey) ?? 0;
       pairCounts.set(pairKey, occurrence + 1);
 
-      const a = rectBorderPointToward(edge.from.pos, rectCenter(edge.to.pos));
-      const b = rectBorderPointToward(edge.to.pos, rectCenter(edge.from.pos));
+      const a = rectBorderPointToward(fromRect, rectCenter(toRect));
+      const b = rectBorderPointToward(toRect, rectCenter(fromRect));
       const length = Math.hypot(b.x - a.x, b.y - a.y) || 1;
       const normal = { x: -(b.y - a.y) / length, y: (b.x - a.x) / length };
       const bowMagnitude = (Math.min(34, length * 0.1) + Math.floor(occurrence / 2) * 26)
@@ -621,8 +889,8 @@ export class CanvasView {
     }
   }
 
-  selfLoopGeometry(node) {
-    const { x, y, w } = node.pos;
+  selfLoopGeometry(model, node) {
+    const { x, y, w } = this.rectOf(model, node);
     const a = { x: x + w - 30, y };
     const b = { x: x + w, y: y + 24 };
     const mid = { x: x + w + 42, y: y - 40 };
@@ -634,7 +902,7 @@ export class CanvasView {
     return edge.kind === 'error' ? COLORS.error : COLORS.edge;
   }
 
-  drawEdge(edge) {
+  drawEdge(model, edge) {
     const geometry = edge.geometry;
     if (!geometry) return;
     const { ctx } = this;
@@ -723,12 +991,18 @@ export class CanvasView {
     return COLORS.nodeStroke;
   }
 
-  drawNode(node) {
-    const traits = this.model.traits.get(node);
-    const { x, y, w, h } = node.pos;
+  drawNode(model, node) {
+    const expansion = model.display?.expansions.get(node);
+    if (expansion) {
+      this.drawExpandedNode(model, node, expansion);
+      return;
+    }
+
+    const traits = model.traits.get(node);
+    const rect = this.rectOf(model, node);
     const stroke = this.nodeStrokeColor(node, traits);
 
-    this.rough.rectangle(x, y, w, h, {
+    this.rough.rectangle(rect.x, rect.y, rect.w, rect.h, {
       seed: seedFrom(node.id ?? node.name),
       roughness: 1.4,
       bowing: 0.7,
@@ -738,13 +1012,58 @@ export class CanvasView {
       fillStyle: 'solid',
     });
 
-    this.drawNodeText(node);
-    this.drawNodeBadges(node, traits, stroke);
+    this.drawNodeText(node, rect);
+    this.drawTraitBadges(node, traits, rect);
+    this.drawExpandBadges(model, node);
   }
 
-  drawNodeText(node) {
+  drawExpandedNode(model, node, expansion) {
     const { ctx } = this;
-    const { x, y, w, h } = node.pos;
+    const { frame, inner, transform, subModel } = expansion;
+
+    this.rough.rectangle(frame.x, frame.y, frame.w, frame.h, {
+      seed: seedFrom(node.id ?? node.name),
+      roughness: 1.1,
+      bowing: 0.5,
+      stroke: COLORS.expandStroke,
+      strokeWidth: 1.6,
+      fill: COLORS.nodeFill,
+      fillStyle: 'solid',
+    });
+
+    ctx.font = `600 13px ${HAND_FONT}`;
+    ctx.fillStyle = COLORS.expandStroke;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(node.name, frame.x + 12, frame.y + 16, frame.w - 64);
+
+    if (expansion.alpha > 0.02) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(inner.x, inner.y, inner.w, inner.h);
+      ctx.clip();
+      ctx.globalAlpha *= expansion.alpha;
+      ctx.translate(transform.tx, transform.ty);
+      ctx.scale(transform.scale, transform.scale);
+      if (subModel.nodes.length === 0) this.drawEmptySubgraphHint(subModel);
+      else this.drawScene(subModel);
+      ctx.restore();
+    }
+    this.drawExpandBadges(model, node);
+  }
+
+  drawEmptySubgraphHint(subModel) {
+    const { ctx } = this;
+    ctx.font = `13px ${HAND_FONT}`;
+    ctx.fillStyle = COLORS.muted;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('empty subgraph', 160, 90);
+  }
+
+  drawNodeText(node, rect) {
+    const { ctx } = this;
+    const { x, y, w, h } = rect;
     const maxWidth = w - 26;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -801,9 +1120,9 @@ export class CanvasView {
     return lines;
   }
 
-  drawNodeBadges(node, traits, stroke) {
+  drawTraitBadges(node, traits, rect) {
     const { ctx } = this;
-    const { x, y, w, h } = node.pos;
+    const { x, y, w, h } = rect;
     ctx.textBaseline = 'middle';
 
     if (traits?.entry) {
@@ -811,19 +1130,6 @@ export class CanvasView {
       ctx.fillStyle = COLORS.entryStroke;
       ctx.textAlign = 'left';
       ctx.fillText('▶', x + 8, y + 14);
-    }
-    if (traits?.expand) {
-      const center = this.expandBadgeCenter(node);
-      this.rough.circle(center.x, center.y, 20, {
-        seed: seedFrom(`${node.id}-expand`),
-        stroke: COLORS.expandStroke,
-        strokeWidth: 1.3,
-        roughness: 0.9,
-      });
-      ctx.font = `12px ${HAND_FONT}`;
-      ctx.fillStyle = COLORS.expandStroke;
-      ctx.textAlign = 'center';
-      ctx.fillText('⤢', center.x, center.y + 1);
     }
     if (traits?.hasErrorHandler) {
       ctx.font = `12px ${HAND_FONT}`;
@@ -839,7 +1145,24 @@ export class CanvasView {
     }
   }
 
-  drawGhost(ghost) {
+  drawExpandBadges(model, node) {
+    const { ctx } = this;
+    for (const badge of this.nodeBadges(model, node)) {
+      this.rough.circle(badge.x, badge.y, 20, {
+        seed: seedFrom(`${node.id}-${badge.kind}`),
+        stroke: COLORS.expandStroke,
+        strokeWidth: 1.3,
+        roughness: 0.9,
+      });
+      ctx.font = `12px ${HAND_FONT}`;
+      ctx.fillStyle = COLORS.expandStroke;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(BADGE_SYMBOLS[badge.kind], badge.x, badge.y + 1);
+    }
+  }
+
+  drawGhost(ghost, { clickable = true } = {}) {
     const { ctx } = this;
     const { x, y, w, h } = ghost.pos;
     ctx.save();
@@ -853,8 +1176,10 @@ export class CanvasView {
     ctx.font = `600 14px ${HAND_FONT}`;
     ctx.fillStyle = COLORS.ghost;
     ctx.fillText(ghost.name, x + w / 2, y + h / 2 - 8, w - 20);
-    ctx.font = `10.5px ${HAND_FONT}`;
-    ctx.fillText('click to create', x + w / 2, y + h / 2 + 14, w - 20);
+    if (clickable) {
+      ctx.font = `10.5px ${HAND_FONT}`;
+      ctx.fillText('click to create', x + w / 2, y + h / 2 + 14, w - 20);
+    }
   }
 
   drawSelectionDecorations() {
@@ -865,7 +1190,7 @@ export class CanvasView {
     ctx.lineWidth = 1.4 / this.view.scale;
     ctx.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
     for (const node of this.selection) {
-      const { x, y, w, h } = node.pos;
+      const { x, y, w, h } = this.rect(node);
       ctx.strokeRect(x - inflate, y - inflate, w + inflate * 2, h + inflate * 2);
     }
     ctx.restore();
@@ -873,7 +1198,7 @@ export class CanvasView {
     if (this.selection.size === 1) {
       const [node] = this.selection;
       const handleSize = 8 / this.view.scale;
-      const { x, y, w, h } = node.pos;
+      const { x, y, w, h } = this.rect(node);
       ctx.fillStyle = COLORS.select;
       for (const corner of [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]) {
         ctx.fillRect(corner[0] - handleSize / 2, corner[1] - handleSize / 2, handleSize, handleSize);
@@ -919,9 +1244,9 @@ export class CanvasView {
       ctx.lineWidth = 1 / this.view.scale;
       ctx.strokeRect(gesture.rect.x, gesture.rect.y, gesture.rect.w, gesture.rect.h);
     } else if (gesture.type === 'edge') {
-      const start = rectBorderPointToward(gesture.from.pos, gesture.toWorld);
+      const start = rectBorderPointToward(this.rect(gesture.from), gesture.toWorld);
       const end = gesture.hoverTarget
-        ? rectBorderPointToward(gesture.hoverTarget.pos, rectCenter(gesture.from.pos))
+        ? rectBorderPointToward(this.rect(gesture.hoverTarget), rectCenter(this.rect(gesture.from)))
         : gesture.toWorld;
       ctx.save();
       ctx.strokeStyle = COLORS.select;
@@ -934,7 +1259,7 @@ export class CanvasView {
       ctx.restore();
       this.drawArrowhead(start, end, COLORS.select);
       if (gesture.hoverTarget) {
-        const { x, y, w, h } = gesture.hoverTarget.pos;
+        const { x, y, w, h } = this.rect(gesture.hoverTarget);
         ctx.strokeStyle = COLORS.select;
         ctx.lineWidth = 2 / this.view.scale;
         ctx.strokeRect(x - 3, y - 3, w + 6, h + 6);
@@ -945,6 +1270,66 @@ export class CanvasView {
 
 function isTypingTarget(element) {
   return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
+}
+
+function viewCenterWorld(view, bounds) {
+  return {
+    x: (bounds.width / 2 - view.x) / view.scale,
+    y: (bounds.height / 2 - view.y) / view.scale,
+  };
+}
+
+// Log-scale interpolation of the camera: the zoom rate feels constant and the world point
+// at the viewport center travels a straight line.
+function interpolateView(fromView, toView, t, bounds) {
+  const scale = Math.exp(lerp(Math.log(fromView.scale), Math.log(toView.scale), t));
+  const fromCenter = viewCenterWorld(fromView, bounds);
+  const toCenter = viewCenterWorld(toView, bounds);
+  const centerX = lerp(fromCenter.x, toCenter.x, t);
+  const centerY = lerp(fromCenter.y, toCenter.y, t);
+  return { scale, x: bounds.width / 2 - centerX * scale, y: bounds.height / 2 - centerY * scale };
+}
+
+// The camera link between the two scenes of a zoom transition: the child camera is the
+// parent camera divided by `growth`, positioned so the child's content center sits exactly
+// where the node's center is on screen. The two functions are inverses of each other.
+function childViewLinkedTo(parentView, link) {
+  const scale = parentView.scale / link.growth;
+  const nodeCenterScreen = {
+    x: link.nodeCenter.x * parentView.scale + parentView.x,
+    y: link.nodeCenter.y * parentView.scale + parentView.y,
+  };
+  return {
+    scale,
+    x: nodeCenterScreen.x - link.contentCenter.x * scale,
+    y: nodeCenterScreen.y - link.contentCenter.y * scale,
+  };
+}
+
+function parentViewLinkedTo(childView, link) {
+  const scale = childView.scale * link.growth;
+  const contentCenterScreen = {
+    x: link.contentCenter.x * childView.scale + childView.x,
+    y: link.contentCenter.y * childView.scale + childView.y,
+  };
+  return {
+    scale,
+    x: contentCenterScreen.x - link.nodeCenter.x * scale,
+    y: contentCenterScreen.y - link.nodeCenter.y * scale,
+  };
+}
+
+function contentBoundsOf(model) {
+  const rects = [
+    ...model.nodes.map((node) => model.display?.rects.get(node) ?? node.pos),
+    ...model.ghosts.map((ghost) => ghost.pos),
+  ].filter(Boolean);
+  if (rects.length === 0) return { x: 0, y: 0, w: 400, h: 300 };
+  const minX = Math.min(...rects.map((rect) => rect.x));
+  const minY = Math.min(...rects.map((rect) => rect.y));
+  const maxX = Math.max(...rects.map((rect) => rect.x + rect.w));
+  const maxY = Math.max(...rects.map((rect) => rect.y + rect.h));
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
 function unquotedDescription(node) {

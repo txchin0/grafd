@@ -5,14 +5,14 @@ description: "Handles credential validation and token generation"
 
 Validate Input
   id: 5e7a9c1b-3d5f-4e7a-9c1b-3d5f7a9c1e3b
-  pos: 60, 220, 200, 88
+  pos: 80, 232, 200, 88
   description: "Check email format and password length"
   -> Authenticate : "input valid"
   -> Return Validation Error : "input invalid"
 
 Authenticate
   id: 8b0d2f4a-6c8e-4f0b-a2d4-f6a8c0e2b4d6
-  pos: 350, 212, 200, 96
+  pos: 368, 224, 200, 96
   description: "Calls auth API with credentials"
   on_error: -> Return Auth Error
   -> Generate Token : "credentials valid"
@@ -20,7 +20,7 @@ Authenticate
 
 Generate Token
   id: 0f2b4d6c-8e0a-4a2c-b4d6-e8f0a2c4e6b8
-  pos: 650, 130, 210, 88
+  pos: 672, 136, 210, 88
   description: "Creates JWT and stores in secure storage"
   updates: [Auth]
   -> Return Success
@@ -31,8 +31,8 @@ Return Success
 
 Return Validation Error
   id: 4f6a8c0d-2e4a-4c6e-a8b0-d2f4a6c8e0b2
-  pos: 360, 440, 190, 72
+  pos: 376, 448, 190, 72
 
 Return Auth Error
   id: 6a8c0e2f-4b6c-4d8a-b0c2-e4a6c8e0b2d4
-  pos: 660, 350, 190, 72
+  pos: 680, 360, 190, 72

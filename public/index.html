@@ -16,6 +16,7 @@
       </header>
       <ul id="file-list"></ul>
       <button id="new-file-button" type="button">+ New flow</button>
+      <input id="new-file-input" class="hidden" placeholder="path/name.flow" spellcheck="false" autocomplete="off" />
       <footer id="sidebar-footer">
         <button id="help-toggle" type="button">? Shortcuts</button>
         <span id="connection-dot" title="Server connection"></span>
@@ -25,11 +26,17 @@
     <main id="workspace">
       <div id="topbar">
         <nav id="breadcrumb"></nav>
-        <div id="view-controls">
-          <button id="zoom-out-button" type="button" title="Zoom out">−</button>
-          <button id="zoom-level-button" type="button" title="Reset zoom">100%</button>
-          <button id="zoom-in-button" type="button" title="Zoom in">+</button>
-          <button id="zoom-fit-button" type="button" title="Zoom to fit (Ctrl+0)">⛶</button>
+        <div id="topbar-actions">
+          <div id="toolbar">
+            <button id="tool-select-button" type="button" title="Select tool (V) — drag to multi-select">⬚ Select</button>
+            <button id="tool-node-button" type="button" title="Add-node tool (N) — drag to create a node">▢ Node</button>
+          </div>
+          <div id="view-controls">
+            <button id="zoom-out-button" type="button" title="Zoom out">−</button>
+            <button id="zoom-level-button" type="button" title="Reset zoom">100%</button>
+            <button id="zoom-in-button" type="button" title="Zoom in">+</button>
+            <button id="zoom-fit-button" type="button" title="Zoom to fit (Ctrl+0)">⛶</button>
+          </div>
         </div>
       </div>
 
@@ -53,6 +60,7 @@
           </details>
           <div class="editor-actions">
             <button id="ne-open-expand" type="button" class="quiet-button hidden">Open ⤢</button>
+            <button id="ne-inline-expand" type="button" class="quiet-button hidden">Expand ⊞</button>
             <span class="spacer"></span>
             <button id="ne-delete" type="button" class="danger-button">Delete</button>
           </div>
@@ -79,13 +87,15 @@
         <div id="help-overlay" class="hidden">
           <h2>Shortcuts</h2>
           <table>
-            <tr><td>Drag empty canvas</td><td>create a node</td></tr>
+            <tr><td>V / N</td><td>switch between Select and Add-node tools</td></tr>
+            <tr><td>Drag empty canvas</td><td>multi-select (Select tool) / create a node (Add-node tool)</td></tr>
             <tr><td>Click a node</td><td>edit title &amp; description</td></tr>
             <tr><td>Drag a node / its corners</td><td>move / resize</td></tr>
             <tr><td>Hover a node, drag a port ○</td><td>draw an edge (drop on empty space to spawn a node)</td></tr>
             <tr><td>Double-click an edge</td><td>edit its label</td></tr>
             <tr><td>Double-click empty canvas</td><td>quick-create a node</td></tr>
-            <tr><td>Click ⤢ badge</td><td>open a node's expansion</td></tr>
+            <tr><td>Click ⤢ badge</td><td>open a node's subgraph (breadcrumb navigates back)</td></tr>
+            <tr><td>Click ⊞ / ⊟ badge</td><td>expand / collapse the subgraph in place</td></tr>
             <tr><td>Shift + drag / click</td><td>multi-select</td></tr>
             <tr><td>Delete</td><td>delete selection</td></tr>
             <tr><td>Ctrl+Z / Ctrl+Y</td><td>undo / redo</td></tr>

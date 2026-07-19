@@ -19,6 +19,7 @@ export function createEditors(context) {
     updates: document.getElementById('ne-updates'),
     entrypoint: document.getElementById('ne-entrypoint'),
     openExpand: document.getElementById('ne-open-expand'),
+    inlineExpand: document.getElementById('ne-inline-expand'),
     deleteNode: document.getElementById('ne-delete'),
     edgeEditor: document.getElementById('edge-editor'),
     edgeLabel: document.getElementById('ee-label'),
@@ -55,7 +56,9 @@ export function createEditors(context) {
     setUnlessFocused(elements.onError, getProp(node, 'on_error') ?? '');
     setUnlessFocused(elements.updates, parseListValue(getProp(node, 'updates')).join(', '));
     elements.entrypoint.checked = getProp(node, 'entrypoint') === 'true';
-    elements.openExpand.classList.toggle('hidden', !getProp(node, 'expand'));
+    const lacksExpand = !getProp(node, 'expand');
+    elements.openExpand.classList.toggle('hidden', lacksExpand);
+    elements.inlineExpand.classList.toggle('hidden', lacksExpand);
   }
 
   function setUnlessFocused(field, value) {
@@ -113,7 +116,7 @@ export function createEditors(context) {
 
   function reposition() {
     const node = editingNode();
-    if (node) positionBesideRect(elements.nodeEditor, context.view.worldRectToScreen(node.pos));
+    if (node) positionBesideRect(elements.nodeEditor, context.view.worldRectToScreen(context.view.rect(node)));
     const edge = editingEdge();
     if (edge?.geometry) {
       const mid = context.view.worldToScreen(edge.geometry.mid);
@@ -197,6 +200,11 @@ export function createEditors(context) {
   elements.openExpand.addEventListener('click', () => {
     const node = editingNode();
     if (node) context.openExpand(node);
+  });
+
+  elements.inlineExpand.addEventListener('click', () => {
+    const node = editingNode();
+    if (node) context.toggleExpand(node);
   });
 
   elements.deleteNode.addEventListener('click', () => {

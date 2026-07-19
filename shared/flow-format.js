@@ -259,6 +259,18 @@ export function parseExpandLink(value) {
   return { label: match[1], path: match[2] };
 }
 
+// Expand-link paths are relative to the .flow file that contains them; resolves against the
+// containing file's directory using forward-slash portable paths.
+export function resolveLinkPath(containingFilePath, relativePath) {
+  const segments = containingFilePath ? containingFilePath.split('/').slice(0, -1) : [];
+  for (const segment of relativePath.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') segments.pop();
+    else segments.push(segment);
+  }
+  return segments.join('/');
+}
+
 // Node names may not contain ": " (spec §3.2) and the format is line-based, so names are
 // collapsed to a single line with that sequence rewritten.
 export function sanitizeName(rawName) {

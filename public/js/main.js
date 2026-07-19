@@ -1,15 +1,21 @@
 // App shell: file list, WebSocket sync with the server, undo/redo, keyboard shortcuts, and
-// the glue between canvas gestures (canvas-view.js), document mutations (flow-doc.js), and
-// the floating editors (editors.js).
+// the glue between canvas gestures (canvas-view.js), document mutations (flow-doc.js), the
+// floating editors (editors.js), and inline subgraph expansion (expansion.js).
 //
 // Sync model: the serialized file text is the source of truth. Every mutation edits the
 // parsed AST, re-renders immediately, and writes the re-serialized text to the server
 // (debounced for typing, immediate for drags). File changes on disk arrive as `file`
 // messages and replace the AST wholesale; selection and open editors survive via node UUIDs.
+//
+// Navigation model: opening a node's subgraph (its ⤢ badge) pushes the current location
+// onto a trail and plays a zoom-into-the-node transition, so the breadcrumb reads like a
+// path (login / dashboard.flow). Trail crumbs animate back out; picking a file from the
+// sidebar snaps and clears the trail.
 
-import { parseFlow, serializeFlow, getPreambleField, setPreambleField, getProp, quoteValue, unquote, collapseToSingleLine, parseListValue, formatListValue, parseExpandLink, sanitizeName } from '/shared/flow-format.js';
+import { parseFlow, serializeFlow, getPreambleField, setPreambleField, getProp, quoteValue, unquote, collapseToSingleLine, parseListValue, formatListValue, parseExpandLink, resolveLinkPath, sanitizeName } from '/shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import { CanvasView } from './canvas-view.js';
+import { ExpansionLayer } from './expansion.js';
 import { createEditors } from './editors.js';
 
 const COMMIT_DEBOUNCE_MS = 300;
@@ -24,6 +30,8 @@ const state = {
   model: null,
 };
 
+const navigation = { trail: [], inProgress: false };
+
 const undoStack = [];
 const redoStack = [];
 let commitTimer = null;
@@ -33,11 +41,14 @@ const pendingWrites = new Map();
 const elements = {
   fileList: document.getElementById('file-list'),
   newFileButton: document.getElementById('new-file-button'),
+  newFileInput: document.getElementById('new-file-input'),
   breadcrumb: document.getElementById('breadcrumb'),
   emptyState: document.getElementById('empty-state'),
   connectionDot: document.getElementById('connection-dot'),
   helpToggle: document.getElementById('help-toggle'),
   helpOverlay: document.getElementById('help-overlay'),
+  toolSelectButton: document.getElementById('tool-select-button'),
+  toolNodeButton: document.getElementById('tool-node-button'),
   zoomIn: document.getElementById('zoom-in-button'),
   zoomOut: document.getElementById('zoom-out-button'),
   zoomLevel: document.getElementById('zoom-level-button'),
@@ -58,6 +69,9 @@ function scopeItemsNow() {
 function refresh() {
   if (!state.doc) return;
   state.model = FlowDoc.buildModel(state.doc, state.scope);
+  state.model.sourceDoc = state.doc;
+  state.model.sourcePath = state.path;
+  expansions.invalidateSubModels();
   view.setModel(state.model);
   renderBreadcrumb();
   renderGraphPanel();
@@ -129,6 +143,9 @@ function connectSocket() {
         state.files.sort();
         renderFileList();
       }
+      if (expansions.watchesPath(message.path)) {
+        expansions.adoptExternalText(message.path, message.text);
+      }
       if (message.path === state.path && message.text !== state.text) {
         adoptExternalText(message.text);
       }
@@ -156,11 +173,11 @@ function adoptExternalText(text) {
   refresh();
 }
 
-async function openFile(path, presetText = null) {
+async function openFile(path, { presetText = null, fit = true } = {}) {
   let text = presetText;
   if (text == null) {
     const response = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
-    if (!response.ok) return;
+    if (!response.ok) return false;
     text = (await response.json()).text;
   }
   state.path = path;
@@ -175,16 +192,17 @@ async function openFile(path, presetText = null) {
   elements.emptyState.classList.add('hidden');
   location.hash = path;
   refresh();
-  view.fitToContent();
+  if (fit) view.fitToContent();
   renderFileList();
+  return true;
 }
 
-function setScope(scopeName) {
+function setScope(scopeName, { fit = true } = {}) {
   state.scope = scopeName;
   editors.closeAll();
   view.clearSelection();
   refresh();
-  view.fitToContent();
+  if (fit) view.fitToContent();
 }
 
 function renderFileList() {
@@ -194,7 +212,10 @@ function renderFileList() {
       item.textContent = path;
       item.title = path;
       item.classList.toggle('active', path === state.path);
-      item.addEventListener('click', () => openFile(path));
+      item.addEventListener('click', () => {
+        navigation.trail.length = 0;
+        openFile(path);
+      });
       return item;
     }),
   );
@@ -202,22 +223,31 @@ function renderFileList() {
 
 function renderBreadcrumb() {
   const crumbs = [];
-  const fileCrumb = document.createElement('span');
-  fileCrumb.className = 'crumb' + (state.scope ? '' : ' current');
-  fileCrumb.textContent = state.path ?? '';
-  if (state.scope) fileCrumb.addEventListener('click', () => setScope(null));
-  crumbs.push(fileCrumb);
-
-  if (state.scope) {
-    const separator = document.createElement('span');
-    separator.className = 'separator';
-    separator.textContent = '›';
-    const scopeCrumb = document.createElement('span');
-    scopeCrumb.className = 'crumb current';
-    scopeCrumb.textContent = `graph: ${state.scope}`;
-    crumbs.push(separator, scopeCrumb);
-  }
+  navigation.trail.forEach((entry, index) => {
+    const crumb = document.createElement('span');
+    crumb.className = 'crumb';
+    crumb.textContent = crumbLabel(entry);
+    crumb.title = entry.scope ? `${entry.path} › ${entry.scope}` : entry.path;
+    crumb.addEventListener('click', () => navigateBackTo(index));
+    crumbs.push(crumb, breadcrumbSeparator());
+  });
+  const current = document.createElement('span');
+  current.className = 'crumb current';
+  current.textContent = state.scope ? `${state.path} › ${state.scope}` : (state.path ?? '');
+  crumbs.push(current);
   elements.breadcrumb.replaceChildren(...crumbs);
+}
+
+function crumbLabel(entry) {
+  if (entry.scope) return entry.scope;
+  return entry.path.split('/').pop().replace(/\.flow$/, '');
+}
+
+function breadcrumbSeparator() {
+  const separator = document.createElement('span');
+  separator.className = 'separator';
+  separator.textContent = '/';
+  return separator;
 }
 
 function renderGraphPanel() {
@@ -273,48 +303,111 @@ function deleteSelection() {
   }
 }
 
-function openExpand(node) {
+// Opening a subgraph plays a seamless dive-in: the outgoing scene is held on screen while
+// the destination loads, then both scenes render together — the subgraph riding inside the
+// node's rectangle as the camera zooms through it, crossfading as it grows (see
+// canvas-view's zoom transition).
+async function openExpand(node) {
   const expandValue = getProp(node, 'expand');
-  if (!expandValue) return;
+  if (!expandValue || navigation.inProgress) return;
+  navigation.inProgress = true;
+  try {
+    editors.closeAll();
+    const origin = { path: state.path, scope: state.scope, nodeId: node.id, view: { ...view.view } };
+    const nodeRect = { ...view.rect(node) };
+    view.beginSceneHold(state.model, view.view);
 
-  const link = parseExpandLink(expandValue);
-  if (link) {
-    openExternalFlow(link);
-    return;
+    const link = parseExpandLink(expandValue);
+    let swapped = true;
+    if (link) {
+      swapped = await openExternalFlow(link);
+    } else {
+      if (!FlowDoc.graphBlockNames(state.doc).includes(expandValue)) {
+        mutate(() => state.doc.items.push({ kind: 'graph', name: expandValue, items: [] }), { commit: 'now' });
+      }
+      setScope(expandValue, { fit: false });
+    }
+    if (!swapped) {
+      view.releaseSceneHold();
+      view.setViewNow(origin.view);
+      return;
+    }
+
+    navigation.trail.push(origin);
+    renderBreadcrumb();
+    await view.zoomDiveIn({ nodeRect });
+  } finally {
+    navigation.inProgress = false;
   }
-  if (!FlowDoc.graphBlockNames(state.doc).includes(expandValue)) {
-    mutate(() => state.doc.items.push({ kind: 'graph', name: expandValue, items: [] }), { commit: 'now' });
-  }
-  setScope(expandValue);
 }
 
-function openExternalFlow(link) {
-  const resolved = resolveRelativePath(directoryOf(state.path), link.path);
+async function openExternalFlow(link) {
+  const resolved = resolveLinkPath(state.path, link.path);
   if (state.files.includes(resolved)) {
-    openFile(resolved);
-    return;
+    return openFile(resolved, { fit: false });
   }
   const graphName = sanitizeName(link.label) || resolved.split('/').pop().replace(/\.flow$/, '');
   const text = `---\nname: ${graphName}\n---\n`;
   sendWrite(resolved, text);
   state.files.push(resolved);
   state.files.sort();
-  openFile(resolved, text);
+  return openFile(resolved, { presetText: text, fit: false });
 }
 
-function directoryOf(path) {
-  const lastSlash = path.lastIndexOf('/');
-  return lastSlash === -1 ? '' : path.slice(0, lastSlash);
-}
-
-function resolveRelativePath(baseDirectory, relativePath) {
-  const segments = baseDirectory ? baseDirectory.split('/') : [];
-  for (const segment of relativePath.split('/')) {
-    if (segment === '' || segment === '.') continue;
-    if (segment === '..') segments.pop();
-    else segments.push(segment);
+// Stepping back one crumb reverses the dive: the subgraph shrinks back into the node it
+// came from while the parent graph fades in around it, ending exactly on the camera we
+// left. Jumping several crumbs at once just snaps.
+async function navigateBackTo(index) {
+  if (navigation.inProgress || index >= navigation.trail.length) return;
+  navigation.inProgress = true;
+  try {
+    editors.closeAll();
+    const entry = navigation.trail[index];
+    const singleStep = index === navigation.trail.length - 1;
+    navigation.trail.length = index;
+    if (!singleStep) {
+      await snapToEntry(entry);
+      return;
+    }
+    view.beginSceneHold(state.model, view.view);
+    if (entry.path !== state.path) {
+      const opened = await openFile(entry.path, { fit: false });
+      if (!opened) {
+        view.releaseSceneHold();
+        renderBreadcrumb();
+        return;
+      }
+    }
+    if (state.scope !== entry.scope) setScope(entry.scope, { fit: false });
+    renderBreadcrumb();
+    const enteredNode = FlowDoc.findNodeById(state.doc, entry.nodeId);
+    if (!enteredNode?.pos) {
+      view.releaseSceneHold();
+      view.setViewNow(entry.view);
+      return;
+    }
+    await view.zoomBackOut({ nodeRect: { ...enteredNode.pos }, targetView: entry.view });
+  } finally {
+    navigation.inProgress = false;
   }
-  return segments.join('/');
+}
+
+async function snapToEntry(entry) {
+  if (entry.path !== state.path) {
+    const opened = await openFile(entry.path, { fit: false });
+    if (!opened) {
+      renderBreadcrumb();
+      return;
+    }
+  }
+  if (state.scope !== entry.scope) setScope(entry.scope, { fit: false });
+  renderBreadcrumb();
+  view.setViewNow(entry.view);
+}
+
+function toggleInlineExpansion(node) {
+  if (!getProp(node, 'expand')) return;
+  expansions.toggle(node);
 }
 
 function completeEdge(fromNode, targetNode, worldPoint, extra) {
@@ -360,6 +453,7 @@ const view = new CanvasView(document.getElementById('canvas'), {
   completeEdge,
   editEdge: (edge) => editors.openEdgeEditor(edge),
   openExpand,
+  toggleExpand: toggleInlineExpansion,
   materializeGhost: (ghost) => {
     if (!state.doc) return;
     const node = createNodeAndEdit(ghost.pos, ghost.name);
@@ -372,6 +466,9 @@ const view = new CanvasView(document.getElementById('canvas'), {
   },
 });
 
+const expansions = new ExpansionLayer({ onNeedsRender: () => view.requestRender() });
+view.expansionLayer = expansions;
+
 const editors = createEditors({
   view,
   getDoc: () => state.doc,
@@ -379,6 +476,7 @@ const editors = createEditors({
   getScopeItems: scopeItemsNow,
   apply: (mutation) => mutate(mutation),
   openExpand,
+  toggleExpand: toggleInlineExpansion,
   deleteNodes: deleteNodesAction,
 });
 
@@ -423,29 +521,61 @@ function wireGraphPanel() {
   });
 }
 
+function setTool(tool) {
+  view.setTool(tool);
+  elements.toolSelectButton.classList.toggle('active', tool === 'select');
+  elements.toolNodeButton.classList.toggle('active', tool === 'node');
+}
+
 function wireViewControls() {
+  elements.toolSelectButton.addEventListener('click', () => setTool('select'));
+  elements.toolNodeButton.addEventListener('click', () => setTool('node'));
   elements.zoomIn.addEventListener('click', () => view.setZoom(view.view.scale * 1.2));
   elements.zoomOut.addEventListener('click', () => view.setZoom(view.view.scale / 1.2));
   elements.zoomLevel.addEventListener('click', () => view.setZoom(1));
   elements.zoomFit.addEventListener('click', () => view.fitToContent());
 }
 
-function wireNewFileButton() {
-  elements.newFileButton.addEventListener('click', () => {
-    const suggested = `untitled-${state.files.length + 1}.flow`;
-    let name = window.prompt('New flow file name', suggested);
-    if (!name) return;
-    name = name.trim().replace(/\\/g, '/');
-    if (!name.endsWith('.flow')) name += '.flow';
-    const graphName = name.split('/').pop().replace(/\.flow$/, '');
-    const text = `---\nname: ${graphName}\n---\n`;
-    sendWrite(name, text);
-    if (!state.files.includes(name)) {
-      state.files.push(name);
-      state.files.sort();
+// An inline input instead of window.prompt: prompt dialogs are suppressed in several
+// embedded browser hosts, which made the button appear dead.
+function wireNewFileForm() {
+  const showInput = () => {
+    elements.newFileButton.classList.add('hidden');
+    elements.newFileInput.classList.remove('hidden');
+    elements.newFileInput.value = `untitled-${state.files.length + 1}.flow`;
+    elements.newFileInput.focus();
+    elements.newFileInput.select();
+  };
+  const hideInput = () => {
+    elements.newFileInput.classList.add('hidden');
+    elements.newFileButton.classList.remove('hidden');
+  };
+  elements.newFileButton.addEventListener('click', showInput);
+  elements.newFileInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      createFlowFile(elements.newFileInput.value);
+      hideInput();
+    } else if (event.key === 'Escape') {
+      hideInput();
     }
-    openFile(name, text);
+    event.stopPropagation();
   });
+  elements.newFileInput.addEventListener('blur', hideInput);
+}
+
+function createFlowFile(rawName) {
+  let name = rawName.trim().replace(/\\/g, '/');
+  if (!name) return;
+  if (!name.endsWith('.flow')) name += '.flow';
+  const graphName = name.split('/').pop().replace(/\.flow$/, '');
+  const text = `---\nname: ${graphName}\n---\n`;
+  sendWrite(name, text);
+  if (!state.files.includes(name)) {
+    state.files.push(name);
+    state.files.sort();
+  }
+  navigation.trail.length = 0;
+  openFile(name, { presetText: text });
 }
 
 function wireHelp() {
@@ -483,6 +613,10 @@ function wireKeyboard() {
     } else if (ctrl && event.key === '-') {
       event.preventDefault();
       view.setZoom(view.view.scale / 1.2);
+    } else if (!ctrl && event.key.toLowerCase() === 'v') {
+      setTool('select');
+    } else if (!ctrl && event.key.toLowerCase() === 'n') {
+      setTool('node');
     } else if (event.key === 'Escape') {
       editors.closeAll();
       view.clearSelection();
@@ -496,10 +630,11 @@ function wireKeyboard() {
 async function boot() {
   wireGraphPanel();
   wireViewControls();
-  wireNewFileButton();
+  wireNewFileForm();
   wireHelp();
   wireKeyboard();
   connectSocket();
+  setTool('select');
 
   const response = await fetch('/api/files');
   state.files = (await response.json()).files;

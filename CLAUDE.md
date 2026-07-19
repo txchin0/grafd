@@ -25,7 +25,11 @@ used by both the server and the browser.
 - `public/js/flow-doc.js` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building.
 - `public/js/canvas-view.js` — rough.js rendering plus all pointer interaction (pan, zoom,
-  drag-create, move, resize, port-drag edge creation, marquee select).
+  tool modes, drag-create, move, resize, port-drag edge creation, marquee select) and
+  camera animations for subgraph navigation.
+- `public/js/expansion.js` — session-local inline subgraph expansion: which nodes are
+  unfolded, open/close animation, external .flow fetching, frame geometry, and the warp
+  displacement of surrounding nodes (view-only; never written to disk).
 - `public/js/editors.js` — floating DOM overlays for node and edge editing.
 - `public/js/main.js` — app state, WebSocket sync, undo/redo, sidebar, keyboard shortcuts.
 

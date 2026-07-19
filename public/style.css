@@ -84,6 +84,18 @@ html, body {
 
 #new-file-button:hover { color: var(--ink); border-color: var(--muted); }
 
+#new-file-input {
+  margin: 8px;
+  padding: 8px;
+  background: #171a1f;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
 #sidebar-footer {
   display: flex;
   align-items: center;
@@ -146,8 +158,12 @@ html, body {
 #breadcrumb .crumb.current { color: var(--ink); cursor: default; text-decoration: none; }
 #breadcrumb .separator { margin: 0 6px; opacity: 0.5; }
 
+#topbar-actions { display: flex; gap: 12px; align-items: center; }
+
+#toolbar,
 #view-controls { display: flex; gap: 4px; }
 
+#toolbar button,
 #view-controls button {
   background: transparent;
   border: 1px solid var(--panel-border);
@@ -160,7 +176,10 @@ html, body {
   cursor: pointer;
 }
 
+#toolbar button:hover,
 #view-controls button:hover { color: var(--ink); border-color: var(--muted); }
+
+#toolbar button.active { color: var(--accent); border-color: var(--accent); }
 
 #canvas-container {
   position: relative;
