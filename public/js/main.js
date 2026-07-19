@@ -288,7 +288,23 @@ function createNodeAndEdit(rect, requestedName = 'Untitled') {
 }
 
 function deleteNodesAction(nodes) {
-  mutate(() => FlowDoc.deleteNodes(scopeItemsNow(), nodes), { commit: 'now' });
+  const groups = new Map();
+  for (const node of nodes) {
+    const owner = ownerOf(node);
+    if (!groups.has(owner.doc)) groups.set(owner.doc, { owner, nodes: [] });
+    groups.get(owner.doc).nodes.push(node);
+  }
+  for (const { owner, nodes: docNodes } of groups.values()) {
+    applyToDoc(owner, () => {
+      const byItems = new Map();
+      for (const node of docNodes) {
+        const items = FlowDoc.containingItems(owner.doc, node);
+        if (!byItems.has(items)) byItems.set(items, []);
+        byItems.get(items).push(node);
+      }
+      for (const [items, list] of byItems) FlowDoc.deleteNodes(items, list);
+    }, { commit: 'now' });
+  }
 }
 
 function deleteSelection() {
@@ -299,7 +315,7 @@ function deleteSelection() {
     deleteNodesAction(nodes);
   } else if (edge) {
     editors.closeAll();
-    mutate(() => FlowDoc.deleteEdge(edge), { commit: 'now' });
+    applyEdit(edge.from, () => FlowDoc.deleteEdge(edge), { commit: 'now' });
   }
 }
 
@@ -309,7 +325,7 @@ function deleteSelection() {
 // canvas-view's zoom transition).
 async function openExpand(node) {
   const expandValue = getProp(node, 'expand');
-  if (!expandValue || navigation.inProgress) return;
+  if (!expandValue || navigation.inProgress || expansions.isEmbedded(node)) return;
   navigation.inProgress = true;
   try {
     editors.closeAll();
@@ -410,8 +426,83 @@ function toggleInlineExpansion(node) {
   expansions.toggle(node);
 }
 
+// --- Editing routed by document ----------------------------------------------------------
+//
+// Nodes inside an unfolded frame may belong to another .flow file. Every mutation is routed
+// to the document that owns the node: the current file goes through the normal
+// mutate/undo/commit pipeline, external documents are serialized and written straight to
+// their own path (no undo — the file watcher keeps other views in sync).
+
+const externalCommitTimers = new Map();
+
+function ownerOf(node) {
+  if (FlowDoc.allNodes(state.doc).includes(node)) return { doc: state.doc, path: state.path };
+  return expansions.ownerOf(node) ?? { doc: state.doc, path: state.path };
+}
+
+function commitExternalNow(doc, path) {
+  clearTimeout(externalCommitTimers.get(path));
+  externalCommitTimers.delete(path);
+  FlowDoc.ensureLayoutEverywhere(doc);
+  sendWrite(path, serializeFlow(doc));
+}
+
+function applyToDoc(owner, mutation, { commit = 'debounce' } = {}) {
+  if (owner.doc === state.doc) {
+    mutate(mutation, { commit });
+    return;
+  }
+  mutation();
+  expansions.invalidateSubModels();
+  view.requestRender();
+  if (commit === 'now') {
+    commitExternalNow(owner.doc, owner.path);
+  } else {
+    clearTimeout(externalCommitTimers.get(owner.path));
+    externalCommitTimers.set(
+      owner.path,
+      setTimeout(() => commitExternalNow(owner.doc, owner.path), COMMIT_DEBOUNCE_MS),
+    );
+  }
+}
+
+function applyEdit(node, mutation, options) {
+  applyToDoc(ownerOf(node), mutation, options);
+}
+
+function findNode(nodeId) {
+  return FlowDoc.findNodeById(state.doc, nodeId) ?? expansions.findNodeById(nodeId);
+}
+
+function findEdge(spec) {
+  return state.model?.edges.find((edge) => edge.spec === spec) ?? expansions.findEdgeBySpec(spec);
+}
+
+function itemsFor(node) {
+  return FlowDoc.containingItems(ownerOf(node).doc, node);
+}
+
+function commitMovesFor(nodes) {
+  const externalOwners = new Map();
+  for (const node of nodes) {
+    const owner = ownerOf(node);
+    if (owner.doc !== state.doc) externalOwners.set(owner.path, owner);
+  }
+  refresh();
+  commitNow();
+  for (const owner of externalOwners.values()) commitExternalNow(owner.doc, owner.path);
+}
+
 function completeEdge(fromNode, targetNode, worldPoint, extra) {
   if (!state.doc || extra?.droppedOnSource) return;
+
+  if (expansions.isEmbedded(fromNode)) {
+    // Inside a frame, edges only connect existing nodes of that subgraph — dropping on
+    // empty canvas would otherwise spawn a node in the wrong graph.
+    if (!targetNode) return;
+    applyEdit(fromNode, () => FlowDoc.addEdge(fromNode, targetNode.name), { commit: 'now' });
+    return;
+  }
 
   let createdNode = null;
   let createdSpec = null;
@@ -446,10 +537,7 @@ const view = new CanvasView(document.getElementById('canvas'), {
   quickCreateNode: (worldPoint) => state.doc && createNodeAndEdit(centeredDefaultRect(worldPoint)),
   nodeClicked: (node) => editors.openNodeEditor(node),
   canvasClicked: () => editors.closeAll(),
-  moveCommitted: () => {
-    refresh();
-    commitNow();
-  },
+  moveCommitted: (nodes) => commitMovesFor(nodes ?? []),
   completeEdge,
   editEdge: (edge) => editors.openEdgeEditor(edge),
   openExpand,
@@ -471,10 +559,12 @@ view.expansionLayer = expansions;
 
 const editors = createEditors({
   view,
-  getDoc: () => state.doc,
-  getModel: () => state.model,
-  getScopeItems: scopeItemsNow,
-  apply: (mutation) => mutate(mutation),
+  findNode,
+  findEdge,
+  itemsFor,
+  applyEdit,
+  applyEditNow: (node, mutation) => applyEdit(node, mutation, { commit: 'now' }),
+  canOpen: (node) => !expansions.isEmbedded(node),
   openExpand,
   toggleExpand: toggleInlineExpansion,
   deleteNodes: deleteNodesAction,

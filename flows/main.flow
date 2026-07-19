@@ -13,7 +13,7 @@ Open App
 
 Check Session
   id: 2b8e4c6a-1d3f-4a5b-8c7d-9e0f1a2b3c4d
-  pos: 224, 272, 210, 88
+  pos: 224, 288, 210, 88
   description: "Reads token from secure storage"
   -> Load Dashboard : "session valid"
   -> Show Login : "no valid session"

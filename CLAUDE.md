@@ -28,8 +28,10 @@ used by both the server and the browser.
   tool modes, drag-create, move, resize, port-drag edge creation, marquee select) and
   camera animations for subgraph navigation.
 - `public/js/expansion.js` — session-local inline subgraph expansion: which nodes are
-  unfolded, open/close animation, external .flow fetching, frame geometry, and the warp
-  displacement of surrounding nodes (view-only; never written to disk).
+  unfolded, open/close animation, external .flow fetching, frame geometry, the warp
+  displacement of surrounding nodes (view-only; never written to disk), and the loci map
+  that lets nodes inside frames be edited in place (mutations are routed to the .flow file
+  that owns them).
 - `public/js/editors.js` — floating DOM overlays for node and edge editing.
 - `public/js/main.js` — app state, WebSocket sync, undo/redo, sidebar, keyboard shortcuts.
 

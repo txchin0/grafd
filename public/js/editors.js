@@ -30,11 +30,11 @@ export function createEditors(context) {
   let editingEdgeSpec = null;
 
   function editingNode() {
-    return editingNodeId ? FlowDoc.findNodeById(context.getDoc(), editingNodeId) : null;
+    return editingNodeId ? context.findNode(editingNodeId) : null;
   }
 
   function editingEdge() {
-    return context.getModel()?.edges.find((edge) => edge.spec === editingEdgeSpec) ?? null;
+    return editingEdgeSpec ? context.findEdge(editingEdgeSpec) : null;
   }
 
   function openNodeEditor(node, { focusTitle = false } = {}) {
@@ -57,7 +57,7 @@ export function createEditors(context) {
     setUnlessFocused(elements.updates, parseListValue(getProp(node, 'updates')).join(', '));
     elements.entrypoint.checked = getProp(node, 'entrypoint') === 'true';
     const lacksExpand = !getProp(node, 'expand');
-    elements.openExpand.classList.toggle('hidden', lacksExpand);
+    elements.openExpand.classList.toggle('hidden', lacksExpand || !context.canOpen(node));
     elements.inlineExpand.classList.toggle('hidden', lacksExpand);
   }
 
@@ -92,8 +92,8 @@ export function createEditors(context) {
     const updatesEntries = elements.updates.value.split(',').map((entry) => entry.trim()).filter(Boolean);
     const updatesChanged = updatesEntries.join(', ') !== parseListValue(getProp(node, 'updates')).join(', ');
     if (!titleChanged && !expandChanged && !onErrorChanged && !updatesChanged) return;
-    context.apply(() => {
-      if (titleChanged) FlowDoc.renameNode(context.getScopeItems(), node, elements.title.value);
+    context.applyEdit(node, () => {
+      if (titleChanged) FlowDoc.renameNode(context.itemsFor(node), node, elements.title.value);
       if (expandChanged) setProp(node, 'expand', elements.expand.value.trim() || null);
       if (onErrorChanged) setProp(node, 'on_error', elements.onError.value.trim() || null);
       if (updatesChanged) setProp(node, 'updates', updatesEntries.length ? formatListValue(updatesEntries) : null);
@@ -103,7 +103,7 @@ export function createEditors(context) {
   function closeEdgeEditor() {
     const edge = editingEdge();
     if (edge && (elements.edgeLabel.value.trim() || null) !== (edge.spec.label ?? null)) {
-      context.apply(() => FlowDoc.setEdgeLabel(edge, elements.edgeLabel.value));
+      context.applyEdit(edge.from, () => FlowDoc.setEdgeLabel(edge, elements.edgeLabel.value));
     }
     editingEdgeSpec = null;
     elements.edgeEditor.classList.add('hidden');
@@ -119,7 +119,7 @@ export function createEditors(context) {
     if (node) positionBesideRect(elements.nodeEditor, context.view.worldRectToScreen(context.view.rect(node)));
     const edge = editingEdge();
     if (edge?.geometry) {
-      const mid = context.view.worldToScreen(edge.geometry.mid);
+      const mid = context.view.worldToScreen(context.view.edgeAnchor(edge));
       positionBesideRect(elements.edgeEditor, { x: mid.x, y: mid.y, w: 0, h: 0 });
     }
   }
@@ -153,14 +153,14 @@ export function createEditors(context) {
   function applyToNode(mutate) {
     const node = editingNode();
     if (!node) return;
-    context.apply(() => mutate(node));
+    context.applyEdit(node, () => mutate(node));
   }
 
   elements.title.addEventListener('change', () => {
     const node = editingNode();
     if (!node) return;
-    context.apply(() => {
-      const finalName = FlowDoc.renameNode(context.getScopeItems(), node, elements.title.value);
+    context.applyEdit(node, () => {
+      const finalName = FlowDoc.renameNode(context.itemsFor(node), node, elements.title.value);
       elements.title.value = finalName;
     });
   });
@@ -217,7 +217,7 @@ export function createEditors(context) {
   function commitEdgeLabel() {
     const edge = editingEdge();
     if (!edge) return;
-    context.apply(() => FlowDoc.setEdgeLabel(edge, elements.edgeLabel.value));
+    context.applyEdit(edge.from, () => FlowDoc.setEdgeLabel(edge, elements.edgeLabel.value));
   }
 
   elements.edgeLabel.addEventListener('change', commitEdgeLabel);
@@ -232,7 +232,7 @@ export function createEditors(context) {
     const edge = editingEdge();
     if (!edge) return;
     closeEdgeEditor();
-    context.apply(() => FlowDoc.deleteEdge(edge));
+    context.applyEditNow(edge.from, () => FlowDoc.deleteEdge(edge));
   });
 
   for (const editorElement of [elements.nodeEditor, elements.edgeEditor]) {

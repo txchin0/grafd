@@ -180,14 +180,23 @@ export class CanvasView {
   }
 
   setModel(model) {
-    const selectedIds = new Set([...this.selection].map((node) => node.id));
     const selectedEdgeSpec = this.selectedEdge?.spec ?? null;
 
     this.model = model;
-    this.selection = new Set(model.nodes.filter((node) => selectedIds.has(node.id)));
-    this.selectedEdge = model.edges.find((edge) => edge.spec === selectedEdgeSpec) ?? null;
+    // Top-level nodes are re-resolved by id; embedded subgraph nodes keep their identity
+    // across rebuilds (they are the same AST objects), so they stay selected as-is. Nodes
+    // that truly disappeared are dropped from drawing by the locus visibility check.
+    this.selection = new Set(
+      [...this.selection]
+        .map((node) => model.nodes.find((candidate) => candidate.id === node.id)
+          ?? (this.expansionLayer?.isEmbedded(node) ? node : null))
+        .filter(Boolean),
+    );
+    this.selectedEdge = model.edges.find((edge) => edge.spec === selectedEdgeSpec)
+      ?? (this.selectedEdge && this.expansionLayer?.isEmbedded(this.selectedEdge.from) ? this.selectedEdge : null);
     if (this.hoverNode) {
-      this.hoverNode = model.nodes.find((node) => node.id === this.hoverNode.id) ?? null;
+      this.hoverNode = model.nodes.find((node) => node.id === this.hoverNode.id)
+        ?? (this.expansionLayer?.isEmbedded(this.hoverNode) ? this.hoverNode : null);
     }
     this.requestRender();
   }
@@ -201,8 +210,26 @@ export class CanvasView {
     return model.display?.rects.get(node) ?? node.pos;
   }
 
+  // World-space rect of any visible node, including nodes inside unfolded frames: the
+  // node's local display rect pushed through its locus transform.
   rect(node) {
-    return this.rectOf(this.model, node);
+    const locus = this.expansionLayer?.locusOf(node);
+    if (!locus) return this.rectOf(this.model, node);
+    const local = this.rectOf(locus.model, node);
+    const { scale, tx, ty } = locus.transform;
+    return { x: local.x * scale + tx, y: local.y * scale + ty, w: local.w * scale, h: local.h * scale };
+  }
+
+  isNodeVisible(node) {
+    return !this.expansionLayer || this.expansionLayer.locusOf(node) != null;
+  }
+
+  edgeAnchor(edge) {
+    const mid = edge.geometry?.mid ?? rectCenter(this.rect(edge.from));
+    const locus = this.expansionLayer?.locusOf(edge.from);
+    if (!locus) return mid;
+    const { scale, tx, ty } = locus.transform;
+    return { x: mid.x * scale + tx, y: mid.y * scale + ty };
   }
 
   select(node) {
@@ -416,6 +443,7 @@ export class CanvasView {
         corner: handle.corner,
         startRect: { ...handle.node.pos },
         startWorld: world,
+        scale: this.expansionLayer?.scaleOf(handle.node) ?? 1,
       };
       return;
     }
@@ -436,6 +464,9 @@ export class CanvasView {
         type: 'move',
         nodes: [...this.selection],
         startPositions: new Map([...this.selection].map((n) => [n, { x: n.pos.x, y: n.pos.y }])),
+        // World-space drag deltas are divided by each node's locus scale so nodes inside
+        // scaled-down frames track the cursor instead of racing ahead of it.
+        scales: new Map([...this.selection].map((n) => [n, this.expansionLayer?.scaleOf(n) ?? 1])),
         startWorld: world,
         startScreen: screen,
         moved: false,
@@ -500,8 +531,9 @@ export class CanvasView {
       gesture.moved = true;
       for (const node of gesture.nodes) {
         const start = gesture.startPositions.get(node);
-        node.pos.x = snap(start.x + dx);
-        node.pos.y = snap(start.y + dy);
+        const scale = gesture.scales.get(node) ?? 1;
+        node.pos.x = snap(start.x + dx / scale);
+        node.pos.y = snap(start.y + dy / scale);
       }
       this.requestRender();
       this.actions.viewChanged?.();
@@ -512,7 +544,7 @@ export class CanvasView {
     } else if (gesture.type === 'edge') {
       gesture.toWorld = world;
       const target = this.hitNode(world);
-      gesture.hoverTarget = target !== gesture.from ? target : null;
+      gesture.hoverTarget = target !== gesture.from && this.inSameModel(gesture.from, target) ? target : null;
       this.requestRender();
     } else if (gesture.type === 'create' || gesture.type === 'marquee') {
       gesture.rect = normalizedRect(gesture.startWorld, world);
@@ -521,8 +553,8 @@ export class CanvasView {
   }
 
   applyResize(gesture, world) {
-    const dx = world.x - gesture.startWorld.x;
-    const dy = world.y - gesture.startWorld.y;
+    const dx = (world.x - gesture.startWorld.x) / (gesture.scale ?? 1);
+    const dy = (world.y - gesture.startWorld.y) / (gesture.scale ?? 1);
     const start = gesture.startRect;
     const rect = gesture.node.pos;
     const [vertical, horizontal] = gesture.corner;
@@ -552,17 +584,18 @@ export class CanvasView {
 
     if (gesture.type === 'move') {
       if (gesture.moved) {
-        this.actions.moveCommitted();
+        this.actions.moveCommitted(gesture.nodes);
       } else {
         this.dispatchNodePress(gesture, world);
       }
     } else if (gesture.type === 'resize') {
-      this.actions.moveCommitted();
+      this.actions.moveCommitted([gesture.node]);
     } else if (gesture.type === 'edge') {
-      const target = this.hitNode(world);
-      this.actions.completeEdge(gesture.from, target !== gesture.from ? target : null, world, {
-        droppedOnSource: target === gesture.from,
-        ghostTarget: this.hitGhost(world),
+      const rawTarget = this.hitNode(world);
+      const target = rawTarget !== gesture.from && this.inSameModel(gesture.from, rawTarget) ? rawTarget : null;
+      this.actions.completeEdge(gesture.from, target, world, {
+        droppedOnSource: rawTarget === gesture.from,
+        ghostTarget: this.expansionLayer?.isEmbedded(gesture.from) ? null : this.hitGhost(world),
       });
     } else if (gesture.type === 'create') {
       const bigEnoughOnScreen =
@@ -573,11 +606,36 @@ export class CanvasView {
         this.actions.createNode(this.snapCreateRect(gesture.rect));
       }
     } else if (gesture.type === 'marquee' && gesture.rect) {
-      for (const node of this.model.nodes) {
-        if (rectsIntersect(gesture.rect, this.rect(node))) this.selection.add(node);
-      }
+      this.selectNodesInMarquee(gesture.rect);
     }
     this.requestRender();
+  }
+
+  inSameModel(nodeA, nodeB) {
+    if (!nodeA || !nodeB) return false;
+    if (!this.expansionLayer) return true;
+    return (this.expansionLayer.modelOf(nodeA) ?? this.model) === (this.expansionLayer.modelOf(nodeB) ?? this.model);
+  }
+
+  // Marquee reaches into unfolded frames, but a node is skipped when one of its host
+  // frames is also caught — dragging a frame already carries its contents.
+  selectNodesInMarquee(rect) {
+    const candidates = this.expansionLayer?.locus ? [...this.expansionLayer.locus.keys()] : this.model.nodes;
+    for (const node of candidates) {
+      if (rectsIntersect(rect, this.rect(node))) this.selection.add(node);
+    }
+    for (const node of [...this.selection]) {
+      if (this.hasSelectedAncestorFrame(node)) this.selection.delete(node);
+    }
+  }
+
+  hasSelectedAncestorFrame(node) {
+    let host = this.expansionLayer?.hostOf(node);
+    while (host) {
+      if (this.selection.has(host)) return true;
+      host = this.expansionLayer?.hostOf(host);
+    }
+    return false;
   }
 
   dispatchNodePress(gesture, world) {
@@ -603,7 +661,8 @@ export class CanvasView {
   onDoubleClick(event) {
     if (this.sceneTransition) return;
     const world = this.screenToWorld(this.eventPoint(event));
-    if (this.hitNode(world) || this.hitGhost(world)) return;
+    // Edges win over nodes so edges inside unfolded frames stay editable — a frame always
+    // contains its subgraph's edges.
     const edge = this.hitEdge(world);
     if (edge) {
       this.selectedEdge = edge;
@@ -611,13 +670,24 @@ export class CanvasView {
       this.requestRender();
       return;
     }
+    if (this.hitNode(world) || this.hitGhost(world)) return;
     this.actions.quickCreateNode(world);
   }
 
   hitNode(world) {
-    for (let index = this.model.nodes.length - 1; index >= 0; index -= 1) {
-      const node = this.model.nodes[index];
-      if (rectContains(this.rect(node), world)) return node;
+    return this.hitNodeIn(this.model, world);
+  }
+
+  hitNodeIn(model, world) {
+    for (let index = model.nodes.length - 1; index >= 0; index -= 1) {
+      const node = model.nodes[index];
+      const expansion = model.display?.expansions.get(node);
+      if (expansion && rectContains(expansion.inner, world)) {
+        const transform = expansion.transform;
+        const local = { x: (world.x - transform.tx) / transform.scale, y: (world.y - transform.ty) / transform.scale };
+        return this.hitNodeIn(expansion.subModel, local) ?? node;
+      }
+      if (rectContains(this.rectOf(model, node), world)) return node;
     }
     return null;
   }
@@ -675,7 +745,11 @@ export class CanvasView {
     const rect = this.rectOf(model, node);
     const slotCenter = (slot) => ({ x: rect.x + rect.w - 16 - slot * BADGE_SLOT_SPACING, y: rect.y + 15 });
     if (this.expansionLayer?.isOpen(node.id)) {
-      return [{ kind: 'collapse', ...slotCenter(0) }];
+      if (model.embedded) return [{ kind: 'collapse', ...slotCenter(0) }];
+      return [
+        { kind: 'open', ...slotCenter(0) },
+        { kind: 'collapse', ...slotCenter(1) },
+      ];
     }
     if (model.embedded) return [{ kind: 'inline', ...slotCenter(0) }];
     return [
@@ -712,8 +786,19 @@ export class CanvasView {
   }
 
   hitEdge(world) {
-    const hitDistance = EDGE_HIT_DISTANCE / this.view.scale;
-    for (const edge of this.model.edges) {
+    return this.hitEdgeIn(this.model, world, this.view.scale);
+  }
+
+  hitEdgeIn(model, world, effectiveScale) {
+    for (const [, expansion] of model.display?.expansions ?? []) {
+      if (!rectContains(expansion.inner, world)) continue;
+      const transform = expansion.transform;
+      const local = { x: (world.x - transform.tx) / transform.scale, y: (world.y - transform.ty) / transform.scale };
+      const hit = this.hitEdgeIn(expansion.subModel, local, effectiveScale * transform.scale);
+      if (hit) return hit;
+    }
+    const hitDistance = EDGE_HIT_DISTANCE / effectiveScale;
+    for (const edge of model.edges) {
       const geometry = edge.geometry;
       if (!geometry) continue;
       if (geometry.labelRect && rectContains(geometry.labelRect, world)) return edge;
@@ -754,6 +839,7 @@ export class CanvasView {
     }
 
     const expansionState = this.expansionLayer?.layout(this.model, performance.now()) ?? { animating: false };
+    this.expansionLayer?.collectLoci(this.model);
     const dpr = this.devicePixelRatio;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.drawGrid(this.view);
@@ -836,10 +922,13 @@ export class CanvasView {
     ctx.restore();
   }
 
+  // Labels get their own pass after nodes so they stay readable even where an edge dives
+  // under a node or an expanded frame.
   drawScene(model) {
     this.computeEdgeGeometry(model);
     for (const edge of model.edges) this.drawEdge(model, edge);
     for (const node of model.nodes) this.drawNode(model, node);
+    for (const edge of model.edges) this.drawEdgeLabel(edge);
     for (const ghost of model.ghosts) this.drawGhost(ghost, { clickable: !model.embedded });
   }
 
@@ -905,7 +994,6 @@ export class CanvasView {
   drawEdge(model, edge) {
     const geometry = edge.geometry;
     if (!geometry) return;
-    const { ctx } = this;
     const color = this.edgeColor(edge);
     const seed = seedFrom(`${edge.from.name}->${edge.spec.target}:${edge.spec.label ?? ''}`);
     const options = {
@@ -922,7 +1010,12 @@ export class CanvasView {
       options,
     );
     this.drawArrowhead(geometry.mid, geometry.b, color);
+  }
 
+  drawEdgeLabel(edge) {
+    const geometry = edge.geometry;
+    if (!geometry) return;
+    const { ctx } = this;
     const labelText = edge.spec.label ?? (edge.kind === 'error' ? 'on error' : null);
     const labelAnchor = geometry.selfLoop
       ? { x: geometry.mid.x, y: geometry.mid.y }
@@ -1190,6 +1283,7 @@ export class CanvasView {
     ctx.lineWidth = 1.4 / this.view.scale;
     ctx.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
     for (const node of this.selection) {
+      if (!this.isNodeVisible(node)) continue;
       const { x, y, w, h } = this.rect(node);
       ctx.strokeRect(x - inflate, y - inflate, w + inflate * 2, h + inflate * 2);
     }
@@ -1197,6 +1291,7 @@ export class CanvasView {
 
     if (this.selection.size === 1) {
       const [node] = this.selection;
+      if (!this.isNodeVisible(node)) return;
       const handleSize = 8 / this.view.scale;
       const { x, y, w, h } = this.rect(node);
       ctx.fillStyle = COLORS.select;
@@ -1213,6 +1308,7 @@ export class CanvasView {
     if (this.hoverNode) nodesWithPorts.add(this.hoverNode);
     const radius = PORT_RADIUS / Math.min(this.view.scale, 1.2);
     for (const node of nodesWithPorts) {
+      if (!this.isNodeVisible(node)) continue;
       for (const port of this.portPositions(node)) {
         ctx.beginPath();
         ctx.arc(port.x, port.y, radius, 0, Math.PI * 2);

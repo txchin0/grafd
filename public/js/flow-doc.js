@@ -56,6 +56,16 @@ export function findNodeById(doc, nodeId) {
   return allNodes(doc).find((node) => node.id === nodeId) ?? null;
 }
 
+export function containingItems(doc, node) {
+  for (const item of doc.items) {
+    if (item.kind === 'node' && item.node === node) return doc.items;
+    if (item.kind === 'graph' && item.items.some((inner) => inner.kind === 'node' && inner.node === node)) {
+      return item.items;
+    }
+  }
+  return doc.items;
+}
+
 export function buildModel(doc, scopeName) {
   const nodes = nodesIn(scopeItems(doc, scopeName));
   const nodesByName = new Map(nodes.map((node) => [node.name, node]));

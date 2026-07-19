@@ -20,7 +20,8 @@ const EMPTY_CONTENT_SIZE = { w: 320, h: 180 };
 const WARP_CLEARANCE = 28;
 const WARP_RIPPLE_RANGE = 300;
 const WARP_RIPPLE_STRENGTH = 0.5;
-const SEPARATION_MARGIN = 24;
+// Generous margin so edges between a frame and its neighbors keep room for their labels.
+const SEPARATION_MARGIN = 64;
 const SEPARATION_ITERATIONS = 10;
 
 function easeInOutCubic(t) {
@@ -51,6 +52,75 @@ export class ExpansionLayer {
 
   isOpen(nodeId) {
     return this.entries.get(nodeId)?.targetOpen ?? false;
+  }
+
+  // Loci map every node visible on the canvas — top-level and inside unfolded frames, at
+  // any depth — to its owning model, the composed local→world transform, and the frame
+  // host it lives under. Rebuilt by the canvas after each geometry pass, it is what lets
+  // pointer interaction and editing treat embedded subgraph nodes like ordinary nodes.
+  collectLoci(topModel) {
+    this.topModel = topModel;
+    this.locus = new Map();
+    this.addLoci(topModel, { scale: 1, tx: 0, ty: 0 }, null);
+  }
+
+  addLoci(model, transform, host) {
+    for (const node of model.nodes) this.locus.set(node, { model, transform, host });
+    if (!model.display) return;
+    for (const [frameHost, expansion] of model.display.expansions) {
+      const inner = expansion.transform;
+      const composed = {
+        scale: transform.scale * inner.scale,
+        tx: inner.tx * transform.scale + transform.tx,
+        ty: inner.ty * transform.scale + transform.ty,
+      };
+      this.addLoci(expansion.subModel, composed, frameHost);
+    }
+  }
+
+  locusOf(node) {
+    return this.locus?.get(node) ?? null;
+  }
+
+  modelOf(node) {
+    return this.locusOf(node)?.model ?? null;
+  }
+
+  scaleOf(node) {
+    return this.locusOf(node)?.transform.scale ?? 1;
+  }
+
+  hostOf(node) {
+    return this.locusOf(node)?.host ?? null;
+  }
+
+  isEmbedded(node) {
+    const locus = this.locusOf(node);
+    return locus != null && locus.model !== this.topModel;
+  }
+
+  ownerOf(node) {
+    for (const [path, entry] of this.externalDocs) {
+      if (entry.doc && FlowDoc.allNodes(entry.doc).includes(node)) return { doc: entry.doc, path };
+    }
+    return null;
+  }
+
+  findNodeById(nodeId) {
+    for (const entry of this.externalDocs.values()) {
+      if (!entry.doc) continue;
+      const node = FlowDoc.findNodeById(entry.doc, nodeId);
+      if (node) return node;
+    }
+    return null;
+  }
+
+  findEdgeBySpec(spec) {
+    for (const model of this.subModels.values()) {
+      const edge = model.edges?.find((candidate) => candidate.spec === spec);
+      if (edge) return edge;
+    }
+    return null;
   }
 
   toggle(node) {
