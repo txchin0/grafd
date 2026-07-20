@@ -12,21 +12,77 @@ import {
   parseListValue,
   sanitizeName,
   uniqueName,
-} from '/shared/flow-format.js';
+  type EdgeSpec,
+  type FlowDocument,
+  type FlowItem,
+  type FlowNode,
+  type GraphItem,
+  type Rect,
+} from '../shared/flow-format.js';
+import type { DisplayGeometry } from './expansion.js';
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export interface GhostNode {
+  name: string;
+  ghost: true;
+  pos: Rect;
+}
+
+export type EdgeKind = 'flow' | 'error';
+
+export interface EdgeGeometry {
+  a: Point;
+  b: Point;
+  mid: Point;
+  labelRect: Rect | null;
+  selfLoop?: boolean;
+}
+
+export interface ModelEdge {
+  from: FlowNode;
+  spec: EdgeSpec;
+  kind: EdgeKind;
+  to?: FlowNode | GhostNode;
+  geometry?: EdgeGeometry | null;
+}
+
+export interface NodeTraits {
+  entry: boolean;
+  decision: boolean;
+  expand: string | null;
+  updates: string[];
+  hasErrorHandler: boolean;
+}
+
+export interface FlowModel {
+  nodes: FlowNode[];
+  edges: ModelEdge[];
+  ghosts: GhostNode[];
+  nodesByName: Map<string, FlowNode>;
+  traits: Map<FlowNode, NodeTraits>;
+  sourceDoc: FlowDocument;
+  sourcePath: string | null;
+  display?: DisplayGeometry;
+  embedded?: boolean;
+}
 
 export const DEFAULT_NODE_SIZE = { w: 200, h: 88 };
 const LAYOUT_COLUMN_WIDTH = 280;
 const LAYOUT_ROW_HEIGHT = 140;
 const LAYOUT_ORIGIN = { x: 80, y: 80 };
 
-export function assignMissingIds(doc) {
+export function assignMissingIds(doc: FlowDocument): void {
   for (const node of allNodes(doc)) {
     if (!node.id) node.id = newUuid();
   }
 }
 
-export function allNodes(doc) {
-  const nodes = [];
+export function allNodes(doc: FlowDocument): FlowNode[] {
+  const nodes: FlowNode[] = [];
   for (const item of doc.items) {
     if (item.kind === 'node') nodes.push(item.node);
     if (item.kind === 'graph') {
@@ -38,25 +94,25 @@ export function allNodes(doc) {
   return nodes;
 }
 
-export function graphBlockNames(doc) {
-  return doc.items.filter((item) => item.kind === 'graph').map((item) => item.name);
+export function graphBlockNames(doc: FlowDocument): string[] {
+  return doc.items.filter((item): item is GraphItem => item.kind === 'graph').map((item) => item.name);
 }
 
-export function scopeItems(doc, scopeName) {
+export function scopeItems(doc: FlowDocument, scopeName: string | null): FlowItem[] {
   if (!scopeName) return doc.items;
-  const graph = doc.items.find((item) => item.kind === 'graph' && item.name === scopeName);
+  const graph = doc.items.find((item): item is GraphItem => item.kind === 'graph' && item.name === scopeName);
   return graph ? graph.items : doc.items;
 }
 
-export function nodesIn(items) {
-  return items.filter((item) => item.kind === 'node').map((item) => item.node);
+export function nodesIn(items: FlowItem[]): FlowNode[] {
+  return items.filter((item): item is { kind: 'node'; node: FlowNode } => item.kind === 'node').map((item) => item.node);
 }
 
-export function findNodeById(doc, nodeId) {
+export function findNodeById(doc: FlowDocument, nodeId: string | null): FlowNode | null {
   return allNodes(doc).find((node) => node.id === nodeId) ?? null;
 }
 
-export function containingItems(doc, node) {
+export function containingItems(doc: FlowDocument, node: FlowNode): FlowItem[] {
   for (const item of doc.items) {
     if (item.kind === 'node' && item.node === node) return doc.items;
     if (item.kind === 'graph' && item.items.some((inner) => inner.kind === 'node' && inner.node === node)) {
@@ -66,11 +122,11 @@ export function containingItems(doc, node) {
   return doc.items;
 }
 
-export function buildModel(doc, scopeName) {
+export function buildModel(doc: FlowDocument, scopeName: string | null): FlowModel {
   const nodes = nodesIn(scopeItems(doc, scopeName));
   const nodesByName = new Map(nodes.map((node) => [node.name, node]));
 
-  const edges = [];
+  const edges: ModelEdge[] = [];
   for (const node of nodes) {
     for (const spec of node.edges) edges.push({ from: node, spec, kind: 'flow' });
     const onError = getProp(node, 'on_error');
@@ -83,25 +139,26 @@ export function buildModel(doc, scopeName) {
 
   const ghosts = resolveEdgeTargets(edges, nodesByName);
   const traits = inferTraits(nodes, edges);
-  return { nodes, edges, ghosts, nodesByName, traits };
+  return { nodes, edges, ghosts, nodesByName, traits, sourceDoc: doc, sourcePath: null };
 }
 
-function resolveEdgeTargets(edges, nodesByName) {
-  const ghosts = [];
-  const ghostsByName = new Map();
+function resolveEdgeTargets(edges: ModelEdge[], nodesByName: Map<string, FlowNode>): GhostNode[] {
+  const ghosts: GhostNode[] = [];
+  const ghostsByName = new Map<string, GhostNode>();
   for (const edge of edges) {
     let target = nodesByName.get(edge.spec.target) ?? ghostsByName.get(edge.spec.target);
     if (!target) {
-      target = makeGhost(edge, ghosts.length);
-      ghosts.push(target);
-      ghostsByName.set(target.name, target);
+      const ghost = makeGhost(edge, ghosts.length);
+      ghosts.push(ghost);
+      ghostsByName.set(ghost.name, ghost);
+      target = ghost;
     }
     edge.to = target;
   }
   return ghosts;
 }
 
-function makeGhost(edge, ghostIndex) {
+function makeGhost(edge: ModelEdge, ghostIndex: number): GhostNode {
   const source = edge.from.pos ?? { x: 0, y: 0, w: DEFAULT_NODE_SIZE.w, h: DEFAULT_NODE_SIZE.h };
   return {
     name: edge.spec.target,
@@ -115,11 +172,11 @@ function makeGhost(edge, ghostIndex) {
   };
 }
 
-function inferTraits(nodes, edges) {
+function inferTraits(nodes: FlowNode[], edges: ModelEdge[]): Map<FlowNode, NodeTraits> {
   const namesWithIncoming = new Set(
     edges.filter((edge) => edge.kind === 'flow').map((edge) => edge.spec.target),
   );
-  const traits = new Map();
+  const traits = new Map<FlowNode, NodeTraits>();
   for (const node of nodes) {
     const labeledOutgoing = node.edges.filter((edge) => edge.label).length;
     traits.set(node, {
@@ -133,13 +190,13 @@ function inferTraits(nodes, edges) {
   return traits;
 }
 
-export function autoLayout(nodes, edges) {
+export function autoLayout(nodes: FlowNode[], edges: ModelEdge[]): void {
   const unplaced = nodes.filter((node) => !node.pos);
   if (unplaced.length === 0) return;
 
   const depths = computeFlowDepths(nodes, edges);
   const startY = bottomOfPlacedNodes(nodes) ?? LAYOUT_ORIGIN.y;
-  const rowsUsedPerColumn = new Map();
+  const rowsUsedPerColumn = new Map<number, number>();
 
   for (const node of unplaced) {
     const column = depths.get(node.name) ?? 0;
@@ -154,28 +211,28 @@ export function autoLayout(nodes, edges) {
   }
 }
 
-function bottomOfPlacedNodes(nodes) {
+function bottomOfPlacedNodes(nodes: FlowNode[]): number | null {
   const placed = nodes.filter((node) => node.pos);
   if (placed.length === 0) return null;
-  return Math.max(...placed.map((node) => node.pos.y + node.pos.h)) + 90;
+  return Math.max(...placed.map((node) => node.pos!.y + node.pos!.h)) + 90;
 }
 
-function computeFlowDepths(nodes, edges) {
-  const outgoing = new Map(nodes.map((node) => [node.name, []]));
-  const namesWithIncoming = new Set();
+function computeFlowDepths(nodes: FlowNode[], edges: ModelEdge[]): Map<string, number> {
+  const outgoing = new Map<string, string[]>(nodes.map((node) => [node.name, []]));
+  const namesWithIncoming = new Set<string>();
   for (const edge of edges) {
     if (edge.kind !== 'flow') continue;
     outgoing.get(edge.from.name)?.push(edge.spec.target);
     namesWithIncoming.add(edge.spec.target);
   }
 
-  const depths = new Map();
+  const depths = new Map<string, number>();
   const queue = nodes
     .filter((node) => !namesWithIncoming.has(node.name))
     .map((node) => ({ name: node.name, depth: 0 }));
 
   while (queue.length > 0) {
-    const { name, depth } = queue.shift();
+    const { name, depth } = queue.shift()!;
     if (depths.has(name)) continue;
     depths.set(name, depth);
     for (const targetName of outgoing.get(name) ?? []) {
@@ -185,12 +242,12 @@ function computeFlowDepths(nodes, edges) {
   return depths;
 }
 
-export function ensureLayoutEverywhere(doc) {
+export function ensureLayoutEverywhere(doc: FlowDocument): void {
   buildModel(doc, null);
   for (const graphName of graphBlockNames(doc)) buildModel(doc, graphName);
 }
 
-export function addNode(items, rect, requestedName = 'Untitled') {
+export function addNode(items: FlowItem[], rect: Rect, requestedName = 'Untitled'): FlowNode {
   const takenNames = new Set(nodesIn(items).map((node) => node.name));
   const node = emptyNode(uniqueName(takenNames, sanitizeName(requestedName) || 'Untitled'));
   node.id = newUuid();
@@ -204,7 +261,7 @@ export function addNode(items, rect, requestedName = 'Untitled') {
   return node;
 }
 
-export function deleteNodes(items, nodesToDelete) {
+export function deleteNodes(items: FlowItem[], nodesToDelete: FlowNode[]): void {
   const deletedNames = new Set(nodesToDelete.map((node) => node.name));
   const deletedSet = new Set(nodesToDelete);
 
@@ -222,7 +279,7 @@ export function deleteNodes(items, nodesToDelete) {
   }
 }
 
-export function renameNode(items, node, requestedName) {
+export function renameNode(items: FlowItem[], node: FlowNode, requestedName: string): string {
   const cleanName = sanitizeName(requestedName);
   if (!cleanName || cleanName === node.name) return node.name;
 
@@ -246,7 +303,7 @@ export function renameNode(items, node, requestedName) {
   return node.name;
 }
 
-export function renameGraphBlock(doc, graphItem, requestedName) {
+export function renameGraphBlock(doc: FlowDocument, graphItem: GraphItem, requestedName: string): string {
   const cleanName = sanitizeName(requestedName);
   if (!cleanName || cleanName === graphItem.name) return graphItem.name;
 
@@ -260,12 +317,12 @@ export function renameGraphBlock(doc, graphItem, requestedName) {
   return graphItem.name;
 }
 
-export function addEdge(fromNode, targetName, label = null) {
+export function addEdge(fromNode: FlowNode, targetName: string, label: string | null = null): EdgeSpec {
   fromNode.edges.push({ target: targetName, label, data: null });
   return fromNode.edges[fromNode.edges.length - 1];
 }
 
-export function deleteEdge(edge) {
+export function deleteEdge(edge: ModelEdge): void {
   if (edge.kind === 'error') {
     setProp(edge.from, 'on_error', null);
     return;
@@ -273,7 +330,7 @@ export function deleteEdge(edge) {
   edge.from.edges = edge.from.edges.filter((spec) => spec !== edge.spec);
 }
 
-export function setEdgeLabel(edge, label) {
+export function setEdgeLabel(edge: ModelEdge, label: string | null): void {
   const cleanLabel = label?.trim() || null;
   if (edge.kind === 'error') {
     edge.spec.label = cleanLabel;

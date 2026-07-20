@@ -1,12 +1,112 @@
 // Canvas rendering (rough.js) and pointer interaction for the flow editor. The view owns
 // the pan/zoom transform, the active tool, hover/selection state, in-flight gestures, and
 // camera animations; every document mutation is delegated to the `actions` callbacks
-// supplied by main.js. When an ExpansionLayer is attached it decorates each model with
+// supplied by main.ts. When an ExpansionLayer is attached it decorates each model with
 // per-frame display geometry (`model.display`), which the view must prefer over a node's
 // authored `pos` (see rectOf) so inline-expanded frames and warp offsets never touch the
 // document itself.
 
-import rough from '/vendor/roughjs/rough.esm.js';
+// Resolved by the import map in index.html to the served copy of rough.esm.js.
+import rough from 'roughjs';
+import type { Options as RoughOptions } from 'roughjs/bin/core';
+import type { FlowNode, Rect } from '../shared/flow-format.js';
+import type { FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
+import type { ExpansionLayer, FrameExpansion } from './expansion.js';
+
+export interface View {
+  x: number;
+  y: number;
+  scale: number;
+}
+
+export type Tool = 'select' | 'node';
+
+type BadgeKind = 'open' | 'inline' | 'collapse';
+
+interface Badge {
+  kind: BadgeKind;
+  x: number;
+  y: number;
+}
+
+interface BadgeHit {
+  kind: BadgeKind;
+  node: FlowNode;
+}
+
+type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se';
+
+type Gesture =
+  | { type: 'pan'; startView: View; startScreen: Point }
+  | { type: 'edge'; from: FlowNode; toWorld: Point; hoverTarget: FlowNode | null }
+  | { type: 'resize'; node: FlowNode; corner: ResizeCorner; startRect: Rect; startWorld: Point; scale: number }
+  | {
+      type: 'move';
+      nodes: FlowNode[];
+      startPositions: Map<FlowNode, Point>;
+      scales: Map<FlowNode, number>;
+      startWorld: Point;
+      startScreen: Point;
+      moved: boolean;
+      pressedNode: FlowNode;
+      pressedBadge: BadgeHit | null;
+    }
+  | { type: 'create'; startWorld: Point; startScreen: Point; rect: Rect | null }
+  | { type: 'marquee'; startWorld: Point; rect: Rect | null };
+
+interface HeldScene {
+  model: FlowModel;
+  view: View;
+}
+
+export interface CameraLink {
+  growth: number;
+  nodeCenter: Point;
+  contentCenter: Point;
+}
+
+interface ViewportSize {
+  width: number;
+  height: number;
+}
+
+type SceneTransition =
+  | { phase: 'hold'; outgoing: HeldScene }
+  | {
+      phase: 'run';
+      mode: 'in' | 'out';
+      outgoing: HeldScene;
+      incoming: { model: FlowModel };
+      parentFrom: View;
+      parentTo: View;
+      incomingEnd: View;
+      nodeRect: Rect;
+      link: CameraLink;
+      bounds: ViewportSize;
+      duration: number;
+      startTime: number;
+      resolve: () => void;
+    };
+
+export interface CanvasActions {
+  createNode(rect: Rect): void;
+  quickCreateNode(worldPoint: Point): void;
+  nodeClicked(node: FlowNode): void;
+  canvasClicked(): void;
+  moveCommitted(nodes: FlowNode[]): void;
+  completeEdge(
+    fromNode: FlowNode,
+    targetNode: FlowNode | null,
+    worldPoint: Point,
+    extra?: { droppedOnSource: boolean; ghostTarget: GhostNode | null },
+  ): void;
+  editEdge(edge: ModelEdge): void;
+  openExpand(node: FlowNode): void;
+  toggleExpand(node: FlowNode): void;
+  materializeGhost(ghost: GhostNode): void;
+  viewChanged?(): void;
+  afterRender?(): void;
+}
 
 const HAND_FONT = '"Segoe Print", "Comic Sans MS", cursive';
 
@@ -40,15 +140,15 @@ const PORT_HIT_RADIUS = 11;
 const EDGE_HIT_DISTANCE = 8;
 const BADGE_HIT_RADIUS = 12;
 const BADGE_SLOT_SPACING = 24;
-const BADGE_SYMBOLS = { open: '⤢', inline: '⊞', collapse: '⊟' };
+const BADGE_SYMBOLS: Record<BadgeKind, string> = { open: '⤢', inline: '⊞', collapse: '⊟' };
 const DIVE_IN_MS = 650;
 const BACK_OUT_MS = 560;
 
-function snap(value) {
+function snap(value: number): number {
   return Math.round(value / SNAP) * SNAP;
 }
 
-function seedFrom(text) {
+function seedFrom(text: string): number {
   let hash = 2166136261;
   for (let index = 0; index < text.length; index += 1) {
     hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
@@ -56,30 +156,30 @@ function seedFrom(text) {
   return (hash >>> 0) % 2147483646 + 1;
 }
 
-function lerp(from, to, t) {
+function lerp(from: number, to: number, t: number): number {
   return from + (to - from) * t;
 }
 
-function easeInOutCubic(t) {
+function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
-function rectCenter(rect) {
+function rectCenter(rect: Rect): Point {
   return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
 }
 
-function rectContains(rect, point) {
+function rectContains(rect: Rect, point: Point): boolean {
   return (
     point.x >= rect.x && point.x <= rect.x + rect.w &&
     point.y >= rect.y && point.y <= rect.y + rect.h
   );
 }
 
-function rectsIntersect(a, b) {
+function rectsIntersect(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
-function normalizedRect(pointA, pointB) {
+function normalizedRect(pointA: Point, pointB: Point): Rect {
   return {
     x: Math.min(pointA.x, pointB.x),
     y: Math.min(pointA.y, pointB.y),
@@ -88,7 +188,11 @@ function normalizedRect(pointA, pointB) {
   };
 }
 
-function rectBorderPointToward(rect, towardPoint) {
+function isGhost(target: FlowNode | GhostNode): target is GhostNode {
+  return 'ghost' in target && target.ghost === true;
+}
+
+function rectBorderPointToward(rect: Rect, towardPoint: Point): Point {
   const center = rectCenter(rect);
   const dx = towardPoint.x - center.x;
   const dy = towardPoint.y - center.y;
@@ -99,7 +203,7 @@ function rectBorderPointToward(rect, towardPoint) {
   return { x: center.x + dx * t, y: center.y + dy * t };
 }
 
-function distanceToSegment(point, a, b) {
+function distanceToSegment(point: Point, a: Point, b: Point): number {
   const abX = b.x - a.x;
   const abY = b.y - a.y;
   const lengthSquared = abX * abX + abY * abY;
@@ -111,33 +215,48 @@ function distanceToSegment(point, a, b) {
 }
 
 export class CanvasView {
-  constructor(canvasElement, actions) {
+  private readonly canvas: HTMLCanvasElement;
+  private readonly ctx: CanvasRenderingContext2D;
+  private readonly rough: ReturnType<typeof rough.canvas>;
+  private readonly actions: CanvasActions;
+
+  view: View = { x: 0, y: 0, scale: 1 };
+  model: FlowModel;
+  selection = new Set<FlowNode>();
+  selectedEdge: ModelEdge | null = null;
+  expansionLayer: ExpansionLayer | null = null;
+
+  private hoverNode: FlowNode | null = null;
+  private hoverPoint: Point | null = null;
+  private gesture: Gesture | null = null;
+  private tool: Tool = 'select';
+  private sceneTransition: SceneTransition | null = null;
+  private spaceDown = false;
+  private devicePixelRatio = window.devicePixelRatio || 1;
+  private renderQueued = false;
+
+  constructor(canvasElement: HTMLCanvasElement, actions: CanvasActions) {
     this.canvas = canvasElement;
-    this.ctx = canvasElement.getContext('2d');
+    this.ctx = canvasElement.getContext('2d')!;
     this.rough = rough.canvas(canvasElement);
     this.actions = actions;
-
-    this.view = { x: 0, y: 0, scale: 1 };
-    this.model = { nodes: [], edges: [], ghosts: [], traits: new Map() };
-    this.selection = new Set();
-    this.selectedEdge = null;
-    this.hoverNode = null;
-    this.hoverPoint = null;
-    this.gesture = null;
-    this.tool = 'select';
-    this.expansionLayer = null;
-    this.sceneTransition = null;
-    this.spaceDown = false;
-    this.devicePixelRatio = window.devicePixelRatio || 1;
-    this.renderQueued = false;
+    this.model = {
+      nodes: [],
+      edges: [],
+      ghosts: [],
+      nodesByName: new Map(),
+      traits: new Map(),
+      sourceDoc: { leading: [], preamble: null, items: [] },
+      sourcePath: null,
+    };
 
     this.bindEvents();
     this.syncCanvasSize();
   }
 
-  bindEvents() {
+  private bindEvents(): void {
     const resizeObserver = new ResizeObserver(() => this.syncCanvasSize());
-    resizeObserver.observe(this.canvas.parentElement);
+    resizeObserver.observe(this.canvas.parentElement!);
 
     this.canvas.addEventListener('pointerdown', (event) => this.onPointerDown(event));
     this.canvas.addEventListener('pointermove', (event) => this.onPointerMove(event));
@@ -171,7 +290,7 @@ export class CanvasView {
     });
   }
 
-  syncCanvasSize() {
+  private syncCanvasSize(): void {
     const bounds = this.canvas.getBoundingClientRect();
     this.devicePixelRatio = window.devicePixelRatio || 1;
     this.canvas.width = Math.max(1, Math.round(bounds.width * this.devicePixelRatio));
@@ -179,7 +298,7 @@ export class CanvasView {
     this.requestRender();
   }
 
-  setModel(model) {
+  setModel(model: FlowModel): void {
     const selectedEdgeSpec = this.selectedEdge?.spec ?? null;
 
     this.model = model;
@@ -190,29 +309,30 @@ export class CanvasView {
       [...this.selection]
         .map((node) => model.nodes.find((candidate) => candidate.id === node.id)
           ?? (this.expansionLayer?.isEmbedded(node) ? node : null))
-        .filter(Boolean),
+        .filter((node): node is FlowNode => node != null),
     );
     this.selectedEdge = model.edges.find((edge) => edge.spec === selectedEdgeSpec)
       ?? (this.selectedEdge && this.expansionLayer?.isEmbedded(this.selectedEdge.from) ? this.selectedEdge : null);
     if (this.hoverNode) {
-      this.hoverNode = model.nodes.find((node) => node.id === this.hoverNode.id)
+      const previousHoverId = this.hoverNode.id;
+      this.hoverNode = model.nodes.find((node) => node.id === previousHoverId)
         ?? (this.expansionLayer?.isEmbedded(this.hoverNode) ? this.hoverNode : null);
     }
     this.requestRender();
   }
 
-  setTool(tool) {
+  setTool(tool: Tool): void {
     this.tool = tool;
     this.updateCursor(this.hoverPoint ?? undefined);
   }
 
-  rectOf(model, node) {
-    return model.display?.rects.get(node) ?? node.pos;
+  private rectOf(model: FlowModel, node: FlowNode): Rect {
+    return model.display?.rects.get(node) ?? node.pos!;
   }
 
   // World-space rect of any visible node, including nodes inside unfolded frames: the
   // node's local display rect pushed through its locus transform.
-  rect(node) {
+  rect(node: FlowNode): Rect {
     const locus = this.expansionLayer?.locusOf(node);
     if (!locus) return this.rectOf(this.model, node);
     const local = this.rectOf(locus.model, node);
@@ -220,11 +340,11 @@ export class CanvasView {
     return { x: local.x * scale + tx, y: local.y * scale + ty, w: local.w * scale, h: local.h * scale };
   }
 
-  isNodeVisible(node) {
+  private isNodeVisible(node: FlowNode): boolean {
     return !this.expansionLayer || this.expansionLayer.locusOf(node) != null;
   }
 
-  edgeAnchor(edge) {
+  edgeAnchor(edge: ModelEdge): Point {
     const mid = edge.geometry?.mid ?? rectCenter(this.rect(edge.from));
     const locus = this.expansionLayer?.locusOf(edge.from);
     if (!locus) return mid;
@@ -232,37 +352,37 @@ export class CanvasView {
     return { x: mid.x * scale + tx, y: mid.y * scale + ty };
   }
 
-  select(node) {
+  select(node: FlowNode): void {
     this.selection = new Set([node]);
     this.selectedEdge = null;
     this.requestRender();
   }
 
-  clearSelection() {
+  clearSelection(): void {
     this.selection.clear();
     this.selectedEdge = null;
     this.requestRender();
   }
 
-  worldToScreen(point) {
+  worldToScreen(point: Point): Point {
     return { x: point.x * this.view.scale + this.view.x, y: point.y * this.view.scale + this.view.y };
   }
 
-  screenToWorld(point) {
+  screenToWorld(point: Point): Point {
     return { x: (point.x - this.view.x) / this.view.scale, y: (point.y - this.view.y) / this.view.scale };
   }
 
-  worldRectToScreen(rect) {
+  worldRectToScreen(rect: Rect): Rect {
     const topLeft = this.worldToScreen(rect);
     return { x: topLeft.x, y: topLeft.y, w: rect.w * this.view.scale, h: rect.h * this.view.scale };
   }
 
-  eventPoint(event) {
+  private eventPoint(event: MouseEvent): Point {
     const bounds = this.canvas.getBoundingClientRect();
     return { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
   }
 
-  zoomAt(screenPoint, factor) {
+  private zoomAt(screenPoint: Point, factor: number): void {
     const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, this.view.scale * factor));
     const appliedFactor = newScale / this.view.scale;
     this.view.x = screenPoint.x - (screenPoint.x - this.view.x) * appliedFactor;
@@ -272,22 +392,22 @@ export class CanvasView {
     this.actions.viewChanged?.();
   }
 
-  setZoom(scale) {
+  setZoom(scale: number): void {
     const bounds = this.canvas.getBoundingClientRect();
     this.zoomAt({ x: bounds.width / 2, y: bounds.height / 2 }, scale / this.view.scale);
   }
 
-  setViewNow(view) {
+  setViewNow(view: View): void {
     this.view = { ...view };
     this.requestRender();
     this.actions.viewChanged?.();
   }
 
-  computeFitView(padding = 80) {
+  private computeFitView(padding = 80): View {
     const rects = [
       ...this.model.nodes.map((node) => this.rect(node)),
       ...this.model.ghosts.map((ghost) => ghost.pos),
-    ].filter(Boolean);
+    ].filter((rect): rect is Rect => rect != null);
     const bounds = this.canvas.getBoundingClientRect();
     if (rects.length === 0) {
       return { x: bounds.width / 2 - 200, y: bounds.height / 2 - 150, scale: 1 };
@@ -304,7 +424,7 @@ export class CanvasView {
     };
   }
 
-  fitToContent(padding = 80) {
+  fitToContent(padding = 80): void {
     this.setViewNow(this.computeFitView(padding));
   }
 
@@ -323,29 +443,33 @@ export class CanvasView {
   // can swap its state (async file loads included) without a single frame of the new graph
   // flashing at the old camera.
 
-  beginSceneHold(model, view) {
+  beginSceneHold(model: FlowModel, view: View): void {
     this.sceneTransition = { phase: 'hold', outgoing: { model, view: { ...view } } };
     this.requestRender();
   }
 
-  releaseSceneHold() {
+  releaseSceneHold(): void {
     if (this.sceneTransition?.phase === 'hold') this.sceneTransition = null;
     this.requestRender();
   }
 
-  zoomDiveIn({ nodeRect, duration = DIVE_IN_MS }) {
+  zoomDiveIn({ nodeRect, duration = DIVE_IN_MS }: { nodeRect: Rect; duration?: number }): Promise<void> {
     return this.startZoomTransition({ mode: 'in', nodeRect, duration });
   }
 
-  zoomBackOut({ nodeRect, targetView, duration = BACK_OUT_MS }) {
+  zoomBackOut(
+    { nodeRect, targetView, duration = BACK_OUT_MS }: { nodeRect: Rect; targetView: View; duration?: number },
+  ): Promise<void> {
     return this.startZoomTransition({ mode: 'out', nodeRect, targetView, duration });
   }
 
-  startZoomTransition({ mode, nodeRect, targetView, duration }) {
+  private startZoomTransition(
+    { mode, nodeRect, targetView, duration }: { mode: 'in' | 'out'; nodeRect: Rect; targetView?: View; duration: number },
+  ): Promise<void> {
     const held = this.sceneTransition?.phase === 'hold' ? this.sceneTransition.outgoing : null;
     if (!held) {
       this.sceneTransition = null;
-      this.setViewNow(mode === 'in' ? this.computeFitView() : targetView);
+      this.setViewNow(mode === 'in' ? this.computeFitView() : targetView!);
       return Promise.resolve();
     }
     const bounds = this.canvas.getBoundingClientRect();
@@ -354,11 +478,11 @@ export class CanvasView {
     const growth = Math.max(1.05, contentRect.w / nodeRect.w, contentRect.h / nodeRect.h);
     const nodeCenter = rectCenter(nodeRect);
     const contentCenter = rectCenter(contentRect);
-    const link = { growth, nodeCenter, contentCenter };
+    const link: CameraLink = { growth, nodeCenter, contentCenter };
 
-    let parentFrom;
-    let parentTo;
-    let incomingEnd;
+    let parentFrom: View;
+    let parentTo: View;
+    let incomingEnd: View;
     if (mode === 'in') {
       const fit = this.computeFitView();
       parentFrom = held.view;
@@ -366,8 +490,8 @@ export class CanvasView {
       incomingEnd = fit;
     } else {
       parentFrom = parentViewLinkedTo(held.view, link);
-      parentTo = targetView;
-      incomingEnd = targetView;
+      parentTo = targetView!;
+      incomingEnd = targetView!;
     }
 
     return new Promise((resolve) => {
@@ -390,7 +514,7 @@ export class CanvasView {
     });
   }
 
-  finishSceneTransition() {
+  private finishSceneTransition(): void {
     const transition = this.sceneTransition;
     if (!transition) return;
     this.sceneTransition = null;
@@ -402,7 +526,7 @@ export class CanvasView {
     this.requestRender();
   }
 
-  onWheel(event) {
+  private onWheel(event: WheelEvent): void {
     event.preventDefault();
     if (this.sceneTransition) {
       this.finishSceneTransition();
@@ -412,7 +536,7 @@ export class CanvasView {
     this.zoomAt(this.eventPoint(event), factor);
   }
 
-  onPointerDown(event) {
+  private onPointerDown(event: PointerEvent): void {
     if (this.sceneTransition) {
       this.finishSceneTransition();
       return;
@@ -441,7 +565,7 @@ export class CanvasView {
         type: 'resize',
         node: handle.node,
         corner: handle.corner,
-        startRect: { ...handle.node.pos },
+        startRect: { ...handle.node.pos! },
         startWorld: world,
         scale: this.expansionLayer?.scaleOf(handle.node) ?? 1,
       };
@@ -463,7 +587,7 @@ export class CanvasView {
       this.gesture = {
         type: 'move',
         nodes: [...this.selection],
-        startPositions: new Map([...this.selection].map((n) => [n, { x: n.pos.x, y: n.pos.y }])),
+        startPositions: new Map([...this.selection].map((n) => [n, { x: n.pos!.x, y: n.pos!.y }])),
         // World-space drag deltas are divided by each node's locus scale so nodes inside
         // scaled-down frames track the cursor instead of racing ahead of it.
         scales: new Map([...this.selection].map((n) => [n, this.expansionLayer?.scaleOf(n) ?? 1])),
@@ -504,7 +628,7 @@ export class CanvasView {
     this.requestRender();
   }
 
-  onPointerMove(event) {
+  private onPointerMove(event: PointerEvent): void {
     const screen = this.eventPoint(event);
     const world = this.screenToWorld(screen);
     this.hoverPoint = world;
@@ -530,10 +654,10 @@ export class CanvasView {
       if (!gesture.moved && screenDistance < DRAG_THRESHOLD_PX) return;
       gesture.moved = true;
       for (const node of gesture.nodes) {
-        const start = gesture.startPositions.get(node);
+        const start = gesture.startPositions.get(node)!;
         const scale = gesture.scales.get(node) ?? 1;
-        node.pos.x = snap(start.x + dx / scale);
-        node.pos.y = snap(start.y + dy / scale);
+        node.pos!.x = snap(start.x + dx / scale);
+        node.pos!.y = snap(start.y + dy / scale);
       }
       this.requestRender();
       this.actions.viewChanged?.();
@@ -552,12 +676,13 @@ export class CanvasView {
     }
   }
 
-  applyResize(gesture, world) {
+  private applyResize(gesture: Extract<Gesture, { type: 'resize' }>, world: Point): void {
     const dx = (world.x - gesture.startWorld.x) / (gesture.scale ?? 1);
     const dy = (world.y - gesture.startWorld.y) / (gesture.scale ?? 1);
     const start = gesture.startRect;
-    const rect = gesture.node.pos;
-    const [vertical, horizontal] = gesture.corner;
+    const rect = gesture.node.pos!;
+    const vertical = gesture.corner[0];
+    const horizontal = gesture.corner[1];
 
     if (horizontal === 'e') rect.w = Math.max(MIN_NODE_WIDTH, snap(start.w + dx));
     if (vertical === 's') rect.h = Math.max(MIN_NODE_HEIGHT, snap(start.h + dy));
@@ -573,7 +698,7 @@ export class CanvasView {
     }
   }
 
-  onPointerUp(event) {
+  private onPointerUp(event: PointerEvent): void {
     const gesture = this.gesture;
     this.gesture = null;
     this.updateCursor();
@@ -599,11 +724,11 @@ export class CanvasView {
       });
     } else if (gesture.type === 'create') {
       const bigEnoughOnScreen =
-        gesture.rect &&
+        gesture.rect != null &&
         gesture.rect.w * this.view.scale > 14 &&
         gesture.rect.h * this.view.scale > 10;
       if (bigEnoughOnScreen) {
-        this.actions.createNode(this.snapCreateRect(gesture.rect));
+        this.actions.createNode(this.snapCreateRect(gesture.rect!));
       }
     } else if (gesture.type === 'marquee' && gesture.rect) {
       this.selectNodesInMarquee(gesture.rect);
@@ -611,7 +736,7 @@ export class CanvasView {
     this.requestRender();
   }
 
-  inSameModel(nodeA, nodeB) {
+  private inSameModel(nodeA: FlowNode | null, nodeB: FlowNode | null): boolean {
     if (!nodeA || !nodeB) return false;
     if (!this.expansionLayer) return true;
     return (this.expansionLayer.modelOf(nodeA) ?? this.model) === (this.expansionLayer.modelOf(nodeB) ?? this.model);
@@ -619,7 +744,7 @@ export class CanvasView {
 
   // Marquee reaches into unfolded frames, but a node is skipped when one of its host
   // frames is also caught — dragging a frame already carries its contents.
-  selectNodesInMarquee(rect) {
+  private selectNodesInMarquee(rect: Rect): void {
     const candidates = this.expansionLayer?.locus ? [...this.expansionLayer.locus.keys()] : this.model.nodes;
     for (const node of candidates) {
       if (rectsIntersect(rect, this.rect(node))) this.selection.add(node);
@@ -629,7 +754,7 @@ export class CanvasView {
     }
   }
 
-  hasSelectedAncestorFrame(node) {
+  private hasSelectedAncestorFrame(node: FlowNode): boolean {
     let host = this.expansionLayer?.hostOf(node);
     while (host) {
       if (this.selection.has(host)) return true;
@@ -638,7 +763,7 @@ export class CanvasView {
     return false;
   }
 
-  dispatchNodePress(gesture, world) {
+  private dispatchNodePress(gesture: Extract<Gesture, { type: 'move' }>, world: Point): void {
     const badge = this.hitBadge(world);
     const pressedBadge = gesture.pressedBadge;
     if (badge && pressedBadge && badge.node === pressedBadge.node && badge.kind === pressedBadge.kind) {
@@ -649,7 +774,7 @@ export class CanvasView {
     this.actions.nodeClicked(gesture.pressedNode);
   }
 
-  snapCreateRect(rect) {
+  private snapCreateRect(rect: Rect): Rect {
     return {
       x: snap(rect.x),
       y: snap(rect.y),
@@ -658,7 +783,7 @@ export class CanvasView {
     };
   }
 
-  onDoubleClick(event) {
+  private onDoubleClick(event: MouseEvent): void {
     if (this.sceneTransition) return;
     const world = this.screenToWorld(this.eventPoint(event));
     // Edges win over nodes so edges inside unfolded frames stay editable — a frame always
@@ -674,11 +799,11 @@ export class CanvasView {
     this.actions.quickCreateNode(world);
   }
 
-  hitNode(world) {
+  private hitNode(world: Point): FlowNode | null {
     return this.hitNodeIn(this.model, world);
   }
 
-  hitNodeIn(model, world) {
+  private hitNodeIn(model: FlowModel, world: Point): FlowNode | null {
     for (let index = model.nodes.length - 1; index >= 0; index -= 1) {
       const node = model.nodes[index];
       const expansion = model.display?.expansions.get(node);
@@ -692,11 +817,11 @@ export class CanvasView {
     return null;
   }
 
-  hitGhost(world) {
+  private hitGhost(world: Point): GhostNode | null {
     return this.model.ghosts.find((ghost) => rectContains(ghost.pos, world)) ?? null;
   }
 
-  portPositions(node) {
+  private portPositions(node: FlowNode): Point[] {
     const { x, y, w, h } = this.rect(node);
     return [
       { x: x + w / 2, y },
@@ -706,7 +831,7 @@ export class CanvasView {
     ];
   }
 
-  hitPort(world) {
+  private hitPort(world: Point): { node: FlowNode; port: Point } | null {
     const candidates = new Set([...this.selection]);
     if (this.hoverNode) candidates.add(this.hoverNode);
     const hitRadius = PORT_HIT_RADIUS / this.view.scale;
@@ -718,12 +843,12 @@ export class CanvasView {
     return null;
   }
 
-  hitResizeHandle(world) {
+  private hitResizeHandle(world: Point): { node: FlowNode; corner: ResizeCorner } | null {
     if (this.selection.size !== 1) return null;
     const [node] = this.selection;
     const hitRadius = 9 / this.view.scale;
     const { x, y, w, h } = this.rect(node);
-    const corners = [
+    const corners: Array<{ corner: ResizeCorner; x: number; y: number }> = [
       { corner: 'nw', x, y },
       { corner: 'ne', x: x + w, y },
       { corner: 'sw', x, y: y + h },
@@ -740,10 +865,10 @@ export class CanvasView {
   // Badge slots run right-to-left from the node's top-right corner. Embedded (inline
   // expanded) subgraphs only offer the inline toggle: full-page navigation from inside a
   // frame would skip levels of the breadcrumb trail.
-  nodeBadges(model, node) {
+  private nodeBadges(model: FlowModel, node: FlowNode): Badge[] {
     if (!model.traits.get(node)?.expand) return [];
     const rect = this.rectOf(model, node);
-    const slotCenter = (slot) => ({ x: rect.x + rect.w - 16 - slot * BADGE_SLOT_SPACING, y: rect.y + 15 });
+    const slotCenter = (slot: number) => ({ x: rect.x + rect.w - 16 - slot * BADGE_SLOT_SPACING, y: rect.y + 15 });
     if (this.expansionLayer?.isOpen(node.id)) {
       if (model.embedded) return [{ kind: 'collapse', ...slotCenter(0) }];
       return [
@@ -758,11 +883,11 @@ export class CanvasView {
     ];
   }
 
-  hitBadge(world) {
+  private hitBadge(world: Point): BadgeHit | null {
     return this.hitBadgeIn(this.model, world, this.view.scale);
   }
 
-  hitBadgeIn(model, world, effectiveScale) {
+  private hitBadgeIn(model: FlowModel, world: Point, effectiveScale: number): BadgeHit | null {
     const hitRadius = BADGE_HIT_RADIUS / Math.min(effectiveScale, 1);
     for (let index = model.nodes.length - 1; index >= 0; index -= 1) {
       const node = model.nodes[index];
@@ -785,11 +910,11 @@ export class CanvasView {
     return null;
   }
 
-  hitEdge(world) {
+  private hitEdge(world: Point): ModelEdge | null {
     return this.hitEdgeIn(this.model, world, this.view.scale);
   }
 
-  hitEdgeIn(model, world, effectiveScale) {
+  private hitEdgeIn(model: FlowModel, world: Point, effectiveScale: number): ModelEdge | null {
     for (const [, expansion] of model.display?.expansions ?? []) {
       if (!rectContains(expansion.inner, world)) continue;
       const transform = expansion.transform;
@@ -807,7 +932,7 @@ export class CanvasView {
     return null;
   }
 
-  updateCursor(world) {
+  private updateCursor(world?: Point): void {
     let cursor = this.tool === 'node' ? 'crosshair' : 'default';
     if (this.spaceDown || this.gesture?.type === 'pan') cursor = 'grab';
     else if (world) {
@@ -819,7 +944,7 @@ export class CanvasView {
     this.canvas.style.cursor = cursor;
   }
 
-  requestRender() {
+  requestRender(): void {
     if (this.renderQueued) return;
     this.renderQueued = true;
     requestAnimationFrame(() => {
@@ -828,7 +953,7 @@ export class CanvasView {
     });
   }
 
-  render() {
+  private render(): void {
     const { ctx } = this;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -856,7 +981,7 @@ export class CanvasView {
     if (expansionState.animating) this.requestRender();
   }
 
-  renderSceneTransition(transition) {
+  private renderSceneTransition(transition: SceneTransition): void {
     const { ctx } = this;
     const dpr = this.devicePixelRatio;
     const now = performance.now();
@@ -905,7 +1030,7 @@ export class CanvasView {
     else this.requestRender();
   }
 
-  drawWorldScene(model, view, alpha, clipScreenRect = null) {
+  private drawWorldScene(model: FlowModel, view: View, alpha: number, clipScreenRect: Rect | null = null): void {
     if (alpha <= 0.01) return;
     const { ctx } = this;
     const dpr = this.devicePixelRatio;
@@ -924,15 +1049,15 @@ export class CanvasView {
 
   // Labels get their own pass after nodes so they stay readable even where an edge dives
   // under a node or an expanded frame.
-  drawScene(model) {
+  private drawScene(model: FlowModel): void {
     this.computeEdgeGeometry(model);
-    for (const edge of model.edges) this.drawEdge(model, edge);
+    for (const edge of model.edges) this.drawEdge(edge);
     for (const node of model.nodes) this.drawNode(model, node);
     for (const edge of model.edges) this.drawEdgeLabel(edge);
     for (const ghost of model.ghosts) this.drawGhost(ghost, { clickable: !model.embedded });
   }
 
-  drawGrid(view) {
+  private drawGrid(view: View): void {
     const { ctx } = this;
     const spacing = 32 * view.scale;
     if (spacing < 9) return;
@@ -947,8 +1072,8 @@ export class CanvasView {
     }
   }
 
-  computeEdgeGeometry(model) {
-    const pairCounts = new Map();
+  private computeEdgeGeometry(model: FlowModel): void {
+    const pairCounts = new Map<string, number>();
     for (const edge of model.edges) {
       if (!edge.to?.pos || !edge.from?.pos) {
         edge.geometry = null;
@@ -959,7 +1084,7 @@ export class CanvasView {
         continue;
       }
       const fromRect = this.rectOf(model, edge.from);
-      const toRect = edge.to.ghost ? edge.to.pos : this.rectOf(model, edge.to);
+      const toRect = isGhost(edge.to) ? edge.to.pos : this.rectOf(model, edge.to);
       const pairKey = [edge.from.name, edge.to.name].sort().join(' ');
       const occurrence = pairCounts.get(pairKey) ?? 0;
       pairCounts.set(pairKey, occurrence + 1);
@@ -978,7 +1103,7 @@ export class CanvasView {
     }
   }
 
-  selfLoopGeometry(model, node) {
+  private selfLoopGeometry(model: FlowModel, node: FlowNode): NonNullable<ModelEdge['geometry']> {
     const { x, y, w } = this.rectOf(model, node);
     const a = { x: x + w - 30, y };
     const b = { x: x + w, y: y + 24 };
@@ -986,17 +1111,17 @@ export class CanvasView {
     return { a, b, mid, labelRect: null, selfLoop: true };
   }
 
-  edgeColor(edge) {
+  private edgeColor(edge: ModelEdge): string {
     if (edge === this.selectedEdge) return COLORS.select;
     return edge.kind === 'error' ? COLORS.error : COLORS.edge;
   }
 
-  drawEdge(model, edge) {
+  private drawEdge(edge: ModelEdge): void {
     const geometry = edge.geometry;
     if (!geometry) return;
     const color = this.edgeColor(edge);
     const seed = seedFrom(`${edge.from.name}->${edge.spec.target}:${edge.spec.label ?? ''}`);
-    const options = {
+    const options: RoughOptions = {
       seed,
       stroke: color,
       strokeWidth: edge === this.selectedEdge ? 2.2 : 1.5,
@@ -1012,7 +1137,7 @@ export class CanvasView {
     this.drawArrowhead(geometry.mid, geometry.b, color);
   }
 
-  drawEdgeLabel(edge) {
+  private drawEdgeLabel(edge: ModelEdge): void {
     const geometry = edge.geometry;
     if (!geometry) return;
     const { ctx } = this;
@@ -1055,7 +1180,7 @@ export class CanvasView {
     }
   }
 
-  drawArrowhead(fromPoint, tip, color) {
+  private drawArrowhead(fromPoint: Point, tip: Point, color: string): void {
     const { ctx } = this;
     const angle = Math.atan2(tip.y - fromPoint.y, tip.x - fromPoint.x);
     const length = 11;
@@ -1071,20 +1196,20 @@ export class CanvasView {
     ctx.stroke();
   }
 
-  roundedRect(rect, radius) {
+  private roundedRect(rect: Rect, radius: number): void {
     const { ctx } = this;
     ctx.beginPath();
     ctx.roundRect(rect.x, rect.y, rect.w, rect.h, radius);
   }
 
-  nodeStrokeColor(node, traits) {
+  private nodeStrokeColor(traits: NodeTraits | undefined): string {
     if (traits?.expand) return COLORS.expandStroke;
     if (traits?.decision) return COLORS.decisionStroke;
     if (traits?.entry) return COLORS.entryStroke;
     return COLORS.nodeStroke;
   }
 
-  drawNode(model, node) {
+  private drawNode(model: FlowModel, node: FlowNode): void {
     const expansion = model.display?.expansions.get(node);
     if (expansion) {
       this.drawExpandedNode(model, node, expansion);
@@ -1093,7 +1218,7 @@ export class CanvasView {
 
     const traits = model.traits.get(node);
     const rect = this.rectOf(model, node);
-    const stroke = this.nodeStrokeColor(node, traits);
+    const stroke = this.nodeStrokeColor(traits);
 
     this.rough.rectangle(rect.x, rect.y, rect.w, rect.h, {
       seed: seedFrom(node.id ?? node.name),
@@ -1106,11 +1231,11 @@ export class CanvasView {
     });
 
     this.drawNodeText(node, rect);
-    this.drawTraitBadges(node, traits, rect);
+    this.drawTraitBadges(node, model.traits.get(node), rect);
     this.drawExpandBadges(model, node);
   }
 
-  drawExpandedNode(model, node, expansion) {
+  private drawExpandedNode(model: FlowModel, node: FlowNode, expansion: FrameExpansion): void {
     const { ctx } = this;
     const { frame, inner, transform, subModel } = expansion;
 
@@ -1138,14 +1263,14 @@ export class CanvasView {
       ctx.globalAlpha *= expansion.alpha;
       ctx.translate(transform.tx, transform.ty);
       ctx.scale(transform.scale, transform.scale);
-      if (subModel.nodes.length === 0) this.drawEmptySubgraphHint(subModel);
+      if (subModel.nodes.length === 0) this.drawEmptySubgraphHint();
       else this.drawScene(subModel);
       ctx.restore();
     }
     this.drawExpandBadges(model, node);
   }
 
-  drawEmptySubgraphHint(subModel) {
+  private drawEmptySubgraphHint(): void {
     const { ctx } = this;
     ctx.font = `13px ${HAND_FONT}`;
     ctx.fillStyle = COLORS.muted;
@@ -1154,7 +1279,7 @@ export class CanvasView {
     ctx.fillText('empty subgraph', 160, 90);
   }
 
-  drawNodeText(node, rect) {
+  private drawNodeText(node: FlowNode, rect: Rect): void {
     const { ctx } = this;
     const { x, y, w, h } = rect;
     const maxWidth = w - 26;
@@ -1190,11 +1315,11 @@ export class CanvasView {
     }
   }
 
-  wrapText(text, maxWidth, maxLines) {
+  private wrapText(text: string, maxWidth: number, maxLines: number): string[] {
     if (maxLines <= 0) return [];
     const { ctx } = this;
     const words = text.split(' ');
-    const lines = [];
+    const lines: string[] = [];
     let current = '';
     for (const word of words) {
       const candidate = current ? `${current} ${word}` : word;
@@ -1213,7 +1338,7 @@ export class CanvasView {
     return lines;
   }
 
-  drawTraitBadges(node, traits, rect) {
+  private drawTraitBadges(node: FlowNode, traits: NodeTraits | undefined, rect: Rect): void {
     const { ctx } = this;
     const { x, y, w, h } = rect;
     ctx.textBaseline = 'middle';
@@ -1238,7 +1363,7 @@ export class CanvasView {
     }
   }
 
-  drawExpandBadges(model, node) {
+  private drawExpandBadges(model: FlowModel, node: FlowNode): void {
     const { ctx } = this;
     for (const badge of this.nodeBadges(model, node)) {
       this.rough.circle(badge.x, badge.y, 20, {
@@ -1255,7 +1380,7 @@ export class CanvasView {
     }
   }
 
-  drawGhost(ghost, { clickable = true } = {}) {
+  private drawGhost(ghost: GhostNode, { clickable = true }: { clickable?: boolean } = {}): void {
     const { ctx } = this;
     const { x, y, w, h } = ghost.pos;
     ctx.save();
@@ -1275,7 +1400,7 @@ export class CanvasView {
     }
   }
 
-  drawSelectionDecorations() {
+  private drawSelectionDecorations(): void {
     const { ctx } = this;
     const inflate = 5;
     ctx.save();
@@ -1301,7 +1426,7 @@ export class CanvasView {
     }
   }
 
-  drawPorts() {
+  private drawPorts(): void {
     if (this.gesture && this.gesture.type !== 'edge') return;
     const { ctx } = this;
     const nodesWithPorts = new Set([...this.selection]);
@@ -1321,7 +1446,7 @@ export class CanvasView {
     }
   }
 
-  drawGestureOverlay() {
+  private drawGestureOverlay(): void {
     const gesture = this.gesture;
     if (!gesture) return;
     const { ctx } = this;
@@ -1364,11 +1489,11 @@ export class CanvasView {
   }
 }
 
-function isTypingTarget(element) {
+function isTypingTarget(element: EventTarget | null): boolean {
   return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
 }
 
-function viewCenterWorld(view, bounds) {
+function viewCenterWorld(view: View, bounds: ViewportSize): Point {
   return {
     x: (bounds.width / 2 - view.x) / view.scale,
     y: (bounds.height / 2 - view.y) / view.scale,
@@ -1377,7 +1502,7 @@ function viewCenterWorld(view, bounds) {
 
 // Log-scale interpolation of the camera: the zoom rate feels constant and the world point
 // at the viewport center travels a straight line.
-function interpolateView(fromView, toView, t, bounds) {
+export function interpolateView(fromView: View, toView: View, t: number, bounds: ViewportSize): View {
   const scale = Math.exp(lerp(Math.log(fromView.scale), Math.log(toView.scale), t));
   const fromCenter = viewCenterWorld(fromView, bounds);
   const toCenter = viewCenterWorld(toView, bounds);
@@ -1389,7 +1514,7 @@ function interpolateView(fromView, toView, t, bounds) {
 // The camera link between the two scenes of a zoom transition: the child camera is the
 // parent camera divided by `growth`, positioned so the child's content center sits exactly
 // where the node's center is on screen. The two functions are inverses of each other.
-function childViewLinkedTo(parentView, link) {
+export function childViewLinkedTo(parentView: View, link: CameraLink): View {
   const scale = parentView.scale / link.growth;
   const nodeCenterScreen = {
     x: link.nodeCenter.x * parentView.scale + parentView.x,
@@ -1402,7 +1527,7 @@ function childViewLinkedTo(parentView, link) {
   };
 }
 
-function parentViewLinkedTo(childView, link) {
+export function parentViewLinkedTo(childView: View, link: CameraLink): View {
   const scale = childView.scale * link.growth;
   const contentCenterScreen = {
     x: link.contentCenter.x * childView.scale + childView.x,
@@ -1415,11 +1540,11 @@ function parentViewLinkedTo(childView, link) {
   };
 }
 
-function contentBoundsOf(model) {
+function contentBoundsOf(model: FlowModel): Rect {
   const rects = [
     ...model.nodes.map((node) => model.display?.rects.get(node) ?? node.pos),
     ...model.ghosts.map((ghost) => ghost.pos),
-  ].filter(Boolean);
+  ].filter((rect): rect is Rect => rect != null);
   if (rects.length === 0) return { x: 0, y: 0, w: 400, h: 300 };
   const minX = Math.min(...rects.map((rect) => rect.x));
   const minY = Math.min(...rects.map((rect) => rect.y));
@@ -1428,7 +1553,7 @@ function contentBoundsOf(model) {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
-function unquotedDescription(node) {
+function unquotedDescription(node: FlowNode): string | null {
   const raw = node.props.find((prop) => prop.key === 'description')?.value;
   if (!raw) return null;
   const trimmed = raw.trim();

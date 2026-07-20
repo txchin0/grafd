@@ -2,9 +2,16 @@
 
 A freeform web canvas editor for the `.flow` diagram format defined in [FLOW-SPEC.md](FLOW-SPEC.md).
 
-Run with `npm start`, then open http://localhost:4600. The server scans the project tree for
-`*.flow` files, watches them, and pushes changes to the browser over WebSocket; edits made on
-the canvas are written straight back to disk. Example diagrams live in `flows/`.
+Run with `npm start` (builds, then serves), then open http://localhost:4600. The server scans
+the project tree for `*.flow` files, watches them, and pushes changes to the browser over
+WebSocket; edits made on the canvas are written straight back to disk. Example diagrams live
+in `flows/`.
+
+The codebase is TypeScript, compiled by `tsc` alone — no bundler. `npm run build` emits
+`src/` to `dist/` (which is served, never edited); `npm run watch` recompiles on change
+(pair it with a running server; only server-side edits need a restart). `npm run typecheck`
+checks everything including tests without emitting, and `npm test` runs the Vitest unit
+tests in `tests/`.
 
 ## Deviation from FLOW-SPEC.md
 
@@ -14,28 +21,40 @@ editor-owned node properties:
 - `id: <uuid>` — stable node identity
 - `pos: x, y, w, h` — the node's canvas rectangle
 
-Everything else follows the spec. `shared/flow-format.js` is the single parser/serializer,
-used by both the server and the browser.
+Everything else follows the spec. `src/shared/flow-format.ts` is the single
+parser/serializer, used by both the server and the browser, and defines the shared domain
+types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
 
 ## Architecture
 
-- `server/server.js` — express static host + REST read endpoints, WebSocket write/broadcast,
-  chokidar file watcher (own writes are suppressed by content hash).
-- `shared/flow-format.js` — parse/serialize `.flow` text, format helpers. No DOM, no Node APIs.
-- `public/js/flow-doc.js` — document mutations (add/rename/delete nodes and edges), scope
-  resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building.
-- `public/js/canvas-view.js` — rough.js rendering plus all pointer interaction (pan, zoom,
+- `src/server/server.ts` — express static host + REST read endpoints, WebSocket
+  write/broadcast, chokidar file watcher (own writes are suppressed by content hash).
+  Serves `public/` (static shell), `dist/client` at `/js`, `dist/shared` at `/shared`, and
+  rough.js at `/vendor/roughjs` (mapped to the bare `roughjs` specifier by the import map
+  in `public/index.html`).
+- `src/server/flow-files.ts` — path safety (`.flow`-only, root-confined), portable path
+  conversion, recursive `.flow` discovery, content hashing.
+- `src/shared/flow-format.ts` — parse/serialize `.flow` text, format helpers. No DOM, no
+  Node APIs.
+- `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
+  resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building
+  (`FlowModel` and its types).
+- `src/client/canvas-view.ts` — rough.js rendering plus all pointer interaction (pan, zoom,
   tool modes, drag-create, move, resize, port-drag edge creation, marquee select) and
   camera animations for subgraph navigation.
-- `public/js/expansion.js` — session-local inline subgraph expansion: which nodes are
+- `src/client/expansion.ts` — session-local inline subgraph expansion: which nodes are
   unfolded, open/close animation, external .flow fetching, frame geometry, the warp
   displacement of surrounding nodes (view-only; never written to disk), and the loci map
   that lets nodes inside frames be edited in place (mutations are routed to the .flow file
   that owns them).
-- `public/js/editors.js` — floating DOM overlays for node and edge editing.
-- `public/js/main.js` — app state, WebSocket sync, undo/redo, sidebar, keyboard shortcuts.
+- `src/client/editors.ts` — floating DOM overlays for node and edge editing.
+- `src/client/main.ts` — app state, WebSocket sync, undo/redo, sidebar, keyboard shortcuts.
+- `tests/` — Vitest unit tests for the parser/serializer, document mutations, server file
+  logic, expansion geometry, and camera math.
 
-No frameworks and no graph libraries — rough.js is the only rendering dependency.
+The browser runs the compiled output as native ES modules — client code imports shared code
+relatively (`../shared/flow-format.js`), which resolves identically inside `dist/` and as
+URLs. No frameworks and no graph libraries — rough.js is the only rendering dependency.
 
 ## Code style — self-documenting code (required)
 

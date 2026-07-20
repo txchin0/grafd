@@ -8,14 +8,78 @@
 // normalized. The format has no escape sequences, so double quotes are not allowed inside
 // labels and quoted values (see quoteValue).
 
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface KeyValue {
+  key: string;
+  value: string;
+}
+
+export interface EdgeDataField {
+  key: string;
+  type: string;
+}
+
+export interface EdgeSpec {
+  target: string;
+  label: string | null;
+  data: EdgeDataField[] | null;
+}
+
+export interface FlowNode {
+  name: string;
+  id: string | null;
+  pos: Rect | null;
+  props: KeyValue[];
+  edges: EdgeSpec[];
+}
+
+export interface CommentItem {
+  kind: 'comment';
+  text: string;
+}
+
+export interface NodeItem {
+  kind: 'node';
+  node: FlowNode;
+}
+
+export interface GraphItem {
+  kind: 'graph';
+  name: string;
+  items: FlowItem[];
+}
+
+export type FlowItem = CommentItem | NodeItem | GraphItem;
+
+export interface Preamble {
+  fields: KeyValue[];
+}
+
+export interface FlowDocument {
+  leading: string[];
+  preamble: Preamble | null;
+  items: FlowItem[];
+}
+
+export interface ExpandLink {
+  label: string;
+  path: string;
+}
+
 const PROPERTY_LINE = /^([A-Za-z_][\w-]*):\s?(.*)$/;
 const EDGE_LINE = /^->\s+(.+?)(?:\s+:\s+"(.*)")?$/;
 const GRAPH_HEADER = /^graph:\s+(.+)$/;
 const EXTERNAL_EXPAND_LINK = /^\[(.*)\]\((.*)\)$/;
 
-export function parseFlow(text) {
+export function parseFlow(text: string): FlowDocument {
   const lines = text.split(/\r?\n/);
-  const doc = { leading: [], preamble: null, items: [] };
+  const doc: FlowDocument = { leading: [], preamble: null, items: [] };
   let index = skipBlankLines(lines, 0);
 
   while (lines[index]?.trim().startsWith('#')) {
@@ -33,13 +97,13 @@ export function parseFlow(text) {
   return doc;
 }
 
-function skipBlankLines(lines, index) {
+function skipBlankLines(lines: string[], index: number): number {
   while (index < lines.length && lines[index].trim() === '') index += 1;
   return index;
 }
 
-function parsePreamble(lines, start) {
-  const fields = [];
+function parsePreamble(lines: string[], start: number): { fields: KeyValue[]; next: number } {
+  const fields: KeyValue[] = [];
   let index = start;
   while (index < lines.length && lines[index].trim() !== '---') {
     const match = lines[index].trim().match(PROPERTY_LINE);
@@ -49,9 +113,9 @@ function parsePreamble(lines, start) {
   return { fields, next: index + 1 };
 }
 
-function parseItems(lines, start, baseIndent) {
-  const items = [];
-  let currentNode = null;
+function parseItems(lines: string[], start: number, baseIndent: number): { items: FlowItem[]; next: number } {
+  const items: FlowItem[] = [];
+  let currentNode: FlowNode | null = null;
   let index = start;
 
   while (index < lines.length) {
@@ -107,15 +171,15 @@ function parseItems(lines, start, baseIndent) {
   return { items, next: index };
 }
 
-function stripCommentMarker(line) {
+function stripCommentMarker(line: string): string {
   return line.trim().replace(/^#\s?/, '');
 }
 
-export function emptyNode(name) {
+export function emptyNode(name: string): FlowNode {
   return { name, id: null, pos: null, props: [], edges: [] };
 }
 
-function assignNodeProperty(node, key, value) {
+function assignNodeProperty(node: FlowNode, key: string, value: string): void {
   if (key === 'id') {
     node.id = value;
   } else if (key === 'pos') {
@@ -125,7 +189,7 @@ function assignNodeProperty(node, key, value) {
   }
 }
 
-function attachEdgeData(node, trimmed) {
+function attachEdgeData(node: FlowNode, trimmed: string): void {
   const lastEdge = node.edges[node.edges.length - 1];
   if (!lastEdge) return;
   if (trimmed === 'data:') {
@@ -136,7 +200,7 @@ function attachEdgeData(node, trimmed) {
   if (match && lastEdge.data) lastEdge.data.push({ key: match[1], type: match[2].trim() });
 }
 
-export function parseEdgeExpression(text) {
+export function parseEdgeExpression(text: string): EdgeSpec {
   const match = text.trim().match(EDGE_LINE);
   if (!match) {
     return { target: text.trim().replace(/^->\s*/, ''), label: null, data: null };
@@ -144,23 +208,23 @@ export function parseEdgeExpression(text) {
   return { target: match[1].trim(), label: match[2] ?? null, data: null };
 }
 
-export function serializeEdgeExpression(edge) {
+export function serializeEdgeExpression(edge: EdgeSpec): string {
   const label = edge.label ? ` : "${edge.label}"` : '';
   return `-> ${edge.target}${label}`;
 }
 
-function parsePos(value) {
+function parsePos(value: string): Rect | null {
   const parts = value.split(',').map((part) => Number(part.trim()));
   if (parts.length !== 4 || parts.some(Number.isNaN)) return null;
   return { x: parts[0], y: parts[1], w: parts[2], h: parts[3] };
 }
 
-function formatPos(pos) {
+function formatPos(pos: Rect): string {
   return [pos.x, pos.y, pos.w, pos.h].map(Math.round).join(', ');
 }
 
-export function serializeFlow(doc) {
-  const blocks = [];
+export function serializeFlow(doc: FlowDocument): string {
+  const blocks: string[] = [];
   if (doc.leading?.length) {
     blocks.push(doc.leading.map((text) => `# ${text}`.trimEnd()).join('\n'));
   }
@@ -172,7 +236,7 @@ export function serializeFlow(doc) {
   return blocks.join('\n\n') + '\n';
 }
 
-function serializeItem(item, indent) {
+function serializeItem(item: FlowItem, indent: string): string {
   if (item.kind === 'comment') return `${indent}# ${item.text}`.trimEnd();
   if (item.kind === 'graph') {
     const body = item.items.map((inner) => serializeItem(inner, indent + '  '));
@@ -181,7 +245,7 @@ function serializeItem(item, indent) {
   return serializeNode(item.node, indent);
 }
 
-function serializeNode(node, indent) {
+function serializeNode(node: FlowNode, indent: string): string {
   const lines = [`${indent}${node.name}`];
   const propIndent = indent + '  ';
   if (node.id) lines.push(`${propIndent}id: ${node.id}`);
@@ -197,11 +261,11 @@ function serializeNode(node, indent) {
   return lines.join('\n');
 }
 
-export function getProp(node, key) {
+export function getProp(node: FlowNode, key: string): string | null {
   return node.props.find((prop) => prop.key === key)?.value ?? null;
 }
 
-export function setProp(node, key, value) {
+export function setProp(node: FlowNode, key: string, value: string | null): void {
   if (value == null || value === '') {
     node.props = node.props.filter((prop) => prop.key !== key);
     return;
@@ -211,11 +275,11 @@ export function setProp(node, key, value) {
   else node.props.push({ key, value });
 }
 
-export function getPreambleField(doc, key) {
+export function getPreambleField(doc: FlowDocument, key: string): string | null {
   return doc.preamble?.fields.find((field) => field.key === key)?.value ?? null;
 }
 
-export function setPreambleField(doc, key, value) {
+export function setPreambleField(doc: FlowDocument, key: string, value: string | null): void {
   if (!doc.preamble) doc.preamble = { fields: [] };
   const fields = doc.preamble.fields;
   if (value == null || value === '') {
@@ -227,7 +291,7 @@ export function setPreambleField(doc, key, value) {
   else fields.push({ key, value });
 }
 
-export function unquote(value) {
+export function unquote(value: string | null | undefined): string {
   if (value == null) return '';
   const trimmed = value.trim();
   if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
@@ -236,11 +300,11 @@ export function unquote(value) {
   return trimmed;
 }
 
-export function quoteValue(text) {
+export function quoteValue(text: string): string {
   return `"${text.replace(/"/g, '’')}"`;
 }
 
-export function parseListValue(value) {
+export function parseListValue(value: string | null | undefined): string[] {
   if (!value) return [];
   return value
     .replace(/^\[|\]$/g, '')
@@ -249,11 +313,11 @@ export function parseListValue(value) {
     .filter(Boolean);
 }
 
-export function formatListValue(entries) {
+export function formatListValue(entries: string[]): string {
   return `[${entries.join(', ')}]`;
 }
 
-export function parseExpandLink(value) {
+export function parseExpandLink(value: string | null | undefined): ExpandLink | null {
   const match = value?.trim().match(EXTERNAL_EXPAND_LINK);
   if (!match) return null;
   return { label: match[1], path: match[2] };
@@ -261,7 +325,7 @@ export function parseExpandLink(value) {
 
 // Expand-link paths are relative to the .flow file that contains them; resolves against the
 // containing file's directory using forward-slash portable paths.
-export function resolveLinkPath(containingFilePath, relativePath) {
+export function resolveLinkPath(containingFilePath: string | null, relativePath: string): string {
   const segments = containingFilePath ? containingFilePath.split('/').slice(0, -1) : [];
   for (const segment of relativePath.split('/')) {
     if (segment === '' || segment === '.') continue;
@@ -273,15 +337,15 @@ export function resolveLinkPath(containingFilePath, relativePath) {
 
 // Node names may not contain ": " (spec §3.2) and the format is line-based, so names are
 // collapsed to a single line with that sequence rewritten.
-export function sanitizeName(rawName) {
+export function sanitizeName(rawName: string): string {
   return rawName.replace(/\s+/g, ' ').replace(/:(\s|$)/g, ' -$1').replace(/\s+/g, ' ').trim();
 }
 
-export function collapseToSingleLine(text) {
+export function collapseToSingleLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-export function uniqueName(takenNames, baseName) {
+export function uniqueName(takenNames: Set<string>, baseName: string): string {
   const base = baseName || 'Untitled';
   if (!takenNames.has(base)) return base;
   let counter = 2;
@@ -289,7 +353,7 @@ export function uniqueName(takenNames, baseName) {
   return `${base} ${counter}`;
 }
 
-export function newUuid() {
+export function newUuid(): string {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
     const random = (Math.random() * 16) | 0;

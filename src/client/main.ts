@@ -1,6 +1,6 @@
 // App shell: file list, WebSocket sync with the server, undo/redo, keyboard shortcuts, and
-// the glue between canvas gestures (canvas-view.js), document mutations (flow-doc.js), the
-// floating editors (editors.js), and inline subgraph expansion (expansion.js).
+// the glue between canvas gestures (canvas-view.ts), document mutations (flow-doc.ts), the
+// floating editors (editors.ts), and inline subgraph expansion (expansion.ts).
 //
 // Sync model: the serialized file text is the source of truth. Every mutation edits the
 // parsed AST, re-renders immediately, and writes the re-serialized text to the server
@@ -12,16 +12,59 @@
 // path (login / dashboard.flow). Trail crumbs animate back out; picking a file from the
 // sidebar snaps and clears the trail.
 
-import { parseFlow, serializeFlow, getPreambleField, setPreambleField, getProp, quoteValue, unquote, collapseToSingleLine, parseListValue, formatListValue, parseExpandLink, resolveLinkPath, sanitizeName } from '/shared/flow-format.js';
+import {
+  parseFlow,
+  serializeFlow,
+  getPreambleField,
+  setPreambleField,
+  getProp,
+  quoteValue,
+  unquote,
+  collapseToSingleLine,
+  parseListValue,
+  formatListValue,
+  parseExpandLink,
+  resolveLinkPath,
+  sanitizeName,
+  type EdgeSpec,
+  type ExpandLink,
+  type FlowDocument,
+  type FlowNode,
+  type GraphItem,
+  type Rect,
+} from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
-import { CanvasView } from './canvas-view.js';
-import { ExpansionLayer } from './expansion.js';
+import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
+import { CanvasView, type Tool, type View } from './canvas-view.js';
+import { ExpansionLayer, type DocumentOwner } from './expansion.js';
 import { createEditors } from './editors.js';
+
+type ServerMessage =
+  | { type: 'files'; files: string[] }
+  | { type: 'file'; path: string; text: string };
+
+interface AppState {
+  files: string[];
+  path: string | null;
+  text: string;
+  doc: FlowDocument | null;
+  scope: string | null;
+  model: FlowModel | null;
+}
+
+interface TrailEntry {
+  path: string;
+  scope: string | null;
+  nodeId: string | null;
+  view: View;
+}
+
+type CommitTiming = 'debounce' | 'now';
 
 const COMMIT_DEBOUNCE_MS = 300;
 const UNDO_LIMIT = 100;
 
-const state = {
+const state: AppState = {
   files: [],
   path: null,
   text: '',
@@ -30,46 +73,49 @@ const state = {
   model: null,
 };
 
-const navigation = { trail: [], inProgress: false };
+const navigation = { trail: [] as TrailEntry[], inProgress: false };
 
-const undoStack = [];
-const redoStack = [];
-let commitTimer = null;
-let socket = null;
-const pendingWrites = new Map();
+const undoStack: string[] = [];
+const redoStack: string[] = [];
+let commitTimer: ReturnType<typeof setTimeout> | undefined;
+let socket: WebSocket | null = null;
+const pendingWrites = new Map<string, string>();
+
+function elementById<T extends HTMLElement>(id: string): T {
+  return document.getElementById(id) as T;
+}
 
 const elements = {
-  fileList: document.getElementById('file-list'),
-  newFileButton: document.getElementById('new-file-button'),
-  newFileInput: document.getElementById('new-file-input'),
-  breadcrumb: document.getElementById('breadcrumb'),
-  emptyState: document.getElementById('empty-state'),
-  connectionDot: document.getElementById('connection-dot'),
-  helpToggle: document.getElementById('help-toggle'),
-  helpOverlay: document.getElementById('help-overlay'),
-  toolSelectButton: document.getElementById('tool-select-button'),
-  toolNodeButton: document.getElementById('tool-node-button'),
-  zoomIn: document.getElementById('zoom-in-button'),
-  zoomOut: document.getElementById('zoom-out-button'),
-  zoomLevel: document.getElementById('zoom-level-button'),
-  zoomFit: document.getElementById('zoom-fit-button'),
-  graphPanel: document.getElementById('graph-panel'),
-  graphToggle: document.getElementById('gp-toggle'),
-  graphName: document.getElementById('gp-name'),
-  graphDescription: document.getElementById('gp-description'),
-  graphContext: document.getElementById('gp-context'),
-  graphOnError: document.getElementById('gp-on-error'),
-  graphEntrypoint: document.getElementById('gp-entrypoint'),
+  fileList: elementById<HTMLUListElement>('file-list'),
+  newFileButton: elementById<HTMLButtonElement>('new-file-button'),
+  newFileInput: elementById<HTMLInputElement>('new-file-input'),
+  breadcrumb: elementById<HTMLElement>('breadcrumb'),
+  emptyState: elementById<HTMLDivElement>('empty-state'),
+  connectionDot: elementById<HTMLSpanElement>('connection-dot'),
+  helpToggle: elementById<HTMLButtonElement>('help-toggle'),
+  helpOverlay: elementById<HTMLDivElement>('help-overlay'),
+  toolSelectButton: elementById<HTMLButtonElement>('tool-select-button'),
+  toolNodeButton: elementById<HTMLButtonElement>('tool-node-button'),
+  zoomIn: elementById<HTMLButtonElement>('zoom-in-button'),
+  zoomOut: elementById<HTMLButtonElement>('zoom-out-button'),
+  zoomLevel: elementById<HTMLButtonElement>('zoom-level-button'),
+  zoomFit: elementById<HTMLButtonElement>('zoom-fit-button'),
+  graphPanel: elementById<HTMLDivElement>('graph-panel'),
+  graphToggle: elementById<HTMLButtonElement>('gp-toggle'),
+  graphName: elementById<HTMLInputElement>('gp-name'),
+  graphDescription: elementById<HTMLTextAreaElement>('gp-description'),
+  graphContext: elementById<HTMLInputElement>('gp-context'),
+  graphOnError: elementById<HTMLInputElement>('gp-on-error'),
+  graphEntrypoint: elementById<HTMLInputElement>('gp-entrypoint'),
 };
 
 function scopeItemsNow() {
-  return FlowDoc.scopeItems(state.doc, state.scope);
+  return FlowDoc.scopeItems(state.doc!, state.scope);
 }
 
-function refresh() {
+function refresh(): void {
   if (!state.doc) return;
   state.model = FlowDoc.buildModel(state.doc, state.scope);
-  state.model.sourceDoc = state.doc;
   state.model.sourcePath = state.path;
   expansions.invalidateSubModels();
   view.setModel(state.model);
@@ -78,7 +124,7 @@ function refresh() {
   editors.refreshFromDoc();
 }
 
-function mutate(mutation, { commit = 'debounce' } = {}) {
+function mutate(mutation: () => void, { commit = 'debounce' }: { commit?: CommitTiming } = {}): void {
   if (!state.doc) return;
   mutation();
   refresh();
@@ -86,12 +132,12 @@ function mutate(mutation, { commit = 'debounce' } = {}) {
   else scheduleCommit();
 }
 
-function scheduleCommit() {
+function scheduleCommit(): void {
   clearTimeout(commitTimer);
   commitTimer = setTimeout(commitNow, COMMIT_DEBOUNCE_MS);
 }
 
-function commitNow() {
+function commitNow(): void {
   clearTimeout(commitTimer);
   if (!state.doc || !state.path) return;
   FlowDoc.ensureLayoutEverywhere(state.doc);
@@ -104,36 +150,36 @@ function commitNow() {
   sendWrite(state.path, newText);
 }
 
-function applyHistoryText(text) {
+function applyHistoryText(text: string): void {
   state.text = text;
   state.doc = parseFlow(text);
   FlowDoc.assignMissingIds(state.doc);
   if (state.scope && !FlowDoc.graphBlockNames(state.doc).includes(state.scope)) state.scope = null;
   refresh();
-  sendWrite(state.path, text);
+  sendWrite(state.path!, text);
 }
 
-function undo() {
+function undo(): void {
   if (undoStack.length === 0) return;
   redoStack.push(state.text);
-  applyHistoryText(undoStack.pop());
+  applyHistoryText(undoStack.pop()!);
 }
 
-function redo() {
+function redo(): void {
   if (redoStack.length === 0) return;
   undoStack.push(state.text);
-  applyHistoryText(redoStack.pop());
+  applyHistoryText(redoStack.pop()!);
 }
 
-function connectSocket() {
+function connectSocket(): void {
   socket = new WebSocket(`ws://${location.host}`);
   socket.addEventListener('open', () => {
     elements.connectionDot.classList.add('connected');
-    for (const [path, text] of pendingWrites) socket.send(JSON.stringify({ type: 'write', path, text }));
+    for (const [path, text] of pendingWrites) socket!.send(JSON.stringify({ type: 'write', path, text }));
     pendingWrites.clear();
   });
   socket.addEventListener('message', (event) => {
-    const message = JSON.parse(event.data);
+    const message = JSON.parse(event.data as string) as ServerMessage;
     if (message.type === 'files') {
       state.files = message.files;
       renderFileList();
@@ -157,7 +203,7 @@ function connectSocket() {
   });
 }
 
-function sendWrite(path, text) {
+function sendWrite(path: string, text: string): void {
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: 'write', path, text }));
   } else {
@@ -165,7 +211,7 @@ function sendWrite(path, text) {
   }
 }
 
-function adoptExternalText(text) {
+function adoptExternalText(text: string): void {
   state.text = text;
   state.doc = parseFlow(text);
   FlowDoc.assignMissingIds(state.doc);
@@ -173,12 +219,15 @@ function adoptExternalText(text) {
   refresh();
 }
 
-async function openFile(path, { presetText = null, fit = true } = {}) {
+async function openFile(
+  path: string,
+  { presetText = null, fit = true }: { presetText?: string | null; fit?: boolean } = {},
+): Promise<boolean> {
   let text = presetText;
   if (text == null) {
     const response = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
     if (!response.ok) return false;
-    text = (await response.json()).text;
+    text = ((await response.json()) as { text: string }).text;
   }
   state.path = path;
   state.text = text;
@@ -197,7 +246,7 @@ async function openFile(path, { presetText = null, fit = true } = {}) {
   return true;
 }
 
-function setScope(scopeName, { fit = true } = {}) {
+function setScope(scopeName: string | null, { fit = true }: { fit?: boolean } = {}): void {
   state.scope = scopeName;
   editors.closeAll();
   view.clearSelection();
@@ -205,7 +254,7 @@ function setScope(scopeName, { fit = true } = {}) {
   if (fit) view.fitToContent();
 }
 
-function renderFileList() {
+function renderFileList(): void {
   elements.fileList.replaceChildren(
     ...state.files.map((path) => {
       const item = document.createElement('li');
@@ -221,8 +270,8 @@ function renderFileList() {
   );
 }
 
-function renderBreadcrumb() {
-  const crumbs = [];
+function renderBreadcrumb(): void {
+  const crumbs: HTMLElement[] = [];
   navigation.trail.forEach((entry, index) => {
     const crumb = document.createElement('span');
     crumb.className = 'crumb';
@@ -238,76 +287,76 @@ function renderBreadcrumb() {
   elements.breadcrumb.replaceChildren(...crumbs);
 }
 
-function crumbLabel(entry) {
+function crumbLabel(entry: TrailEntry): string {
   if (entry.scope) return entry.scope;
-  return entry.path.split('/').pop().replace(/\.flow$/, '');
+  return entry.path.split('/').pop()!.replace(/\.flow$/, '');
 }
 
-function breadcrumbSeparator() {
+function breadcrumbSeparator(): HTMLElement {
   const separator = document.createElement('span');
   separator.className = 'separator';
   separator.textContent = '/';
   return separator;
 }
 
-function renderGraphPanel() {
+function renderGraphPanel(): void {
   const scoped = state.scope != null;
   const displayName = scoped
-    ? state.scope
-    : unquote(getPreambleField(state.doc, 'name') ?? '') || state.path || 'graph';
+    ? state.scope!
+    : unquote(getPreambleField(state.doc!, 'name') ?? '') || state.path || 'graph';
   elements.graphToggle.textContent = `☰ ${displayName}`;
 
   setUnlessFocused(elements.graphName, displayName);
-  setUnlessFocused(elements.graphDescription, scoped ? '' : unquote(getPreambleField(state.doc, 'description') ?? ''));
-  setUnlessFocused(elements.graphContext, scoped ? '' : parseListValue(getPreambleField(state.doc, 'context')).join(', '));
-  setUnlessFocused(elements.graphOnError, scoped ? '' : (getPreambleField(state.doc, 'on_error') ?? ''));
-  elements.graphEntrypoint.checked = !scoped && getPreambleField(state.doc, 'entrypoint') === 'true';
+  setUnlessFocused(elements.graphDescription, scoped ? '' : unquote(getPreambleField(state.doc!, 'description') ?? ''));
+  setUnlessFocused(elements.graphContext, scoped ? '' : parseListValue(getPreambleField(state.doc!, 'context')).join(', '));
+  setUnlessFocused(elements.graphOnError, scoped ? '' : (getPreambleField(state.doc!, 'on_error') ?? ''));
+  elements.graphEntrypoint.checked = !scoped && getPreambleField(state.doc!, 'entrypoint') === 'true';
 
   for (const field of [elements.graphDescription, elements.graphContext, elements.graphOnError, elements.graphEntrypoint]) {
     field.disabled = scoped;
   }
 }
 
-function setUnlessFocused(field, value) {
+function setUnlessFocused(field: HTMLInputElement | HTMLTextAreaElement, value: string): void {
   if (document.activeElement !== field) field.value = value;
 }
 
-function centeredDefaultRect(worldPoint) {
+function centeredDefaultRect(worldPoint: Point): Rect {
   const { w, h } = FlowDoc.DEFAULT_NODE_SIZE;
   return { x: Math.round(worldPoint.x - w / 2), y: Math.round(worldPoint.y - h / 2), w, h };
 }
 
-function createNodeAndEdit(rect, requestedName = 'Untitled') {
-  let node = null;
+function createNodeAndEdit(rect: Rect, requestedName = 'Untitled'): FlowNode {
+  let node: FlowNode | null = null;
   mutate(() => {
     node = FlowDoc.addNode(scopeItemsNow(), rect, requestedName);
   }, { commit: 'now' });
-  view.select(node);
-  editors.openNodeEditor(node, { focusTitle: true });
-  return node;
+  view.select(node!);
+  editors.openNodeEditor(node!, { focusTitle: true });
+  return node!;
 }
 
-function deleteNodesAction(nodes) {
-  const groups = new Map();
+function deleteNodesAction(nodes: FlowNode[]): void {
+  const groups = new Map<FlowDocument, { owner: DocumentOwner; nodes: FlowNode[] }>();
   for (const node of nodes) {
     const owner = ownerOf(node);
     if (!groups.has(owner.doc)) groups.set(owner.doc, { owner, nodes: [] });
-    groups.get(owner.doc).nodes.push(node);
+    groups.get(owner.doc)!.nodes.push(node);
   }
   for (const { owner, nodes: docNodes } of groups.values()) {
     applyToDoc(owner, () => {
-      const byItems = new Map();
+      const byItems = new Map<ReturnType<typeof FlowDoc.containingItems>, FlowNode[]>();
       for (const node of docNodes) {
         const items = FlowDoc.containingItems(owner.doc, node);
         if (!byItems.has(items)) byItems.set(items, []);
-        byItems.get(items).push(node);
+        byItems.get(items)!.push(node);
       }
       for (const [items, list] of byItems) FlowDoc.deleteNodes(items, list);
     }, { commit: 'now' });
   }
 }
 
-function deleteSelection() {
+function deleteSelection(): void {
   const nodes = [...view.selection];
   const edge = view.selectedEdge;
   if (nodes.length > 0) {
@@ -323,23 +372,23 @@ function deleteSelection() {
 // the destination loads, then both scenes render together — the subgraph riding inside the
 // node's rectangle as the camera zooms through it, crossfading as it grows (see
 // canvas-view's zoom transition).
-async function openExpand(node) {
+async function openExpand(node: FlowNode): Promise<void> {
   const expandValue = getProp(node, 'expand');
   if (!expandValue || navigation.inProgress || expansions.isEmbedded(node)) return;
   navigation.inProgress = true;
   try {
     editors.closeAll();
-    const origin = { path: state.path, scope: state.scope, nodeId: node.id, view: { ...view.view } };
+    const origin: TrailEntry = { path: state.path!, scope: state.scope, nodeId: node.id, view: { ...view.view } };
     const nodeRect = { ...view.rect(node) };
-    view.beginSceneHold(state.model, view.view);
+    view.beginSceneHold(state.model!, view.view);
 
     const link = parseExpandLink(expandValue);
     let swapped = true;
     if (link) {
       swapped = await openExternalFlow(link);
     } else {
-      if (!FlowDoc.graphBlockNames(state.doc).includes(expandValue)) {
-        mutate(() => state.doc.items.push({ kind: 'graph', name: expandValue, items: [] }), { commit: 'now' });
+      if (!FlowDoc.graphBlockNames(state.doc!).includes(expandValue)) {
+        mutate(() => state.doc!.items.push({ kind: 'graph', name: expandValue, items: [] }), { commit: 'now' });
       }
       setScope(expandValue, { fit: false });
     }
@@ -357,12 +406,12 @@ async function openExpand(node) {
   }
 }
 
-async function openExternalFlow(link) {
+async function openExternalFlow(link: ExpandLink): Promise<boolean> {
   const resolved = resolveLinkPath(state.path, link.path);
   if (state.files.includes(resolved)) {
     return openFile(resolved, { fit: false });
   }
-  const graphName = sanitizeName(link.label) || resolved.split('/').pop().replace(/\.flow$/, '');
+  const graphName = sanitizeName(link.label) || resolved.split('/').pop()!.replace(/\.flow$/, '');
   const text = `---\nname: ${graphName}\n---\n`;
   sendWrite(resolved, text);
   state.files.push(resolved);
@@ -373,7 +422,7 @@ async function openExternalFlow(link) {
 // Stepping back one crumb reverses the dive: the subgraph shrinks back into the node it
 // came from while the parent graph fades in around it, ending exactly on the camera we
 // left. Jumping several crumbs at once just snaps.
-async function navigateBackTo(index) {
+async function navigateBackTo(index: number): Promise<void> {
   if (navigation.inProgress || index >= navigation.trail.length) return;
   navigation.inProgress = true;
   try {
@@ -385,7 +434,7 @@ async function navigateBackTo(index) {
       await snapToEntry(entry);
       return;
     }
-    view.beginSceneHold(state.model, view.view);
+    view.beginSceneHold(state.model!, view.view);
     if (entry.path !== state.path) {
       const opened = await openFile(entry.path, { fit: false });
       if (!opened) {
@@ -396,7 +445,7 @@ async function navigateBackTo(index) {
     }
     if (state.scope !== entry.scope) setScope(entry.scope, { fit: false });
     renderBreadcrumb();
-    const enteredNode = FlowDoc.findNodeById(state.doc, entry.nodeId);
+    const enteredNode = FlowDoc.findNodeById(state.doc!, entry.nodeId);
     if (!enteredNode?.pos) {
       view.releaseSceneHold();
       view.setViewNow(entry.view);
@@ -408,7 +457,7 @@ async function navigateBackTo(index) {
   }
 }
 
-async function snapToEntry(entry) {
+async function snapToEntry(entry: TrailEntry): Promise<void> {
   if (entry.path !== state.path) {
     const opened = await openFile(entry.path, { fit: false });
     if (!opened) {
@@ -421,7 +470,7 @@ async function snapToEntry(entry) {
   view.setViewNow(entry.view);
 }
 
-function toggleInlineExpansion(node) {
+function toggleInlineExpansion(node: FlowNode): void {
   if (!getProp(node, 'expand')) return;
   expansions.toggle(node);
 }
@@ -433,21 +482,21 @@ function toggleInlineExpansion(node) {
 // mutate/undo/commit pipeline, external documents are serialized and written straight to
 // their own path (no undo — the file watcher keeps other views in sync).
 
-const externalCommitTimers = new Map();
+const externalCommitTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-function ownerOf(node) {
-  if (FlowDoc.allNodes(state.doc).includes(node)) return { doc: state.doc, path: state.path };
-  return expansions.ownerOf(node) ?? { doc: state.doc, path: state.path };
+function ownerOf(node: FlowNode): DocumentOwner {
+  if (FlowDoc.allNodes(state.doc!).includes(node)) return { doc: state.doc!, path: state.path! };
+  return expansions.ownerOf(node) ?? { doc: state.doc!, path: state.path! };
 }
 
-function commitExternalNow(doc, path) {
+function commitExternalNow(doc: FlowDocument, path: string): void {
   clearTimeout(externalCommitTimers.get(path));
   externalCommitTimers.delete(path);
   FlowDoc.ensureLayoutEverywhere(doc);
   sendWrite(path, serializeFlow(doc));
 }
 
-function applyToDoc(owner, mutation, { commit = 'debounce' } = {}) {
+function applyToDoc(owner: DocumentOwner, mutation: () => void, { commit = 'debounce' }: { commit?: CommitTiming } = {}): void {
   if (owner.doc === state.doc) {
     mutate(mutation, { commit });
     return;
@@ -466,24 +515,24 @@ function applyToDoc(owner, mutation, { commit = 'debounce' } = {}) {
   }
 }
 
-function applyEdit(node, mutation, options) {
+function applyEdit(node: FlowNode, mutation: () => void, options?: { commit?: CommitTiming }): void {
   applyToDoc(ownerOf(node), mutation, options);
 }
 
-function findNode(nodeId) {
-  return FlowDoc.findNodeById(state.doc, nodeId) ?? expansions.findNodeById(nodeId);
+function findNode(nodeId: string): FlowNode | null {
+  return FlowDoc.findNodeById(state.doc!, nodeId) ?? expansions.findNodeById(nodeId);
 }
 
-function findEdge(spec) {
+function findEdge(spec: EdgeSpec): ModelEdge | null {
   return state.model?.edges.find((edge) => edge.spec === spec) ?? expansions.findEdgeBySpec(spec);
 }
 
-function itemsFor(node) {
+function itemsFor(node: FlowNode) {
   return FlowDoc.containingItems(ownerOf(node).doc, node);
 }
 
-function commitMovesFor(nodes) {
-  const externalOwners = new Map();
+function commitMovesFor(nodes: FlowNode[]): void {
+  const externalOwners = new Map<string, DocumentOwner>();
   for (const node of nodes) {
     const owner = ownerOf(node);
     if (owner.doc !== state.doc) externalOwners.set(owner.path, owner);
@@ -493,7 +542,12 @@ function commitMovesFor(nodes) {
   for (const owner of externalOwners.values()) commitExternalNow(owner.doc, owner.path);
 }
 
-function completeEdge(fromNode, targetNode, worldPoint, extra) {
+function completeEdge(
+  fromNode: FlowNode,
+  targetNode: FlowNode | null,
+  worldPoint: Point,
+  extra?: { droppedOnSource: boolean; ghostTarget: GhostNode | null },
+): void {
   if (!state.doc || extra?.droppedOnSource) return;
 
   if (expansions.isEmbedded(fromNode)) {
@@ -504,10 +558,10 @@ function completeEdge(fromNode, targetNode, worldPoint, extra) {
     return;
   }
 
-  let createdNode = null;
-  let createdSpec = null;
+  let createdNode: FlowNode | null = null;
+  let createdSpec: EdgeSpec | null = null;
   mutate(() => {
-    let targetName;
+    let targetName: string;
     if (targetNode) {
       targetName = targetNode.name;
     } else if (extra?.ghostTarget) {
@@ -525,16 +579,20 @@ function completeEdge(fromNode, targetNode, worldPoint, extra) {
     editors.openNodeEditor(createdNode, { focusTitle: true });
     return;
   }
-  const createdEdge = state.model.edges.find((edge) => edge.spec === createdSpec);
+  const createdEdge = state.model!.edges.find((edge) => edge.spec === createdSpec);
   if (createdEdge) {
     view.selectedEdge = createdEdge;
     editors.openEdgeEditor(createdEdge);
   }
 }
 
-const view = new CanvasView(document.getElementById('canvas'), {
-  createNode: (rect) => state.doc && createNodeAndEdit(rect),
-  quickCreateNode: (worldPoint) => state.doc && createNodeAndEdit(centeredDefaultRect(worldPoint)),
+const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
+  createNode: (rect) => {
+    if (state.doc) createNodeAndEdit(rect);
+  },
+  quickCreateNode: (worldPoint) => {
+    if (state.doc) createNodeAndEdit(centeredDefaultRect(worldPoint));
+  },
   nodeClicked: (node) => editors.openNodeEditor(node),
   canvasClicked: () => editors.closeAll(),
   moveCommitted: (nodes) => commitMovesFor(nodes ?? []),
@@ -570,7 +628,7 @@ const editors = createEditors({
   deleteNodes: deleteNodesAction,
 });
 
-function wireGraphPanel() {
+function wireGraphPanel(): void {
   elements.graphToggle.addEventListener('click', () => {
     elements.graphPanel.classList.toggle('collapsed');
   });
@@ -578,46 +636,48 @@ function wireGraphPanel() {
   elements.graphName.addEventListener('change', () => {
     if (!state.doc) return;
     if (state.scope) {
-      const graphItem = state.doc.items.find((item) => item.kind === 'graph' && item.name === state.scope);
+      const graphItem = state.doc.items.find(
+        (item): item is GraphItem => item.kind === 'graph' && item.name === state.scope,
+      );
       if (!graphItem) return;
       mutate(() => {
-        state.scope = FlowDoc.renameGraphBlock(state.doc, graphItem, elements.graphName.value);
+        state.scope = FlowDoc.renameGraphBlock(state.doc!, graphItem, elements.graphName.value);
       }, { commit: 'now' });
     } else {
-      mutate(() => setPreambleField(state.doc, 'name', collapseToSingleLine(elements.graphName.value)));
+      mutate(() => setPreambleField(state.doc!, 'name', collapseToSingleLine(elements.graphName.value)));
     }
   });
 
   elements.graphDescription.addEventListener('input', () => {
     if (!state.doc || state.scope) return;
     const text = collapseToSingleLine(elements.graphDescription.value);
-    mutate(() => setPreambleField(state.doc, 'description', text ? quoteValue(text) : null));
+    mutate(() => setPreambleField(state.doc!, 'description', text ? quoteValue(text) : null));
   });
 
   elements.graphContext.addEventListener('change', () => {
     if (!state.doc || state.scope) return;
     const entries = elements.graphContext.value.split(',').map((entry) => entry.trim()).filter(Boolean);
-    mutate(() => setPreambleField(state.doc, 'context', entries.length ? formatListValue(entries) : null));
+    mutate(() => setPreambleField(state.doc!, 'context', entries.length ? formatListValue(entries) : null));
   });
 
   elements.graphOnError.addEventListener('change', () => {
     if (!state.doc || state.scope) return;
-    mutate(() => setPreambleField(state.doc, 'on_error', elements.graphOnError.value.trim() || null));
+    mutate(() => setPreambleField(state.doc!, 'on_error', elements.graphOnError.value.trim() || null));
   });
 
   elements.graphEntrypoint.addEventListener('change', () => {
     if (!state.doc || state.scope) return;
-    mutate(() => setPreambleField(state.doc, 'entrypoint', elements.graphEntrypoint.checked ? 'true' : null));
+    mutate(() => setPreambleField(state.doc!, 'entrypoint', elements.graphEntrypoint.checked ? 'true' : null));
   });
 }
 
-function setTool(tool) {
+function setTool(tool: Tool): void {
   view.setTool(tool);
   elements.toolSelectButton.classList.toggle('active', tool === 'select');
   elements.toolNodeButton.classList.toggle('active', tool === 'node');
 }
 
-function wireViewControls() {
+function wireViewControls(): void {
   elements.toolSelectButton.addEventListener('click', () => setTool('select'));
   elements.toolNodeButton.addEventListener('click', () => setTool('node'));
   elements.zoomIn.addEventListener('click', () => view.setZoom(view.view.scale * 1.2));
@@ -628,7 +688,7 @@ function wireViewControls() {
 
 // An inline input instead of window.prompt: prompt dialogs are suppressed in several
 // embedded browser hosts, which made the button appear dead.
-function wireNewFileForm() {
+function wireNewFileForm(): void {
   const showInput = () => {
     elements.newFileButton.classList.add('hidden');
     elements.newFileInput.classList.remove('hidden');
@@ -653,11 +713,11 @@ function wireNewFileForm() {
   elements.newFileInput.addEventListener('blur', hideInput);
 }
 
-function createFlowFile(rawName) {
+function createFlowFile(rawName: string): void {
   let name = rawName.trim().replace(/\\/g, '/');
   if (!name) return;
   if (!name.endsWith('.flow')) name += '.flow';
-  const graphName = name.split('/').pop().replace(/\.flow$/, '');
+  const graphName = name.split('/').pop()!.replace(/\.flow$/, '');
   const text = `---\nname: ${graphName}\n---\n`;
   sendWrite(name, text);
   if (!state.files.includes(name)) {
@@ -668,17 +728,17 @@ function createFlowFile(rawName) {
   openFile(name, { presetText: text });
 }
 
-function wireHelp() {
+function wireHelp(): void {
   const toggleHelp = () => elements.helpOverlay.classList.toggle('hidden');
   elements.helpToggle.addEventListener('click', toggleHelp);
   elements.helpOverlay.addEventListener('click', toggleHelp);
 }
 
-function isTypingTarget(element) {
+function isTypingTarget(element: EventTarget | null): element is HTMLInputElement | HTMLTextAreaElement {
   return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
 }
 
-function wireKeyboard() {
+function wireKeyboard(): void {
   window.addEventListener('keydown', (event) => {
     if (isTypingTarget(event.target)) {
       if (event.key === 'Escape') event.target.blur();
@@ -717,7 +777,7 @@ function wireKeyboard() {
   });
 }
 
-async function boot() {
+async function boot(): Promise<void> {
   wireGraphPanel();
   wireViewControls();
   wireNewFileForm();
@@ -727,7 +787,7 @@ async function boot() {
   setTool('select');
 
   const response = await fetch('/api/files');
-  state.files = (await response.json()).files;
+  state.files = ((await response.json()) as { files: string[] }).files;
   renderFileList();
 
   const requestedPath = decodeURIComponent(location.hash.slice(1));

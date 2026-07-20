@@ -53,6 +53,6 @@ Logout
 
 Refresh Token
   id: 5f893bf4-b2ee-4f62-9403-6ceb12b8408a
-  pos: 56, 472, 272, 144
+  pos: 40, 512, 272, 144
   description: "Silently renews the JWT before expiry"
   -> Check Session : "token renewed"

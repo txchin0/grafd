@@ -3,41 +3,81 @@
 // Field changes mutate the document immediately through the context callbacks; external file
 // updates refresh unfocused fields only, so in-progress typing is never clobbered.
 
-import { getProp, setProp, quoteValue, unquote, collapseToSingleLine, parseListValue, formatListValue } from '/shared/flow-format.js';
+import {
+  getProp,
+  setProp,
+  quoteValue,
+  unquote,
+  collapseToSingleLine,
+  parseListValue,
+  formatListValue,
+  type EdgeSpec,
+  type FlowItem,
+  type FlowNode,
+  type Rect,
+} from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
+import type { ModelEdge } from './flow-doc.js';
+import type { CanvasView } from './canvas-view.js';
+
+export interface EditorContext {
+  view: CanvasView;
+  findNode(nodeId: string): FlowNode | null;
+  findEdge(spec: EdgeSpec): ModelEdge | null;
+  itemsFor(node: FlowNode): FlowItem[];
+  applyEdit(node: FlowNode, mutation: () => void): void;
+  applyEditNow(node: FlowNode, mutation: () => void): void;
+  canOpen(node: FlowNode): boolean;
+  openExpand(node: FlowNode): void;
+  toggleExpand(node: FlowNode): void;
+  deleteNodes(nodes: FlowNode[]): void;
+}
+
+export interface Editors {
+  openNodeEditor(node: FlowNode, options?: { focusTitle?: boolean }): void;
+  openEdgeEditor(edge: ModelEdge): void;
+  closeAll(): void;
+  reposition(): void;
+  refreshFromDoc(): void;
+  editingNode(): FlowNode | null;
+}
 
 const EDITOR_GAP = 14;
 
-export function createEditors(context) {
+function elementById<T extends HTMLElement>(id: string): T {
+  return document.getElementById(id) as T;
+}
+
+export function createEditors(context: EditorContext): Editors {
   const elements = {
-    container: document.getElementById('canvas-container'),
-    nodeEditor: document.getElementById('node-editor'),
-    title: document.getElementById('ne-title'),
-    description: document.getElementById('ne-description'),
-    expand: document.getElementById('ne-expand'),
-    onError: document.getElementById('ne-on-error'),
-    updates: document.getElementById('ne-updates'),
-    entrypoint: document.getElementById('ne-entrypoint'),
-    openExpand: document.getElementById('ne-open-expand'),
-    inlineExpand: document.getElementById('ne-inline-expand'),
-    deleteNode: document.getElementById('ne-delete'),
-    edgeEditor: document.getElementById('edge-editor'),
-    edgeLabel: document.getElementById('ee-label'),
-    deleteEdge: document.getElementById('ee-delete'),
+    container: elementById<HTMLDivElement>('canvas-container'),
+    nodeEditor: elementById<HTMLDivElement>('node-editor'),
+    title: elementById<HTMLInputElement>('ne-title'),
+    description: elementById<HTMLTextAreaElement>('ne-description'),
+    expand: elementById<HTMLInputElement>('ne-expand'),
+    onError: elementById<HTMLInputElement>('ne-on-error'),
+    updates: elementById<HTMLInputElement>('ne-updates'),
+    entrypoint: elementById<HTMLInputElement>('ne-entrypoint'),
+    openExpand: elementById<HTMLButtonElement>('ne-open-expand'),
+    inlineExpand: elementById<HTMLButtonElement>('ne-inline-expand'),
+    deleteNode: elementById<HTMLButtonElement>('ne-delete'),
+    edgeEditor: elementById<HTMLDivElement>('edge-editor'),
+    edgeLabel: elementById<HTMLInputElement>('ee-label'),
+    deleteEdge: elementById<HTMLButtonElement>('ee-delete'),
   };
 
-  let editingNodeId = null;
-  let editingEdgeSpec = null;
+  let editingNodeId: string | null = null;
+  let editingEdgeSpec: EdgeSpec | null = null;
 
-  function editingNode() {
+  function editingNode(): FlowNode | null {
     return editingNodeId ? context.findNode(editingNodeId) : null;
   }
 
-  function editingEdge() {
+  function editingEdge(): ModelEdge | null {
     return editingEdgeSpec ? context.findEdge(editingEdgeSpec) : null;
   }
 
-  function openNodeEditor(node, { focusTitle = false } = {}) {
+  function openNodeEditor(node: FlowNode, { focusTitle = false }: { focusTitle?: boolean } = {}): void {
     closeEdgeEditor();
     editingNodeId = node.id;
     fillNodeFields(node);
@@ -49,7 +89,7 @@ export function createEditors(context) {
     }
   }
 
-  function fillNodeFields(node) {
+  function fillNodeFields(node: FlowNode): void {
     setUnlessFocused(elements.title, node.name);
     setUnlessFocused(elements.description, unquote(getProp(node, 'description')));
     setUnlessFocused(elements.expand, getProp(node, 'expand') ?? '');
@@ -61,11 +101,11 @@ export function createEditors(context) {
     elements.inlineExpand.classList.toggle('hidden', lacksExpand);
   }
 
-  function setUnlessFocused(field, value) {
+  function setUnlessFocused(field: HTMLInputElement | HTMLTextAreaElement, value: string): void {
     if (document.activeElement !== field) field.value = value;
   }
 
-  function openEdgeEditor(edge) {
+  function openEdgeEditor(edge: ModelEdge): void {
     closeNodeEditor();
     editingEdgeSpec = edge.spec;
     elements.edgeLabel.value = edge.spec.label ?? '';
@@ -77,16 +117,16 @@ export function createEditors(context) {
 
   // Closing must flush fields that commit on 'change': a click on the canvas closes the
   // editor before the browser fires blur/change, which would silently drop the edit.
-  function closeNodeEditor() {
+  function closeNodeEditor(): void {
     commitPendingNodeFields();
     editingNodeId = null;
     elements.nodeEditor.classList.add('hidden');
   }
 
-  function commitPendingNodeFields() {
+  function commitPendingNodeFields(): void {
     const node = editingNode();
     if (!node) return;
-    const titleChanged = elements.title.value.trim() && elements.title.value !== node.name;
+    const titleChanged = Boolean(elements.title.value.trim()) && elements.title.value !== node.name;
     const expandChanged = elements.expand.value.trim() !== (getProp(node, 'expand') ?? '');
     const onErrorChanged = elements.onError.value.trim() !== (getProp(node, 'on_error') ?? '');
     const updatesEntries = elements.updates.value.split(',').map((entry) => entry.trim()).filter(Boolean);
@@ -100,7 +140,7 @@ export function createEditors(context) {
     });
   }
 
-  function closeEdgeEditor() {
+  function closeEdgeEditor(): void {
     const edge = editingEdge();
     if (edge && (elements.edgeLabel.value.trim() || null) !== (edge.spec.label ?? null)) {
       context.applyEdit(edge.from, () => FlowDoc.setEdgeLabel(edge, elements.edgeLabel.value));
@@ -109,12 +149,12 @@ export function createEditors(context) {
     elements.edgeEditor.classList.add('hidden');
   }
 
-  function closeAll() {
+  function closeAll(): void {
     closeNodeEditor();
     closeEdgeEditor();
   }
 
-  function reposition() {
+  function reposition(): void {
     const node = editingNode();
     if (node) positionBesideRect(elements.nodeEditor, context.view.worldRectToScreen(context.view.rect(node)));
     const edge = editingEdge();
@@ -124,7 +164,7 @@ export function createEditors(context) {
     }
   }
 
-  function positionBesideRect(editorElement, screenRect) {
+  function positionBesideRect(editorElement: HTMLElement, screenRect: Rect): void {
     const containerBounds = elements.container.getBoundingClientRect();
     const editorWidth = editorElement.offsetWidth || 264;
     const editorHeight = editorElement.offsetHeight || 180;
@@ -139,7 +179,7 @@ export function createEditors(context) {
     editorElement.style.top = `${Math.round(top)}px`;
   }
 
-  function refreshFromDoc() {
+  function refreshFromDoc(): void {
     const node = editingNode();
     if (editingNodeId && !node) {
       closeNodeEditor();
@@ -150,7 +190,7 @@ export function createEditors(context) {
     reposition();
   }
 
-  function applyToNode(mutate) {
+  function applyToNode(mutate: (node: FlowNode) => void): void {
     const node = editingNode();
     if (!node) return;
     context.applyEdit(node, () => mutate(node));
@@ -214,7 +254,7 @@ export function createEditors(context) {
     context.deleteNodes([node]);
   });
 
-  function commitEdgeLabel() {
+  function commitEdgeLabel(): void {
     const edge = editingEdge();
     if (!edge) return;
     context.applyEdit(edge.from, () => FlowDoc.setEdgeLabel(edge, elements.edgeLabel.value));
