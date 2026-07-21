@@ -8,25 +8,29 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { contentHash, listFlowFiles, resolveWorkspacePath, toPortablePath } from './flow-files.js';
 
 const PORT = 4600;
-// This file runs from dist/server, two levels below the project root.
-const projectRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const DEFAULT_WORKSPACE = 'flows';
+// This file runs from dist/server, two levels below the repo root. Static assets stay
+// under the repo; the .flow workspace defaults to flows/ and can be overridden with a
+// path argument (absolute, or relative to the repo root).
+const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const workspaceRoot = path.resolve(repoRoot, process.argv[2] ?? DEFAULT_WORKSPACE);
 
 const app = express();
-app.use(express.static(path.join(projectRoot, 'public')));
-app.use('/js', express.static(path.join(projectRoot, 'dist', 'client')));
-app.use('/shared', express.static(path.join(projectRoot, 'dist', 'shared')));
-app.use('/vendor/roughjs', express.static(path.join(projectRoot, 'node_modules', 'roughjs', 'bundled')));
+app.use(express.static(path.join(repoRoot, 'public')));
+app.use('/js', express.static(path.join(repoRoot, 'dist', 'client')));
+app.use('/shared', express.static(path.join(repoRoot, 'dist', 'shared')));
+app.use('/vendor/roughjs', express.static(path.join(repoRoot, 'node_modules', 'roughjs', 'bundled')));
 
 app.get('/api/files', async (request, response) => {
-  response.json({ files: await listFlowFiles(projectRoot) });
+  response.json({ files: await listFlowFiles(workspaceRoot) });
 });
 
 app.get('/SAVE-GUIDE.md', (request, response) => {
-  response.sendFile(path.join(projectRoot, 'SAVE-GUIDE.md'));
+  response.sendFile(path.join(repoRoot, 'SAVE-GUIDE.md'));
 });
 
 app.get('/api/file', async (request, response) => {
-  const absolute = resolveWorkspacePath(projectRoot, String(request.query.path ?? ''));
+  const absolute = resolveWorkspacePath(workspaceRoot, String(request.query.path ?? ''));
   if (!absolute) {
     response.status(400).json({ error: 'invalid path' });
     return;
@@ -70,7 +74,7 @@ socketServer.on('connection', (socket) => {
     } catch {
       return;
     }
-    const absolute = resolveWorkspacePath(projectRoot, message.path);
+    const absolute = resolveWorkspacePath(workspaceRoot, message.path);
     if (!absolute) return;
     if (message.type === 'write' && typeof (message as Partial<WriteMessage>).text === 'string') {
       const text = (message as WriteMessage).text;
@@ -89,7 +93,7 @@ socketServer.on('connection', (socket) => {
 
 async function removeEmptyParentDirectories(directory: string): Promise<void> {
   try {
-    while (directory.startsWith(projectRoot + path.sep)) {
+    while (directory.startsWith(workspaceRoot + path.sep)) {
       if ((await readdir(directory)).length > 0) return;
       await rmdir(directory);
       directory = path.dirname(directory);
@@ -100,7 +104,7 @@ async function removeEmptyParentDirectories(directory: string): Promise<void> {
 }
 
 async function handleFileChangedOnDisk(relativePath: string): Promise<void> {
-  const absolute = path.resolve(projectRoot, relativePath);
+  const absolute = path.resolve(workspaceRoot, relativePath);
   let text: string;
   try {
     text = await readFile(absolute, 'utf8');
@@ -109,15 +113,15 @@ async function handleFileChangedOnDisk(relativePath: string): Promise<void> {
   }
   const isOwnWrite = lastWrittenHashes.get(absolute) === contentHash(text);
   if (isOwnWrite) return;
-  broadcast({ type: 'file', path: toPortablePath(projectRoot, absolute), text });
+  broadcast({ type: 'file', path: toPortablePath(workspaceRoot, absolute), text });
 }
 
 async function broadcastFileList(): Promise<void> {
-  broadcast({ type: 'files', files: await listFlowFiles(projectRoot) });
+  broadcast({ type: 'files', files: await listFlowFiles(workspaceRoot) });
 }
 
 const watcher = chokidar.watch('**/*.flow', {
-  cwd: projectRoot,
+  cwd: workspaceRoot,
   ignored: /(^|[\\/])(node_modules|\.git|\.claude|dist)([\\/]|$)/,
   ignoreInitial: true,
   awaitWriteFinish: { stabilityThreshold: 80, pollInterval: 20 },
@@ -130,5 +134,5 @@ watcher.on('add', async (relativePath) => {
 watcher.on('unlink', broadcastFileList);
 
 httpServer.listen(PORT, () => {
-  console.log(`Graf editor running at http://localhost:${PORT} (watching ${projectRoot})`);
+  console.log(`Graf editor running at http://localhost:${PORT} (watching ${workspaceRoot})`);
 });

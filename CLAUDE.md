@@ -5,9 +5,9 @@ A freeform web canvas editor for the `.flow` diagram format defined in [FLOW-SPE
 The app runs in two hosting modes with identical features:
 
 - **Self-hosted** — `npm start` (builds, then serves), then open http://localhost:4600. The
-  server scans the project tree for `*.flow` files, watches them, and pushes changes to the
-  browser over WebSocket; edits made on the canvas are written straight back to disk.
-  Example diagrams live in `flows/`.
+  server watches `flows/` by default for `*.flow` files (override with a path argument to
+  `node dist/server/server.js`), pushes changes to the browser over WebSocket, and writes
+  canvas edits straight back to disk.
 - **Serverless** — `npm run build:site` assembles a fully static build in `site/` for any
   static host. The client probes `./api/files` at boot; with no server answering it stores
   files in IndexedDB (synced across tabs via BroadcastChannel).
@@ -47,7 +47,7 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   write/broadcast, chokidar file watcher (own writes are suppressed by content hash).
   Serves `public/` (static shell), `dist/client` at `/js`, `dist/shared` at `/shared`, and
   rough.js at `/vendor/roughjs` (mapped to the bare `roughjs` specifier by the import map
-  in `public/index.html`).
+  in `public/index.html`). Watches `flows/` by default (override via CLI path argument).
 - `src/server/flow-files.ts` — path safety (`.flow`-only, root-confined), portable path
   conversion, recursive `.flow` discovery, content hashing.
 - `src/shared/flow-format.ts` — parse/serialize `.flow` text, format helpers. No DOM, no

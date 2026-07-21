@@ -1,5 +1,5 @@
 // Filesystem-facing helpers for the .flow editor server: locating .flow files under the
-// project root, converting between absolute and portable (forward-slash, root-relative)
+// workspace root, converting between absolute and portable (forward-slash, root-relative)
 // paths, and hashing file contents so the watcher can recognize the server's own writes.
 
 import { createHash } from 'node:crypto';
