@@ -69,7 +69,8 @@ describe('subModelBounds', () => {
 describe('ExpansionLayer', () => {
   function layerWithSpy() {
     const onNeedsRender = vi.fn();
-    return { layer: new ExpansionLayer({ onNeedsRender }), onNeedsRender };
+    const readExternalFile = vi.fn(async () => null);
+    return { layer: new ExpansionLayer({ onNeedsRender, readExternalFile }), onNeedsRender };
   }
 
   it('toggles a node open and closed', () => {

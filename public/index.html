@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Graf — .flow canvas</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div id="app">
@@ -17,9 +17,15 @@
       <ul id="file-list"></ul>
       <button id="new-file-button" type="button">+ New flow</button>
       <input id="new-file-input" class="hidden" placeholder="path/name.flow" spellcheck="false" autocomplete="off" />
+      <div id="workspace-bar">
+        <span id="workspace-name"></span>
+        <button id="open-folder-button" type="button" class="hidden" title="Open a local folder of .flow files">📂 Open folder…</button>
+        <button id="close-folder-button" type="button" class="hidden" title="Leave this folder and return to the default workspace">↩ Leave folder</button>
+        <button id="export-button" type="button" title="Download this workspace as a .zip (flows, manifest, and the agent guide)">⇩ Export .zip</button>
+      </div>
       <footer id="sidebar-footer">
         <button id="help-toggle" type="button">? Shortcuts</button>
-        <span id="connection-dot" title="Server connection"></span>
+        <span id="connection-dot" title="Workspace connection"></span>
       </footer>
     </aside>
 
@@ -45,7 +51,7 @@
 
         <div id="empty-state">
           <h1>✎ Graf</h1>
-          <p>Select a flow from the sidebar, or create a new one.</p>
+          <p id="empty-state-hint">Select a flow from the sidebar, or create a new one.</p>
         </div>
 
         <div id="node-editor" class="floating hidden">
@@ -108,8 +114,8 @@
     </main>
   </div>
   <script type="importmap">
-    { "imports": { "roughjs": "/vendor/roughjs/rough.esm.js" } }
+    { "imports": { "roughjs": "./vendor/roughjs/rough.esm.js" } }
   </script>
-  <script type="module" src="/js/main.js"></script>
+  <script type="module" src="js/main.js"></script>
 </body>
 </html>

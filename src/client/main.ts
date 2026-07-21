@@ -1,11 +1,18 @@
-// App shell: file list, WebSocket sync with the server, undo/redo, keyboard shortcuts, and
-// the glue between canvas gestures (canvas-view.ts), document mutations (flow-doc.ts), the
-// floating editors (editors.ts), and inline subgraph expansion (expansion.ts).
+// App shell: file list, workspace sync, undo/redo, keyboard shortcuts, and the glue between
+// canvas gestures (canvas-view.ts), document mutations (flow-doc.ts), the floating editors
+// (editors.ts), and inline subgraph expansion (expansion.ts).
+//
+// Files live in the active workspace (workspace.ts): the Graf server when one is answering
+// (self-hosted mode), browser storage when the app is statically hosted (serverless mode),
+// or a local folder opened through the File System Access API in either mode. UI state —
+// entrypoint, active flow, per-flow cameras — persists to the workspace's
+// graf.manifest.json.
 //
 // Sync model: the serialized file text is the source of truth. Every mutation edits the
-// parsed AST, re-renders immediately, and writes the re-serialized text to the server
-// (debounced for typing, immediate for drags). File changes on disk arrive as `file`
-// messages and replace the AST wholesale; selection and open editors survive via node UUIDs.
+// parsed AST, re-renders immediately, and writes the re-serialized text to the workspace
+// (debounced for typing, immediate for drags). External file changes arrive through the
+// workspace delegate and replace the AST wholesale; selection and open editors survive via
+// node UUIDs.
 //
 // Navigation model: opening a node's subgraph (its ⤢ badge) pushes the current location
 // onto a trail and plays a zoom-into-the-node transition, so the breadcrumb reads like a
@@ -38,10 +45,21 @@ import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
 import { CanvasView, type Tool, type View } from './canvas-view.js';
 import { ExpansionLayer, type DocumentOwner } from './expansion.js';
 import { createEditors } from './editors.js';
-
-type ServerMessage =
-  | { type: 'files'; files: string[] }
-  | { type: 'file'; path: string; text: string };
+import {
+  MANIFEST_FILE_NAME,
+  chooseStartupFlow,
+  defaultEntrypoint,
+  emptyManifest,
+  parseManifest,
+  serializeManifest,
+  type WorkspaceManifest,
+} from '../shared/manifest.js';
+import type { Workspace, WorkspaceDelegate } from './workspace.js';
+import { ServerWorkspace, serverIsAvailable } from './workspace-server.js';
+import { BrowserWorkspace } from './workspace-browser.js';
+import { FolderWorkspace, folderPickingIsSupported, pickWorkspaceFolder } from './workspace-folder.js';
+import { exportWorkspaceAsZip } from './export.js';
+import { buildFileTree, type TreeFile, type TreeFolder } from './file-tree.js';
 
 interface AppState {
   files: string[];
@@ -78,8 +96,13 @@ const navigation = { trail: [] as TrailEntry[], inProgress: false };
 const undoStack: string[] = [];
 const redoStack: string[] = [];
 let commitTimer: ReturnType<typeof setTimeout> | undefined;
-let socket: WebSocket | null = null;
-const pendingWrites = new Map<string, string>();
+
+let workspace: Workspace | null = null;
+let defaultWorkspaceKind: 'server' | 'browser' = 'browser';
+let manifest: WorkspaceManifest = emptyManifest();
+let manifestSaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+const MANIFEST_SAVE_DEBOUNCE_MS = 800;
 
 function elementById<T extends HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -91,7 +114,12 @@ const elements = {
   newFileInput: elementById<HTMLInputElement>('new-file-input'),
   breadcrumb: elementById<HTMLElement>('breadcrumb'),
   emptyState: elementById<HTMLDivElement>('empty-state'),
+  emptyStateHint: elementById<HTMLParagraphElement>('empty-state-hint'),
   connectionDot: elementById<HTMLSpanElement>('connection-dot'),
+  workspaceName: elementById<HTMLSpanElement>('workspace-name'),
+  openFolderButton: elementById<HTMLButtonElement>('open-folder-button'),
+  closeFolderButton: elementById<HTMLButtonElement>('close-folder-button'),
+  exportButton: elementById<HTMLButtonElement>('export-button'),
   helpToggle: elementById<HTMLButtonElement>('help-toggle'),
   helpOverlay: elementById<HTMLDivElement>('help-overlay'),
   toolSelectButton: elementById<HTMLButtonElement>('tool-select-button'),
@@ -171,44 +199,56 @@ function redo(): void {
   applyHistoryText(redoStack.pop()!);
 }
 
-function connectSocket(): void {
-  socket = new WebSocket(`ws://${location.host}`);
-  socket.addEventListener('open', () => {
-    elements.connectionDot.classList.add('connected');
-    for (const [path, text] of pendingWrites) socket!.send(JSON.stringify({ type: 'write', path, text }));
-    pendingWrites.clear();
-  });
-  socket.addEventListener('message', (event) => {
-    const message = JSON.parse(event.data as string) as ServerMessage;
-    if (message.type === 'files') {
-      state.files = message.files;
+const workspaceDelegate: WorkspaceDelegate = {
+  filesChanged(files) {
+    state.files = files;
+    renderFileList();
+    if (state.path && !files.includes(state.path)) void closeIfFileGone(state.path);
+  },
+  fileChanged(path, text) {
+    // Manifest changes from other clients are UI state, not content — adopting them
+    // mid-session would fight the local camera and selection.
+    if (path === MANIFEST_FILE_NAME) return;
+    if (!state.files.includes(path)) {
+      state.files.push(path);
+      state.files.sort();
       renderFileList();
-    } else if (message.type === 'file') {
-      if (!state.files.includes(message.path)) {
-        state.files.push(message.path);
-        state.files.sort();
-        renderFileList();
-      }
-      if (expansions.watchesPath(message.path)) {
-        expansions.adoptExternalText(message.path, message.text);
-      }
-      if (message.path === state.path && message.text !== state.text) {
-        adoptExternalText(message.text);
-      }
     }
-  });
-  socket.addEventListener('close', () => {
-    elements.connectionDot.classList.remove('connected');
-    setTimeout(connectSocket, 1000);
-  });
-}
+    if (expansions.watchesPath(path)) {
+      expansions.adoptExternalText(path, text);
+    }
+    if (path === state.path && text !== state.text) {
+      adoptExternalText(text);
+    }
+  },
+  connectionChanged(connected) {
+    elements.connectionDot.classList.toggle('connected', connected);
+  },
+};
 
 function sendWrite(path: string, text: string): void {
-  if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: 'write', path, text }));
-  } else {
-    pendingWrites.set(path, text);
+  workspace?.writeFile(path, text);
+}
+
+function recordUiState(): void {
+  manifest.ui.activeFlow = state.path;
+  if (state.path) {
+    const { x, y, scale } = view.view;
+    manifest.ui.cameras[state.path] = { x, y, scale };
   }
+}
+
+function scheduleManifestSave(): void {
+  clearTimeout(manifestSaveTimer);
+  manifestSaveTimer = setTimeout(saveManifestNow, MANIFEST_SAVE_DEBOUNCE_MS);
+}
+
+function saveManifestNow(): void {
+  clearTimeout(manifestSaveTimer);
+  manifestSaveTimer = undefined;
+  if (!workspace) return;
+  recordUiState();
+  sendWrite(MANIFEST_FILE_NAME, serializeManifest(manifest));
 }
 
 function adoptExternalText(text: string): void {
@@ -225,9 +265,14 @@ async function openFile(
 ): Promise<boolean> {
   let text = presetText;
   if (text == null) {
-    const response = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
-    if (!response.ok) return false;
-    text = ((await response.json()) as { text: string }).text;
+    text = (await workspace?.readFile(path)) ?? null;
+    if (text == null) {
+      // A listed file whose content cannot be read is gone (deleted externally, or a stale
+      // list entry); keeping it clickable-but-dead is worse than dropping it. The next
+      // filesChanged from the workspace restores it if the failure was transient.
+      dropFromFileList(path);
+      return false;
+    }
   }
   state.path = path;
   state.text = text;
@@ -241,9 +286,54 @@ async function openFile(
   elements.emptyState.classList.add('hidden');
   location.hash = path;
   refresh();
-  if (fit) view.fitToContent();
+  if (fit) {
+    const savedCamera = manifest.ui.cameras[path];
+    if (savedCamera) view.setViewNow(savedCamera);
+    else view.fitToContent();
+  }
   renderFileList();
+  scheduleManifestSave();
   return true;
+}
+
+function dropFromFileList(path: string): void {
+  const index = state.files.indexOf(path);
+  if (index === -1) return;
+  state.files.splice(index, 1);
+  renderFileList();
+}
+
+function deleteFlowFile(path: string): void {
+  workspace?.deleteFile(path);
+  dropFromFileList(path);
+  delete manifest.ui.cameras[path];
+  if (manifest.ui.activeFlow === path) manifest.ui.activeFlow = null;
+  if (manifest.entrypoint === path) manifest.entrypoint = defaultEntrypoint(state.files);
+  scheduleManifestSave();
+  if (state.path === path) closeCurrentFlow();
+}
+
+function closeCurrentFlow(): void {
+  navigation.trail.length = 0;
+  editors.closeAll();
+  view.clearSelection();
+  state.path = null;
+  state.text = '';
+  state.doc = null;
+  state.scope = null;
+  state.model = null;
+  const next = chooseStartupFlow(manifest, state.files);
+  if (next) void openFile(next);
+  else showEmptyWorkspace();
+}
+
+// A files update that no longer lists the open flow usually means another client deleted
+// it — but it can also be a transient race (a list rebuilt before a just-created file
+// landed on disk), so confirm the file is really gone by reading it before closing.
+async function closeIfFileGone(path: string): Promise<void> {
+  const text = (await workspace?.readFile(path)) ?? null;
+  if (text != null || state.path !== path) return;
+  closeCurrentFlow();
 }
 
 function setScope(scopeName: string | null, { fit = true }: { fit?: boolean } = {}): void {
@@ -254,20 +344,85 @@ function setScope(scopeName: string | null, { fit = true }: { fit?: boolean } = 
   if (fit) view.fitToContent();
 }
 
+const collapsedFolders = new Set<string>();
+
 function renderFileList(): void {
-  elements.fileList.replaceChildren(
-    ...state.files.map((path) => {
-      const item = document.createElement('li');
-      item.textContent = path;
-      item.title = path;
-      item.classList.toggle('active', path === state.path);
-      item.addEventListener('click', () => {
-        navigation.trail.length = 0;
-        openFile(path);
-      });
-      return item;
-    }),
-  );
+  const rows: HTMLElement[] = [];
+  appendFolderRows(buildFileTree(state.files), 0, rows);
+  elements.fileList.replaceChildren(...rows);
+}
+
+function appendFolderRows(folder: TreeFolder, depth: number, rows: HTMLElement[]): void {
+  for (const child of folder.folders) {
+    rows.push(folderRow(child, depth));
+    if (!collapsedFolders.has(child.path)) appendFolderRows(child, depth + 1, rows);
+  }
+  for (const file of folder.files) rows.push(fileRow(file, depth));
+}
+
+function applyTreeIndent(row: HTMLElement, depth: number): void {
+  row.style.paddingLeft = `${10 + depth * 14}px`;
+}
+
+function folderRow(folder: TreeFolder, depth: number): HTMLElement {
+  const row = document.createElement('li');
+  row.className = 'folder-row';
+  row.title = folder.path;
+  applyTreeIndent(row, depth);
+  const caret = document.createElement('span');
+  caret.className = 'folder-caret';
+  caret.textContent = collapsedFolders.has(folder.path) ? '▸' : '▾';
+  const name = document.createElement('span');
+  name.className = 'file-name';
+  name.textContent = folder.name;
+  row.append(caret, name);
+  row.addEventListener('click', () => {
+    if (collapsedFolders.has(folder.path)) collapsedFolders.delete(folder.path);
+    else collapsedFolders.add(folder.path);
+    renderFileList();
+  });
+  return row;
+}
+
+function fileRow(file: TreeFile, depth: number): HTMLElement {
+  const row = document.createElement('li');
+  row.className = 'file-row';
+  row.title = file.path;
+  row.classList.toggle('active', file.path === state.path);
+  applyTreeIndent(row, depth);
+  const name = document.createElement('span');
+  name.className = 'file-name';
+  name.textContent = file.name;
+  row.append(name, deleteButtonFor(file.path));
+  row.addEventListener('click', () => {
+    navigation.trail.length = 0;
+    openFile(file.path);
+  });
+  return row;
+}
+
+// Deleting takes two clicks on the same button — an inline confirmation, because dialog
+// boxes (confirm/prompt) are suppressed in several embedded browser hosts.
+function deleteButtonFor(path: string): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'file-delete';
+  button.textContent = '✕';
+  button.title = `Delete ${path}`;
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!button.classList.contains('armed')) {
+      button.classList.add('armed');
+      button.textContent = 'sure?';
+      return;
+    }
+    deleteFlowFile(path);
+  });
+  button.addEventListener('mouseleave', () => {
+    button.classList.remove('armed');
+    button.textContent = '✕';
+  });
+  return button;
 }
 
 function renderBreadcrumb(): void {
@@ -482,7 +637,7 @@ function toggleInlineExpansion(node: FlowNode): void {
 // mutate/undo/commit pipeline, external documents are serialized and written straight to
 // their own path (no undo — the file watcher keeps other views in sync).
 
-const externalCommitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingExternalCommits = new Map<string, { timer: ReturnType<typeof setTimeout>; doc: FlowDocument }>();
 
 function ownerOf(node: FlowNode): DocumentOwner {
   if (FlowDoc.allNodes(state.doc!).includes(node)) return { doc: state.doc!, path: state.path! };
@@ -490,8 +645,8 @@ function ownerOf(node: FlowNode): DocumentOwner {
 }
 
 function commitExternalNow(doc: FlowDocument, path: string): void {
-  clearTimeout(externalCommitTimers.get(path));
-  externalCommitTimers.delete(path);
+  clearTimeout(pendingExternalCommits.get(path)?.timer);
+  pendingExternalCommits.delete(path);
   FlowDoc.ensureLayoutEverywhere(doc);
   sendWrite(path, serializeFlow(doc));
 }
@@ -507,11 +662,11 @@ function applyToDoc(owner: DocumentOwner, mutation: () => void, { commit = 'debo
   if (commit === 'now') {
     commitExternalNow(owner.doc, owner.path);
   } else {
-    clearTimeout(externalCommitTimers.get(owner.path));
-    externalCommitTimers.set(
-      owner.path,
-      setTimeout(() => commitExternalNow(owner.doc, owner.path), COMMIT_DEBOUNCE_MS),
-    );
+    clearTimeout(pendingExternalCommits.get(owner.path)?.timer);
+    pendingExternalCommits.set(owner.path, {
+      doc: owner.doc,
+      timer: setTimeout(() => commitExternalNow(owner.doc, owner.path), COMMIT_DEBOUNCE_MS),
+    });
   }
 }
 
@@ -605,14 +760,20 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
     const node = createNodeAndEdit(ghost.pos, ghost.name);
     view.select(node);
   },
-  viewChanged: () => editors.reposition(),
+  viewChanged: () => {
+    editors.reposition();
+    if (state.path) scheduleManifestSave();
+  },
   afterRender: () => {
     editors.reposition();
     elements.zoomLevel.textContent = `${Math.round(view.view.scale * 100)}%`;
   },
 });
 
-const expansions = new ExpansionLayer({ onNeedsRender: () => view.requestRender() });
+const expansions = new ExpansionLayer({
+  onNeedsRender: () => view.requestRender(),
+  readExternalFile: (path) => workspace?.readFile(path) ?? Promise.resolve(null),
+});
 view.expansionLayer = expansions;
 
 const editors = createEditors({
@@ -724,6 +885,7 @@ function createFlowFile(rawName: string): void {
     state.files.push(name);
     state.files.sort();
   }
+  if (!manifest.entrypoint) manifest.entrypoint = name;
   navigation.trail.length = 0;
   openFile(name, { presetText: text });
 }
@@ -777,25 +939,134 @@ function wireKeyboard(): void {
   });
 }
 
+// --- Workspaces --------------------------------------------------------------------------
+
+function createDefaultWorkspace(): Workspace {
+  return defaultWorkspaceKind === 'server' ? new ServerWorkspace() : new BrowserWorkspace();
+}
+
+function flushPendingCommits(): void {
+  commitNow();
+  for (const [path, pending] of [...pendingExternalCommits]) commitExternalNow(pending.doc, path);
+}
+
+function resetSessionState(): void {
+  editors.closeAll();
+  view.clearSelection();
+  expansions.reset();
+  navigation.trail.length = 0;
+  undoStack.length = 0;
+  redoStack.length = 0;
+  clearTimeout(commitTimer);
+  for (const pending of pendingExternalCommits.values()) clearTimeout(pending.timer);
+  pendingExternalCommits.clear();
+  state.files = [];
+  state.path = null;
+  state.text = '';
+  state.doc = null;
+  state.scope = null;
+  state.model = null;
+  manifest = emptyManifest();
+}
+
+async function switchWorkspace(next: Workspace, { preferHash = false } = {}): Promise<void> {
+  if (workspace) {
+    flushPendingCommits();
+    saveManifestNow();
+    workspace.stop();
+  }
+  workspace = null;
+  resetSessionState();
+  workspace = next;
+  try {
+    state.files = await next.start(workspaceDelegate);
+  } catch (error) {
+    console.error('Failed to open workspace', error);
+    state.files = [];
+  }
+  manifest = parseManifest(await next.readFile(MANIFEST_FILE_NAME)) ?? emptyManifest();
+  if (!manifest.entrypoint) manifest.entrypoint = defaultEntrypoint(state.files);
+  renderFileList();
+  renderWorkspaceBar();
+
+  const hashPath = decodeURIComponent(location.hash.slice(1));
+  const startupPath =
+    preferHash && hashPath && state.files.includes(hashPath) ? hashPath : chooseStartupFlow(manifest, state.files);
+  if (startupPath) {
+    await openFile(startupPath);
+  } else {
+    showEmptyWorkspace();
+  }
+}
+
+function showEmptyWorkspace(): void {
+  location.hash = '';
+  elements.graphPanel.classList.add('collapsed');
+  elements.graphToggle.textContent = '☰ graph';
+  elements.emptyState.classList.remove('hidden');
+  elements.emptyStateHint.textContent =
+    workspace?.kind === 'browser'
+      ? 'Create your first flow with “+ New flow” — it is saved in this browser. Or open a local folder of .flow files.'
+      : 'Create a new flow with “+ New flow”, or select one from the sidebar.';
+  renderBreadcrumb();
+  renderFileList();
+  view.setModel(FlowDoc.buildModel(parseFlow('---\nname: empty\n---\n'), null));
+}
+
+function renderWorkspaceBar(): void {
+  if (!workspace) return;
+  const names: Record<Workspace['kind'], string> = {
+    server: 'server workspace',
+    browser: 'browser storage',
+    folder: `📁 ${workspace.label}`,
+  };
+  elements.workspaceName.textContent = names[workspace.kind];
+  elements.workspaceName.title =
+    workspace.kind === 'folder' ? `Local folder “${workspace.label}”` : names[workspace.kind];
+  elements.closeFolderButton.classList.toggle('hidden', workspace.kind !== 'folder');
+  elements.openFolderButton.classList.toggle('hidden', !folderPickingIsSupported() || workspace.kind === 'folder');
+}
+
+async function exportWorkspace(): Promise<void> {
+  if (!workspace) return;
+  flushPendingCommits();
+  recordUiState();
+  if (!manifest.entrypoint) manifest.entrypoint = defaultEntrypoint(state.files);
+  try {
+    await exportWorkspaceAsZip({
+      files: [...state.files],
+      readFile: (path) => (path === state.path ? Promise.resolve(state.text) : workspace!.readFile(path)),
+      manifest,
+      workspaceLabel: workspace.kind === 'folder' ? workspace.label : 'graf-workspace',
+    });
+  } catch (error) {
+    console.error('Export failed', error);
+    alert('Export failed — see the browser console for details.');
+  }
+}
+
+function wireWorkspaceControls(): void {
+  elements.openFolderButton.addEventListener('click', async () => {
+    const folder = await pickWorkspaceFolder();
+    if (folder) await switchWorkspace(new FolderWorkspace(folder));
+  });
+  elements.closeFolderButton.addEventListener('click', () => {
+    void switchWorkspace(createDefaultWorkspace());
+  });
+  elements.exportButton.addEventListener('click', () => void exportWorkspace());
+}
+
 async function boot(): Promise<void> {
   wireGraphPanel();
   wireViewControls();
   wireNewFileForm();
   wireHelp();
   wireKeyboard();
-  connectSocket();
+  wireWorkspaceControls();
   setTool('select');
 
-  const response = await fetch('/api/files');
-  state.files = ((await response.json()) as { files: string[] }).files;
-  renderFileList();
-
-  const requestedPath = decodeURIComponent(location.hash.slice(1));
-  if (requestedPath && state.files.includes(requestedPath)) {
-    openFile(requestedPath);
-  } else if (state.files.length > 0) {
-    openFile(state.files[0]);
-  }
+  defaultWorkspaceKind = (await serverIsAvailable()) ? 'server' : 'browser';
+  await switchWorkspace(createDefaultWorkspace(), { preferHash: true });
 }
 
 boot();

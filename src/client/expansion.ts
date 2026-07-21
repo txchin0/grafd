@@ -100,11 +100,29 @@ export class ExpansionLayer {
   private readonly subModels = new Map<string, FlowModel>();
   private readonly externalDocs = new Map<string, ExternalDocEntry>();
   private readonly onNeedsRender: () => void;
+  private readonly readExternalFile: (path: string) => Promise<string | null>;
   private topModel: FlowModel | null = null;
   locus: Map<FlowNode, NodeLocus> | null = null;
 
-  constructor({ onNeedsRender }: { onNeedsRender: () => void }) {
+  constructor({
+    onNeedsRender,
+    readExternalFile,
+  }: {
+    onNeedsRender: () => void;
+    readExternalFile: (path: string) => Promise<string | null>;
+  }) {
     this.onNeedsRender = onNeedsRender;
+    this.readExternalFile = readExternalFile;
+  }
+
+  // Forgets everything session-local — open frames, cached documents and sub-models — when
+  // the app switches to another workspace, where the same paths mean different files.
+  reset(): void {
+    this.entries.clear();
+    this.subModels.clear();
+    this.externalDocs.clear();
+    this.topModel = null;
+    this.locus = null;
   }
 
   isOpen(nodeId: string | null): boolean {
@@ -349,10 +367,9 @@ export class ExpansionLayer {
     const cached = this.externalDocs.get(path);
     if (cached) return cached.doc ?? null;
     this.externalDocs.set(path, { loading: true });
-    fetch(`/api/file?path=${encodeURIComponent(path)}`)
-      .then(async (response) => {
-        if (!response.ok) throw new Error('not found');
-        const { text } = (await response.json()) as { text: string };
+    this.readExternalFile(path)
+      .then((text) => {
+        if (text == null) throw new Error('not found');
         this.adoptExternalText(path, text);
       })
       .catch(() => this.externalDocs.set(path, { missing: true }));

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { contentHash, listFlowFiles, resolveFlowPath, toPortablePath } from '../src/server/flow-files.js';
+import { contentHash, listFlowFiles, resolveWorkspacePath, toPortablePath } from '../src/server/flow-files.js';
 
 let root: string;
 
@@ -24,21 +24,27 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-describe('resolveFlowPath', () => {
+describe('resolveWorkspacePath', () => {
   it('resolves .flow paths inside the project root', () => {
-    expect(resolveFlowPath(root, 'a.flow')).toBe(path.join(root, 'a.flow'));
-    expect(resolveFlowPath(root, 'sub/b.flow')).toBe(path.join(root, 'sub', 'b.flow'));
+    expect(resolveWorkspacePath(root, 'a.flow')).toBe(path.join(root, 'a.flow'));
+    expect(resolveWorkspacePath(root, 'sub/b.flow')).toBe(path.join(root, 'sub', 'b.flow'));
+  });
+
+  it('resolves the workspace manifest at the root only', () => {
+    expect(resolveWorkspacePath(root, 'graf.manifest.json')).toBe(path.join(root, 'graf.manifest.json'));
+    expect(resolveWorkspacePath(root, 'sub/graf.manifest.json')).toBeNull();
   });
 
   it('rejects traversal outside the root', () => {
-    expect(resolveFlowPath(root, '../escape.flow')).toBeNull();
-    expect(resolveFlowPath(root, 'sub/../../escape.flow')).toBeNull();
+    expect(resolveWorkspacePath(root, '../escape.flow')).toBeNull();
+    expect(resolveWorkspacePath(root, 'sub/../../escape.flow')).toBeNull();
   });
 
-  it('rejects non-.flow extensions and non-string input', () => {
-    expect(resolveFlowPath(root, 'note.txt')).toBeNull();
-    expect(resolveFlowPath(root, undefined)).toBeNull();
-    expect(resolveFlowPath(root, 42)).toBeNull();
+  it('rejects other extensions and non-string input', () => {
+    expect(resolveWorkspacePath(root, 'note.txt')).toBeNull();
+    expect(resolveWorkspacePath(root, 'other.json')).toBeNull();
+    expect(resolveWorkspacePath(root, undefined)).toBeNull();
+    expect(resolveWorkspacePath(root, 42)).toBeNull();
   });
 });
 

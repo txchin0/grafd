@@ -1,6 +1,6 @@
 # .flow Format Guide (flow/1)
 
-You are reading a `.flow` project. This guide defines how to parse and interpret `.flow` files. Read once, then apply to every `.flow` file in the project.
+You are reading a `.flow` workspace. This guide defines how to parse, interpret, and edit `.flow` files. Read once, then apply to every `.flow` file in the workspace.
 
 ## Core Rules
 
@@ -8,7 +8,21 @@ You are reading a `.flow` project. This guide defines how to parse and interpret
 2. **Leaf nodes (no `expand`) = you decide the implementation.**
 3. **Expanded nodes (has `expand`) = you follow the referenced graph.**
 4. Everything is a node. A graph is a node that has been expanded.
-5. Ignore `.flow.meta` files — they are visual metadata for the frontend, not for you.
+5. `graf.manifest.json` is the editor's workspace state file. Read its `entrypoint` field to find the root graph; ignore everything else in it and do not edit it.
+6. Nodes may carry the editor-owned properties `id` and `pos`. They are visual/identity metadata, not semantics — see [Editor-Owned Properties](#editor-owned-properties).
+
+## Workspace Layout
+
+```
+workspace/
+  graf.manifest.json     # editor state: entrypoint + UI state (not for you)
+  SAVE-GUIDE.md          # this guide
+  main.flow              # root graph (whatever the manifest's entrypoint names)
+  auth/
+    login.flow           # referenced graphs, organized freely in subfolders
+```
+
+Start reading at the manifest's `entrypoint`. If there is no manifest, start at `main.flow` or the only root-level file.
 
 ## File Structure
 
@@ -32,6 +46,8 @@ Declared as a bare name at column 0. Properties indented 2 spaces. Names are uni
 
 ```
 Node Name
+  id: 6f2a…-uuid                # editor-owned, preserve as-is
+  pos: 120, 80, 200, 88         # editor-owned, preserve as-is
   description: "optional guidance"
   expand: <local name> | [Label](path.flow)
   on_error: -> Target Node
@@ -41,6 +57,20 @@ Node Name
 ```
 
 All properties are optional. A node with no properties is a valid leaf.
+
+### Editor-Owned Properties
+
+The canvas editor stores its visual metadata directly on nodes (there is no separate metadata file):
+
+- `id: <uuid>` — stable node identity across renames.
+- `pos: x, y, w, h` — the node's rectangle on the canvas.
+
+When editing a `.flow` file:
+
+- **Preserve** existing `id` and `pos` lines on nodes you keep (renaming a node? keep its `id` — that is what makes it a rename instead of a delete-and-create).
+- **Omit** both on nodes you add. The editor assigns an id and auto-layouts missing positions.
+- **Never** copy an `id` onto a second node; ids are unique per workspace file.
+- **Ignore** both when interpreting the graph — they carry no semantic meaning.
 
 ### Inference Rules
 
@@ -108,7 +138,7 @@ graph: Graph Name
   Child Node B
 ```
 
-Graph blocks can be referenced by multiple nodes (reuse). Same properties as preambles (context, inherits, on_error, description, etc.) may appear on a `graph:` block.
+Graph blocks can be referenced by multiple nodes (reuse).
 
 ### Expansion Is Recursive
 
@@ -133,7 +163,7 @@ on_error: [Handler](path.flow)
 
 Shared state available to all nodes in a graph (auth, session, config, etc.).
 
-- **Declared** at graph level via `context: [Name1, Name2]` in the preamble or `graph:` block.
+- **Declared** at graph level via `context: [Name1, Name2]` in the preamble.
 - **Inherited** by child graphs via auto-generated `inherits: [...]` in their preamble.
 - **Read access is implicit** — no annotation needed. Any node in a graph can read its declared or inherited context.
 - **Write access is explicit** — a node that mutates context declares `updates: [Name]`.
@@ -151,7 +181,7 @@ Charge Card
 
 ## Comments
 
-Lines starting with `#` are comments. Ignore them.
+Lines starting with `#` are comments. Ignore them when interpreting; preserve them when editing.
 
 ## Cross-File Resolution
 
@@ -165,7 +195,7 @@ Paths are relative to the referencing file.
 
 ## Reserved Keywords
 
-`name`, `description`, `context`, `inherits`, `on_error`, `expand`, `updates`, `entrypoint`, `data`, `graph`
+`name`, `description`, `context`, `inherits`, `on_error`, `expand`, `updates`, `entrypoint`, `data`, `graph`, `id`, `pos`
 
 All other identifiers are user-defined node names or context names.
 
@@ -180,6 +210,7 @@ All other identifiers are user-defined node names or context names.
 | `entrypoint` | Inferred: no incoming edges = entry point |
 | `context` | Graph declares no new context |
 | `inherits` | Graph inherits nothing (root or isolated) |
+| `id` / `pos` | Editor assigns them on next open |
 | Edge label | Sequential connection |
 | Edge `data` | Infer payload from context |
 | Fan-out strategy | You decide parallel vs sequential |
@@ -204,6 +235,18 @@ graph_block := "graph: " name NL (node)*
 comment     := "#" any NL
 indent      := "  "    # 2 spaces, no tabs
 ```
+
+`id` and `pos` are ordinary properties syntactically; `pos` takes four comma-separated integers (`x, y, w, h`).
+
+## Writing .flow Files
+
+When you create or edit `.flow` files, follow the editor's canonical style so files round-trip cleanly:
+
+- 2-space indentation, never tabs.
+- One blank line between top-level items (nodes, `graph:` blocks, the preamble).
+- Per-node line order: `id`, `pos`, other properties, then edges.
+- Quoted values use double quotes. The format has **no escape sequences** — a `"` character can never appear inside a label or quoted value.
+- Node names are unique within their graph and never contain `: ` (colon-space).
 
 ## Parsing Procedure
 

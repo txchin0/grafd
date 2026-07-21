@@ -1552,7 +1552,6 @@ function contentBoundsOf(model: FlowModel): Rect {
   const maxY = Math.max(...rects.map((rect) => rect.y + rect.h));
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
-
 function unquotedDescription(node: FlowNode): string | null {
   const raw = node.props.find((prop) => prop.key === 'description')?.value;
   if (!raw) return null;
@@ -1560,3 +1559,4 @@ function unquotedDescription(node: FlowNode): string | null {
   if (trimmed.startsWith('"') && trimmed.endsWith('"')) return trimmed.slice(1, -1);
   return trimmed;
 }
+

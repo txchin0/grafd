@@ -2,6 +2,7 @@
 name: Logout Flow
 inherits: [Auth]
 on_error: -> Force Clear
+description: "the logout flow 2"
 ---
 
 Invalidate Token
@@ -18,7 +19,7 @@ Clear Local Storage
 
 Clear Cookies
   id: 2a4c6e8f-0b2c-4a4f-b6d8-e0a2c4e6a8c0
-  pos: 630, 108, 180, 72
+  pos: 624, 152, 180, 72
 
 Force Clear
   id: 4c6e8a0b-2d4e-4b6a-b8e0-a2c4e6a8c0e2

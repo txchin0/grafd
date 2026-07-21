@@ -2,10 +2,21 @@
 
 A freeform web canvas editor for the `.flow` diagram format defined in [FLOW-SPEC.md](FLOW-SPEC.md).
 
-Run with `npm start` (builds, then serves), then open http://localhost:4600. The server scans
-the project tree for `*.flow` files, watches them, and pushes changes to the browser over
-WebSocket; edits made on the canvas are written straight back to disk. Example diagrams live
-in `flows/`.
+The app runs in two hosting modes with identical features:
+
+- **Self-hosted** — `npm start` (builds, then serves), then open http://localhost:4600. The
+  server scans the project tree for `*.flow` files, watches them, and pushes changes to the
+  browser over WebSocket; edits made on the canvas are written straight back to disk.
+  Example diagrams live in `flows/`.
+- **Serverless** — `npm run build:site` assembles a fully static build in `site/` for any
+  static host. The client probes `./api/files` at boot; with no server answering it stores
+  files in IndexedDB (synced across tabs via BroadcastChannel).
+
+In either mode the user can open a local folder through the File System Access API
+(Chromium); a polling watcher keeps edits synchronized with other tools writing to the same
+folder. Any workspace can be exported from the UI as a .zip containing the .flow files,
+`graf.manifest.json`, and `SAVE-GUIDE.md` (the guide AI agents read to work in an exported
+workspace — keep it in sync with the format implementation).
 
 The codebase is TypeScript, compiled by `tsc` alone — no bundler. `npm run build` emits
 `src/` to `dist/` (which is served, never edited); `npm run watch` recompiles on change
@@ -20,6 +31,11 @@ editor-owned node properties:
 
 - `id: <uuid>` — stable node identity
 - `pos: x, y, w, h` — the node's canvas rectangle
+
+Each workspace additionally has a `graf.manifest.json` at its root
+(`src/shared/manifest.ts`): the workspace `entrypoint` plus UI state (active flow, per-flow
+cameras). It is editor-owned, ignored by agents apart from `entrypoint`, and travels
+through the same read/write path as .flow files.
 
 Everything else follows the spec. `src/shared/flow-format.ts` is the single
 parser/serializer, used by both the server and the browser, and defines the shared domain
@@ -36,6 +52,17 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   conversion, recursive `.flow` discovery, content hashing.
 - `src/shared/flow-format.ts` — parse/serialize `.flow` text, format helpers. No DOM, no
   Node APIs.
+- `src/client/workspace.ts` — the `Workspace` interface the app shell talks to; backends:
+  `workspace-server.ts` (WebSocket/REST against the Graf server, plus the boot-time server
+  probe), `workspace-browser.ts` (IndexedDB + BroadcastChannel), `workspace-folder.ts`
+  (File System Access API + polling watcher).
+- `src/client/zip.ts` / `src/client/export.ts` — dependency-free stored-method ZIP writer
+  and the workspace .zip export (flows + manifest + SAVE-GUIDE.md).
+- `src/client/file-tree.ts` — pure folder-tree builder behind the sidebar's collapsible
+  file tree (rendering and delete interaction live in main.ts).
+- `src/shared/manifest.ts` — `graf.manifest.json` types, tolerant parsing, startup-flow
+  choice.
+- `scripts/build-site.mjs` — assembles the static `site/` build (`npm run build:site`).
 - `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building
   (`FlowModel` and its types).

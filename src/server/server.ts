@@ -1,11 +1,11 @@
 import { createServer } from 'node:http';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, rmdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import chokidar from 'chokidar';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { contentHash, listFlowFiles, resolveFlowPath, toPortablePath } from './flow-files.js';
+import { contentHash, listFlowFiles, resolveWorkspacePath, toPortablePath } from './flow-files.js';
 
 const PORT = 4600;
 // This file runs from dist/server, two levels below the project root.
@@ -21,8 +21,12 @@ app.get('/api/files', async (request, response) => {
   response.json({ files: await listFlowFiles(projectRoot) });
 });
 
+app.get('/SAVE-GUIDE.md', (request, response) => {
+  response.sendFile(path.join(projectRoot, 'SAVE-GUIDE.md'));
+});
+
 app.get('/api/file', async (request, response) => {
-  const absolute = resolveFlowPath(projectRoot, String(request.query.path ?? ''));
+  const absolute = resolveWorkspacePath(projectRoot, String(request.query.path ?? ''));
   if (!absolute) {
     response.status(400).json({ error: 'invalid path' });
     return;
@@ -44,6 +48,13 @@ interface WriteMessage {
   text: string;
 }
 
+interface DeleteMessage {
+  type: 'delete';
+  path: string;
+}
+
+type ClientMessage = WriteMessage | DeleteMessage;
+
 function broadcast(message: object, { except }: { except?: WebSocket } = {}): void {
   const payload = JSON.stringify(message);
   for (const client of socketServer.clients) {
@@ -53,22 +64,40 @@ function broadcast(message: object, { except }: { except?: WebSocket } = {}): vo
 
 socketServer.on('connection', (socket) => {
   socket.on('message', async (raw) => {
-    let message: Partial<WriteMessage>;
+    let message: Partial<ClientMessage>;
     try {
       message = JSON.parse(raw.toString());
     } catch {
       return;
     }
-    if (message.type === 'write') {
-      const absolute = resolveFlowPath(projectRoot, message.path);
-      if (!absolute || typeof message.text !== 'string') return;
-      lastWrittenHashes.set(absolute, contentHash(message.text));
+    const absolute = resolveWorkspacePath(projectRoot, message.path);
+    if (!absolute) return;
+    if (message.type === 'write' && typeof (message as Partial<WriteMessage>).text === 'string') {
+      const text = (message as WriteMessage).text;
+      lastWrittenHashes.set(absolute, contentHash(text));
       await mkdir(path.dirname(absolute), { recursive: true });
-      await writeFile(absolute, message.text, 'utf8');
-      broadcast({ type: 'file', path: message.path, text: message.text }, { except: socket });
+      await writeFile(absolute, text, 'utf8');
+      broadcast({ type: 'file', path: message.path, text }, { except: socket });
+    } else if (message.type === 'delete') {
+      lastWrittenHashes.delete(absolute);
+      await rm(absolute, { force: true });
+      await removeEmptyParentDirectories(path.dirname(absolute));
+      await broadcastFileList();
     }
   });
 });
+
+async function removeEmptyParentDirectories(directory: string): Promise<void> {
+  try {
+    while (directory.startsWith(projectRoot + path.sep)) {
+      if ((await readdir(directory)).length > 0) return;
+      await rmdir(directory);
+      directory = path.dirname(directory);
+    }
+  } catch {
+    // A concurrent write into the directory loses the race benignly — leave it in place.
+  }
+}
 
 async function handleFileChangedOnDisk(relativePath: string): Promise<void> {
   const absolute = path.resolve(projectRoot, relativePath);

@@ -71,6 +71,43 @@ html, body {
 #file-list li:hover { background: #262a31; color: var(--ink); }
 #file-list li.active { background: #2b3644; color: var(--ink); }
 
+#file-list .folder-row,
+#file-list .file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#file-list .folder-row { user-select: none; }
+
+.folder-caret {
+  width: 10px;
+  flex-shrink: 0;
+  font-size: 10px;
+}
+
+.file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-delete {
+  visibility: hidden;
+  flex-shrink: 0;
+  padding: 0 4px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#file-list li:hover .file-delete { visibility: visible; }
+.file-delete:hover, .file-delete.armed { color: var(--danger); }
+
 #new-file-button {
   margin: 8px;
   padding: 8px;
@@ -95,6 +132,36 @@ html, body {
   font-size: 13px;
   outline: none;
 }
+
+#workspace-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--panel-border);
+}
+
+#workspace-name {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#workspace-bar button {
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+#workspace-bar button:hover { color: var(--ink); border-color: var(--muted); }
 
 #sidebar-footer {
   display: flex;

@@ -5,13 +5,16 @@
 import { createHash } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { MANIFEST_FILE_NAME } from '../shared/manifest.js';
 
 export const IGNORED_DIRECTORIES = new Set(['node_modules', '.git', '.claude', 'dist']);
 
-// Only .flow files inside the project root are readable and writable; anything else —
-// other extensions, traversal outside the root, non-string input — resolves to null.
-export function resolveFlowPath(projectRoot: string, relativePath: unknown): string | null {
-  if (typeof relativePath !== 'string' || !relativePath.endsWith('.flow')) return null;
+// Only .flow files and the workspace manifest at the root are readable and writable;
+// anything else — other extensions, traversal outside the root, non-string input —
+// resolves to null.
+export function resolveWorkspacePath(projectRoot: string, relativePath: unknown): string | null {
+  if (typeof relativePath !== 'string') return null;
+  if (!relativePath.endsWith('.flow') && relativePath !== MANIFEST_FILE_NAME) return null;
   const absolute = path.resolve(projectRoot, relativePath);
   if (!absolute.startsWith(projectRoot + path.sep)) return null;
   return absolute;

@@ -1,5 +1,7 @@
 node_modules/
 dist/
+site/
+graf.manifest.json
 .env
 .env.*
 *.log
