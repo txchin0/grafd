@@ -7,7 +7,6 @@ import {
   getProp,
   setProp,
   quoteValue,
-  unquote,
   collapseToSingleLine,
   parseListValue,
   formatListValue,
@@ -27,6 +26,10 @@ export interface EditorContext {
   itemsFor(node: FlowNode): FlowItem[];
   applyEdit(node: FlowNode, mutation: () => void): void;
   applyEditNow(node: FlowNode, mutation: () => void): void;
+  // External expand targets store description in the target file's preamble.
+  descriptionOf(node: FlowNode): string;
+  applyDescriptionEdit(node: FlowNode, text: string): void;
+  ensureExpandTarget(node: FlowNode): Promise<void>;
   canOpen(node: FlowNode): boolean;
   openExpand(node: FlowNode): void;
   toggleExpand(node: FlowNode): void;
@@ -83,6 +86,9 @@ export function createEditors(context: EditorContext): Editors {
     fillNodeFields(node);
     elements.nodeEditor.classList.remove('hidden');
     reposition();
+    void context.ensureExpandTarget(node).then(() => {
+      if (editingNodeId === node.id) fillNodeFields(node);
+    });
     if (focusTitle) {
       elements.title.focus();
       elements.title.select();
@@ -91,7 +97,7 @@ export function createEditors(context: EditorContext): Editors {
 
   function fillNodeFields(node: FlowNode): void {
     setUnlessFocused(elements.title, node.name);
-    setUnlessFocused(elements.description, unquote(getProp(node, 'description')));
+    setUnlessFocused(elements.description, context.descriptionOf(node));
     setUnlessFocused(elements.expand, getProp(node, 'expand') ?? '');
     setUnlessFocused(elements.onError, getProp(node, 'on_error') ?? '');
     setUnlessFocused(elements.updates, parseListValue(getProp(node, 'updates')).join(', '));
@@ -209,10 +215,9 @@ export function createEditors(context: EditorContext): Editors {
   });
 
   elements.description.addEventListener('input', () => {
-    applyToNode((node) => {
-      const text = collapseToSingleLine(elements.description.value);
-      setProp(node, 'description', text ? quoteValue(text) : null);
-    });
+    const node = editingNode();
+    if (!node) return;
+    context.applyDescriptionEdit(node, collapseToSingleLine(elements.description.value));
   });
 
   elements.expand.addEventListener('change', () => {

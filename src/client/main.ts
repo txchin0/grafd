@@ -25,6 +25,7 @@ import {
   getPreambleField,
   setPreambleField,
   getProp,
+  setProp,
   quoteValue,
   unquote,
   collapseToSingleLine,
@@ -32,6 +33,8 @@ import {
   formatListValue,
   parseExpandLink,
   resolveLinkPath,
+  resolvedExpandPath,
+  descriptionForNode,
   sanitizeName,
   type EdgeSpec,
   type ExpandLink,
@@ -44,7 +47,7 @@ import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
 import { CanvasView, type Tool, type View } from './canvas-view.js';
 import { ExpansionLayer, type DocumentOwner } from './expansion.js';
-import { createEditors } from './editors.js';
+import { createEditors, type Editors } from './editors.js';
 import {
   MANIFEST_FILE_NAME,
   chooseStartupFlow,
@@ -214,11 +217,12 @@ const workspaceDelegate: WorkspaceDelegate = {
       state.files.sort();
       renderFileList();
     }
-    if (expansions.watchesPath(path)) {
+    // Open path: one parse via adoptExternalText, which re-seeds the expansion cache with
+    // the same object as state.doc. Handling the cache first would create a divergent copy.
+    if (path === state.path) {
+      if (text !== state.text) adoptExternalText(text);
+    } else if (expansions.watchesPath(path)) {
       expansions.adoptExternalText(path, text);
-    }
-    if (path === state.path && text !== state.text) {
-      adoptExternalText(text);
     }
   },
   connectionChanged(connected) {
@@ -255,6 +259,7 @@ function adoptExternalText(text: string): void {
   state.text = text;
   state.doc = parseFlow(text);
   FlowDoc.assignMissingIds(state.doc);
+  expansions.adoptDocument(state.path!, state.doc);
   if (state.scope && !FlowDoc.graphBlockNames(state.doc).includes(state.scope)) state.scope = null;
   refresh();
 }
@@ -278,6 +283,7 @@ async function openFile(
   state.text = text;
   state.doc = parseFlow(text);
   FlowDoc.assignMissingIds(state.doc);
+  expansions.adoptDocument(path, state.doc);
   state.scope = null;
   undoStack.length = 0;
   redoStack.length = 0;
@@ -674,6 +680,57 @@ function applyEdit(node: FlowNode, mutation: () => void, options?: { commit?: Co
   applyToDoc(ownerOf(node), mutation, options);
 }
 
+function expandTargetDoc(path: string): FlowDocument | null {
+  if (state.doc && path === state.path) return state.doc;
+  return expansions.documentAt(path);
+}
+
+function expandTargetOwner(node: FlowNode): DocumentOwner | null {
+  const path = resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path);
+  if (!path) return null;
+  const doc = expandTargetDoc(path);
+  return doc ? { doc, path } : null;
+}
+
+function descriptionOf(node: FlowNode): string {
+  return descriptionForNode(node, expandTargetOwner(node)?.doc ?? null);
+}
+
+function applyDescriptionEdit(node: FlowNode, text: string): void {
+  const quoted = text ? quoteValue(text) : null;
+  const path = resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path);
+  if (!path) {
+    applyEdit(node, () => setProp(node, 'description', quoted));
+    return;
+  }
+  const doc = expandTargetDoc(path);
+  if (doc) {
+    writeExpandDescription(node, { doc, path }, quoted);
+    return;
+  }
+  // Prefetch may still be in flight when the user starts typing; finish the load then write
+  // to the preamble so the keystroke does not land on the referencing node.
+  void expansions.ensureDocument(path).then((loaded) => {
+    if (!node.id || findNode(node.id) !== node) return;
+    if (resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path) !== path) return;
+    if (loaded) writeExpandDescription(node, { doc: loaded, path }, quoted);
+    else applyEdit(node, () => setProp(node, 'description', quoted));
+  });
+}
+
+function writeExpandDescription(node: FlowNode, target: DocumentOwner, quoted: string | null): void {
+  applyToDoc(target, () => setPreambleField(target.doc, 'description', quoted));
+  if (getProp(node, 'description') != null) {
+    applyEdit(node, () => setProp(node, 'description', null));
+  }
+}
+
+async function ensureExpandTarget(node: FlowNode): Promise<void> {
+  const path = resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path);
+  if (!path) return;
+  await expansions.ensureDocument(path);
+}
+
 function findNode(nodeId: string): FlowNode | null {
   return FlowDoc.findNodeById(state.doc!, nodeId) ?? expansions.findNodeById(nodeId);
 }
@@ -771,18 +828,24 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
 });
 
 const expansions = new ExpansionLayer({
-  onNeedsRender: () => view.requestRender(),
+  onNeedsRender: () => {
+    view.requestRender();
+    editors.refreshFromDoc();
+  },
   readExternalFile: (path) => workspace?.readFile(path) ?? Promise.resolve(null),
 });
 view.expansionLayer = expansions;
 
-const editors = createEditors({
+const editors: Editors = createEditors({
   view,
   findNode,
   findEdge,
   itemsFor,
   applyEdit,
   applyEditNow: (node, mutation) => applyEdit(node, mutation, { commit: 'now' }),
+  descriptionOf,
+  applyDescriptionEdit,
+  ensureExpandTarget,
   canOpen: (node) => !expansions.isEmbedded(node),
   openExpand,
   toggleExpand: toggleInlineExpansion,

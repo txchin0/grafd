@@ -187,11 +187,11 @@ Lines starting with `#` are comments. Ignore them when interpreting; preserve th
 
 When you encounter `expand: [Label](path.flow)`:
 1. Read the referenced file.
-2. The file's preamble defines the expanded node.
+2. The file's preamble defines the expanded node — put node-definition fields there (`description`, and the target's own `context` / `inherits`), not on the referencing node.
 3. Its body contains the child nodes.
 4. Apply all rules recursively.
 
-Paths are relative to the referencing file.
+Paths are relative to the referencing file. The referencing node keeps parent-scoped role fields — edges, `entrypoint`, `on_error`, `updates`, and editor-owned `id` / `pos` — because they describe its role in the *parent* graph. Do not strip those when moving node-definition fields into the target preamble.
 
 ## Reserved Keywords
 

@@ -21,7 +21,7 @@ Render Dashboard
 
 Handle Logout Button
   id: 2e4a6c8d-0f2a-4f4e-b6c8-e0a2c4c6e8a0
-  pos: 704, 176, 210, 80
+  pos: 704, 184, 210, 80
   expand: Logout Confirmation
 
 graph: Logout Confirmation

@@ -13,6 +13,7 @@ import {
   parseExpandLink,
   parseFlow,
   resolveLinkPath,
+  resolvedExpandPath,
   type FlowDocument,
   type FlowNode,
   type Rect,
@@ -62,6 +63,7 @@ interface ExternalDocEntry {
   doc?: FlowDocument;
   loading?: boolean;
   missing?: boolean;
+  loadPromise?: Promise<FlowDocument | null>;
 }
 
 const TOGGLE_DURATION_MS = 380;
@@ -221,12 +223,38 @@ export class ExpansionLayer {
     return this.externalDocs.has(path);
   }
 
+  documentAt(path: string): FlowDocument | null {
+    return this.externalDocs.get(path)?.doc ?? null;
+  }
+
+  ensureDocument(path: string): Promise<FlowDocument | null> {
+    const cached = this.externalDocs.get(path);
+    if (cached?.doc) return Promise.resolve(cached.doc);
+    if (cached?.missing) return Promise.resolve(null);
+    if (cached?.loadPromise) return cached.loadPromise;
+    this.externalDoc(path);
+    return this.externalDocs.get(path)?.loadPromise ?? Promise.resolve(null);
+  }
+
+  expandDocumentFor(node: FlowNode, containingPath: string | null): FlowDocument | null {
+    const path = resolvedExpandPath(getProp(node, 'expand'), containingPath);
+    return path ? this.documentAt(path) : null;
+  }
+
   adoptExternalText(path: string, text: string): void {
     const doc = parseFlow(text);
     FlowDoc.assignMissingIds(doc);
     this.externalDocs.set(path, { doc });
     this.subModels.clear();
     this.onNeedsRender();
+  }
+
+  // Cache an already-parsed document by identity so an open file's `state.doc` and the
+  // expand-target cache stay the same object — edits remain visible through documentAt
+  // after navigation, and description writes never serialize a stale prefetch snapshot.
+  adoptDocument(path: string, doc: FlowDocument): void {
+    this.externalDocs.set(path, { doc });
+    this.subModels.clear();
   }
 
   private progressOf(entry: ToggleEntry, now: number): number {
@@ -241,6 +269,10 @@ export class ExpansionLayer {
     const display: DisplayGeometry = { rects: new Map(), expansions: new Map() };
     model.display = display;
     let animating = false;
+
+    // Prefetch every visible external expand so preamble fields (e.g. description) can paint
+    // on collapsed nodes without waiting for the user to unfold the frame.
+    this.prefetchExternalExpands(model);
 
     for (const node of model.nodes) {
       if (!node.id) continue;
@@ -363,16 +395,33 @@ export class ExpansionLayer {
     return withSource(FlowDoc.buildModel(doc, null), doc, path);
   }
 
+  private prefetchExternalExpands(model: FlowModel): void {
+    for (const node of model.nodes) {
+      const path = resolvedExpandPath(getProp(node, 'expand'), model.sourcePath);
+      if (path) this.externalDoc(path);
+    }
+  }
+
   private externalDoc(path: string): FlowDocument | null {
     const cached = this.externalDocs.get(path);
     if (cached) return cached.doc ?? null;
-    this.externalDocs.set(path, { loading: true });
-    this.readExternalFile(path)
+    const entry: ExternalDocEntry = { loading: true };
+    entry.loadPromise = this.readExternalFile(path)
       .then((text) => {
         if (text == null) throw new Error('not found');
+        // A later adoptDocument (open file) or adoptExternalText (watcher) may have replaced
+        // this entry; do not clobber that live document with the late fetch.
+        const current = this.externalDocs.get(path);
+        if (current?.doc && current !== entry) return current.doc;
         this.adoptExternalText(path, text);
+        return this.documentAt(path);
       })
-      .catch(() => this.externalDocs.set(path, { missing: true }));
+      .catch(() => {
+        if (this.externalDocs.get(path) !== entry) return null;
+        this.externalDocs.set(path, { missing: true });
+        return null;
+      });
+    this.externalDocs.set(path, entry);
     return null;
   }
 }

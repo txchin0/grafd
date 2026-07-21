@@ -335,6 +335,42 @@ export function resolveLinkPath(containingFilePath: string | null, relativePath:
   return segments.join('/');
 }
 
+// Absolute workspace path of an external expand target, or null for local / missing expands.
+export function resolvedExpandPath(
+  expandValue: string | null | undefined,
+  containingPath: string | null,
+): string | null {
+  const link = parseExpandLink(expandValue);
+  if (!link) return null;
+  return resolveLinkPath(containingPath, link.path);
+}
+
+// For `expand: [Label](file.flow)` the target file's preamble *is* the node definition
+// (SAVE-GUIDE). Prefer its description; fall back to a legacy prop on the referencing node.
+export function descriptionForNode(node: FlowNode, expandDoc: FlowDocument | null): string {
+  if (expandDoc) {
+    const fromPreamble = getPreambleField(expandDoc, 'description');
+    if (fromPreamble != null && fromPreamble !== '') return unquote(fromPreamble);
+  }
+  return unquote(getProp(node, 'description'));
+}
+
+// Writes description to the expand target's preamble when one is supplied, clearing any
+// duplicate on the referencing node so the definition stays in one place. Callers that
+// span two documents must commit each side separately — this only mutates the ASTs.
+export function writeDescriptionForNode(
+  node: FlowNode,
+  expandDoc: FlowDocument | null,
+  quotedValue: string | null,
+): void {
+  if (expandDoc) {
+    setPreambleField(expandDoc, 'description', quotedValue);
+    setProp(node, 'description', null);
+    return;
+  }
+  setProp(node, 'description', quotedValue);
+}
+
 // Node names may not contain ": " (spec §3.2) and the format is line-based, so names are
 // collapsed to a single line with that sequence rewritten.
 export function sanitizeName(rawName: string): string {

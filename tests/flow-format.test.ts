@@ -15,6 +15,9 @@ import {
   formatListValue,
   parseExpandLink,
   resolveLinkPath,
+  resolvedExpandPath,
+  descriptionForNode,
+  writeDescriptionForNode,
   sanitizeName,
   collapseToSingleLine,
   uniqueName,
@@ -232,6 +235,36 @@ describe('resolveLinkPath', () => {
     expect(resolveLinkPath('flows/main.flow', './sub.flow')).toBe('flows/sub.flow');
     expect(resolveLinkPath('flows/main.flow', '../other/sub.flow')).toBe('other/sub.flow');
     expect(resolveLinkPath(null, 'sub.flow')).toBe('sub.flow');
+  });
+});
+
+describe('external expand description', () => {
+  it('resolves the expand target path and ignores local expands', () => {
+    expect(resolvedExpandPath('[Dashboard](dashboard.flow)', 'flows/main.flow')).toBe('flows/dashboard.flow');
+    expect(resolvedExpandPath('Local Graph', 'flows/main.flow')).toBeNull();
+  });
+
+  it('prefers the expand target preamble over a legacy node prop', () => {
+    const parent = parseFlow('Load\n  description: "on parent"\n  expand: [Dash](dash.flow)\n');
+    const child = parseFlow('---\nname: Dash\ndescription: "in preamble"\n---\n');
+    const node = parent.items.find((item) => item.kind === 'node')!.node;
+    expect(descriptionForNode(node, child)).toBe('in preamble');
+  });
+
+  it('falls back to the node prop when the preamble has no description', () => {
+    const parent = parseFlow('Load\n  description: "legacy"\n  expand: [Dash](dash.flow)\n');
+    const child = parseFlow('---\nname: Dash\n---\n');
+    const node = parent.items.find((item) => item.kind === 'node')!.node;
+    expect(descriptionForNode(node, child)).toBe('legacy');
+  });
+
+  it('writes description to the preamble and clears the node prop', () => {
+    const parent = parseFlow('Load\n  description: "legacy"\n  expand: [Dash](dash.flow)\n');
+    const child = parseFlow('---\nname: Dash\n---\n');
+    const node = parent.items.find((item) => item.kind === 'node')!.node;
+    writeDescriptionForNode(node, child, '"fresh"');
+    expect(getPreambleField(child, 'description')).toBe('"fresh"');
+    expect(getProp(node, 'description')).toBeNull();
   });
 });
 

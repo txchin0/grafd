@@ -100,7 +100,40 @@ describe('ExpansionLayer', () => {
     const found = layer.findNodeById('inner-1');
     expect(found?.name).toBe('Inner');
     expect(layer.ownerOf(found!)?.path).toBe('sub.flow');
+    expect(layer.documentAt('sub.flow')).toBe(layer.ownerOf(found!)!.doc);
     expect(onNeedsRender).toHaveBeenCalled();
+  });
+
+  it('ensureDocument resolves once the fetch completes', async () => {
+    const onNeedsRender = vi.fn();
+    const readExternalFile = vi.fn(async () => '---\nname: Dash\ndescription: "hi"\n---\n');
+    const layer = new ExpansionLayer({ onNeedsRender, readExternalFile });
+    const doc = await layer.ensureDocument('dashboard.flow');
+    expect(doc).not.toBeNull();
+    expect(layer.documentAt('dashboard.flow')).toBe(doc);
+  });
+
+  it('adoptDocument stores the same object and invalidates sub-models', () => {
+    const { layer } = layerWithSpy();
+    const hostDoc = parseFlow('Host\n  id: host\n  pos: 0, 0, 120, 80\n  expand: [X](sub.flow)\n');
+    const firstSub = parseFlow('First\n  id: first\n  pos: 0, 0, 100, 80\n');
+    const secondSub = parseFlow('Second\n  id: second\n  pos: 0, 0, 100, 80\n');
+    layer.adoptDocument('sub.flow', firstSub);
+    expect(layer.documentAt('sub.flow')).toBe(firstSub);
+
+    const host = allNodes(hostDoc)[0];
+    const model = buildModel(hostDoc, null);
+    model.sourceDoc = hostDoc;
+    model.sourcePath = 'main.flow';
+    layer.toggle(host);
+    layer.layout(model, performance.now());
+    expect(layer.findNodeById('first')?.name).toBe('First');
+
+    layer.adoptDocument('sub.flow', secondSub);
+    expect(layer.documentAt('sub.flow')).toBe(secondSub);
+    layer.layout(model, performance.now() + 1000);
+    expect(layer.findNodeById('first')).toBeNull();
+    expect(layer.findNodeById('second')?.name).toBe('Second');
   });
 
   it('does not claim ownership of foreign nodes', () => {

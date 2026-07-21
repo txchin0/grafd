@@ -9,7 +9,11 @@
 // Resolved by the import map in index.html to the served copy of rough.esm.js.
 import rough from 'roughjs';
 import type { Options as RoughOptions } from 'roughjs/bin/core';
-import type { FlowNode, Rect } from '../shared/flow-format.js';
+import {
+  descriptionForNode,
+  type FlowNode,
+  type Rect,
+} from '../shared/flow-format.js';
 import type { FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
 import type { ExpansionLayer, FrameExpansion } from './expansion.js';
 
@@ -1230,7 +1234,7 @@ export class CanvasView {
       fillStyle: 'solid',
     });
 
-    this.drawNodeText(node, rect);
+    this.drawNodeText(model, node, rect);
     this.drawTraitBadges(node, model.traits.get(node), rect);
     this.drawExpandBadges(model, node);
   }
@@ -1279,7 +1283,7 @@ export class CanvasView {
     ctx.fillText('empty subgraph', 160, 90);
   }
 
-  private drawNodeText(node: FlowNode, rect: Rect): void {
+  private drawNodeText(model: FlowModel, node: FlowNode, rect: Rect): void {
     const { ctx } = this;
     const { x, y, w, h } = rect;
     const maxWidth = w - 26;
@@ -1288,7 +1292,7 @@ export class CanvasView {
 
     ctx.font = `600 15px ${HAND_FONT}`;
     const titleLines = this.wrapText(node.name, maxWidth, 2);
-    const description = unquotedDescription(node);
+    const description = this.descriptionText(model, node);
     ctx.font = `12.5px ${HAND_FONT}`;
     const descriptionLineBudget = Math.max(0, Math.floor((h - 20 - titleLines.length * 20) / 16));
     const descriptionLines = description
@@ -1313,6 +1317,12 @@ export class CanvasView {
         lineY += 16;
       }
     }
+  }
+
+  private descriptionText(model: FlowModel, node: FlowNode): string | null {
+    const expandDoc = this.expansionLayer?.expandDocumentFor(node, model.sourcePath) ?? null;
+    const text = descriptionForNode(node, expandDoc);
+    return text || null;
   }
 
   private wrapText(text: string, maxWidth: number, maxLines: number): string[] {
@@ -1551,12 +1561,5 @@ function contentBoundsOf(model: FlowModel): Rect {
   const maxX = Math.max(...rects.map((rect) => rect.x + rect.w));
   const maxY = Math.max(...rects.map((rect) => rect.y + rect.h));
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-}
-function unquotedDescription(node: FlowNode): string | null {
-  const raw = node.props.find((prop) => prop.key === 'description')?.value;
-  if (!raw) return null;
-  const trimmed = raw.trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) return trimmed.slice(1, -1);
-  return trimmed;
 }
 
