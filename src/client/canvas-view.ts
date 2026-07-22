@@ -15,7 +15,7 @@ import {
   type Rect,
 } from '../shared/flow-format.js';
 import type { FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
-import type { ExpansionLayer, FrameExpansion } from './expansion.js';
+import { transformRect, type ExpansionLayer, type FrameExpansion } from './expansion.js';
 
 export interface View {
   x: number;
@@ -42,7 +42,13 @@ type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se';
 
 type Gesture =
   | { type: 'pan'; startView: View; startScreen: Point }
-  | { type: 'edge'; from: FlowNode; toWorld: Point; hoverTarget: FlowNode | null }
+  | {
+      type: 'edge';
+      from: FlowNode;
+      toWorld: Point;
+      hoverTarget: FlowNode | null;
+      innerDrop: { host: FlowNode; innerName: string } | null;
+    }
   | { type: 'resize'; node: FlowNode; corner: ResizeCorner; startRect: Rect; startWorld: Point; scale: number }
   | {
       type: 'move';
@@ -102,7 +108,11 @@ export interface CanvasActions {
     fromNode: FlowNode,
     targetNode: FlowNode | null,
     worldPoint: Point,
-    extra?: { droppedOnSource: boolean; ghostTarget: GhostNode | null },
+    extra?: {
+      droppedOnSource: boolean;
+      ghostTarget: GhostNode | null;
+      innerName?: string;
+    },
   ): void;
   editEdge(edge: ModelEdge): void;
   openExpand(node: FlowNode): void;
@@ -339,9 +349,7 @@ export class CanvasView {
   rect(node: FlowNode): Rect {
     const locus = this.expansionLayer?.locusOf(node);
     if (!locus) return this.rectOf(this.model, node);
-    const local = this.rectOf(locus.model, node);
-    const { scale, tx, ty } = locus.transform;
-    return { x: local.x * scale + tx, y: local.y * scale + ty, w: local.w * scale, h: local.h * scale };
+    return transformRect(this.rectOf(locus.model, node), locus.transform);
   }
 
   private isNodeVisible(node: FlowNode): boolean {
@@ -559,7 +567,7 @@ export class CanvasView {
 
     const port = this.hitPort(world);
     if (port) {
-      this.gesture = { type: 'edge', from: port.node, toWorld: world, hoverTarget: null };
+      this.gesture = { type: 'edge', from: port.node, toWorld: world, hoverTarget: null, innerDrop: null };
       return;
     }
 
@@ -671,8 +679,9 @@ export class CanvasView {
       this.actions.viewChanged?.();
     } else if (gesture.type === 'edge') {
       gesture.toWorld = world;
-      const target = this.hitNode(world);
-      gesture.hoverTarget = target !== gesture.from && this.inSameModel(gesture.from, target) ? target : null;
+      const drop = this.resolveEdgeDrop(gesture.from, this.hitNode(world));
+      gesture.hoverTarget = drop.hoverTarget;
+      gesture.innerDrop = drop.innerDrop;
       this.requestRender();
     } else if (gesture.type === 'create' || gesture.type === 'marquee') {
       gesture.rect = normalizedRect(gesture.startWorld, world);
@@ -721,10 +730,11 @@ export class CanvasView {
       this.actions.moveCommitted([gesture.node]);
     } else if (gesture.type === 'edge') {
       const rawTarget = this.hitNode(world);
-      const target = rawTarget !== gesture.from && this.inSameModel(gesture.from, rawTarget) ? rawTarget : null;
-      this.actions.completeEdge(gesture.from, target, world, {
+      const drop = this.resolveEdgeDrop(gesture.from, rawTarget);
+      this.actions.completeEdge(gesture.from, drop.targetNode, world, {
         droppedOnSource: rawTarget === gesture.from,
         ghostTarget: this.expansionLayer?.isEmbedded(gesture.from) ? null : this.hitGhost(world),
+        innerName: drop.innerDrop?.innerName,
       });
     } else if (gesture.type === 'create') {
       const bigEnoughOnScreen =
@@ -744,6 +754,37 @@ export class CanvasView {
     if (!nodeA || !nodeB) return false;
     if (!this.expansionLayer) return true;
     return (this.expansionLayer.modelOf(nodeA) ?? this.model) === (this.expansionLayer.modelOf(nodeB) ?? this.model);
+  }
+
+  // Port-drag may land on a node inside an expanded frame: treat that as an edge to the
+  // host subgraph with `{Inner}` set to the hit node (single-level only; §5.7).
+  private resolveEdgeDrop(
+    from: FlowNode,
+    rawTarget: FlowNode | null,
+  ): {
+    hoverTarget: FlowNode | null;
+    targetNode: FlowNode | null;
+    innerDrop: { host: FlowNode; innerName: string } | null;
+  } {
+    if (!rawTarget || rawTarget === from) {
+      return { hoverTarget: null, targetNode: null, innerDrop: null };
+    }
+    if (this.inSameModel(from, rawTarget)) {
+      return { hoverTarget: rawTarget, targetNode: rawTarget, innerDrop: null };
+    }
+    if (this.expansionLayer?.isEmbedded(from)) {
+      return { hoverTarget: null, targetNode: null, innerDrop: null };
+    }
+    const host = this.expansionLayer?.hostOf(rawTarget) ?? null;
+    // Dropping from a host onto a node inside its own frame would be a self-edge; reject it.
+    if (!host || host === from || !this.inSameModel(from, host)) {
+      return { hoverTarget: null, targetNode: null, innerDrop: null };
+    }
+    return {
+      hoverTarget: rawTarget,
+      targetNode: host,
+      innerDrop: { host, innerName: rawTarget.name },
+    };
   }
 
   // Marquee reaches into unfolded frames, but a node is skipped when one of its host
@@ -1052,11 +1093,17 @@ export class CanvasView {
   }
 
   // Labels get their own pass after nodes so they stay readable even where an edge dives
-  // under a node or an expanded frame.
+  // under a node or an expanded frame. Edges that terminate inside an open frame are drawn
+  // after nodes so the frame fill does not occlude them (§5.7 expanded display).
   private drawScene(model: FlowModel): void {
     this.computeEdgeGeometry(model);
-    for (const edge of model.edges) this.drawEdge(edge);
+    const redirected: ModelEdge[] = [];
+    for (const edge of model.edges) {
+      if (this.edgeTerminatesInsideOpenFrame(model, edge)) redirected.push(edge);
+      else this.drawEdge(edge);
+    }
     for (const node of model.nodes) this.drawNode(model, node);
+    for (const edge of redirected) this.drawEdge(edge);
     for (const edge of model.edges) this.drawEdgeLabel(edge);
     for (const ghost of model.ghosts) this.drawGhost(ghost, { clickable: !model.embedded });
   }
@@ -1088,7 +1135,11 @@ export class CanvasView {
         continue;
       }
       const fromRect = this.rectOf(model, edge.from);
-      const toRect = isGhost(edge.to) ? edge.to.pos : this.rectOf(model, edge.to);
+      let toRect = isGhost(edge.to) ? edge.to.pos : this.rectOf(model, edge.to);
+      if (edge.kind === 'flow' && edge.spec.innerTarget && !isGhost(edge.to)) {
+        const innerRect = this.innerTargetRect(model, edge.to, edge.spec.innerTarget);
+        if (innerRect) toRect = innerRect;
+      }
       const pairKey = [edge.from.name, edge.to.name].sort().join(' ');
       const occurrence = pairCounts.get(pairKey) ?? 0;
       pairCounts.set(pairKey, occurrence + 1);
@@ -1105,6 +1156,21 @@ export class CanvasView {
       };
       edge.geometry = { a, b, mid, labelRect: null };
     }
+  }
+
+  private edgeTerminatesInsideOpenFrame(model: FlowModel, edge: ModelEdge): boolean {
+    if (edge.kind !== 'flow' || !edge.spec.innerTarget || !edge.to || isGhost(edge.to)) return false;
+    return this.innerTargetRect(model, edge.to, edge.spec.innerTarget) != null;
+  }
+
+  // When the target frame is expanded far enough, map the named inner node into this
+  // model's coordinates so the edge terminates on it (collapsed / unresolved → plain).
+  private innerTargetRect(model: FlowModel, host: FlowNode, innerName: string): Rect | null {
+    const expansion = model.display?.expansions.get(host);
+    if (!expansion || expansion.alpha <= 0.15) return null;
+    const innerNode = expansion.subModel.nodesByName.get(innerName);
+    if (!innerNode) return null;
+    return transformRect(this.rectOf(expansion.subModel, innerNode), expansion.transform);
   }
 
   private selfLoopGeometry(model: FlowModel, node: FlowNode): NonNullable<ModelEdge['geometry']> {

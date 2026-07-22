@@ -7,7 +7,19 @@ import {
   ripplePush,
   separationVector,
   subModelBounds,
+  transformRect,
 } from '../src/client/expansion.js';
+
+describe('transformRect', () => {
+  it('maps a local rect through a frame transform', () => {
+    expect(transformRect({ x: 10, y: 20, w: 100, h: 50 }, { scale: 0.5, tx: 40, ty: 60 })).toEqual({
+      x: 45,
+      y: 70,
+      w: 50,
+      h: 25,
+    });
+  });
+});
 
 describe('separationVector', () => {
   it('returns null when rects are clear of each other', () => {

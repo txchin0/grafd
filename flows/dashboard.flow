@@ -17,11 +17,11 @@ Render Dashboard
   id: 0c2e4a6b-8d0e-4e2c-b4c6-a8e0c2a4c6e8
   pos: 360, 180, 220, 96
   description: "Displays profile, notifications, and quick actions"
-  -> Handle Logout Button : "user taps logout"
+  -> Handle Logout Button {Show Confirmation Dialog} : "user taps logout"
 
 Handle Logout Button
   id: 2e4a6c8d-0f2a-4f4e-b6c8-e0a2c4c6e8a0
-  pos: 704, 184, 210, 80
+  pos: 776, 216, 210, 80
   expand: Logout Confirmation
 
 graph: Logout Confirmation

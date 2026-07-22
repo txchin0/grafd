@@ -30,6 +30,15 @@ export interface FrameTransform {
   ty: number;
 }
 
+export function transformRect(rect: Rect, transform: FrameTransform): Rect {
+  return {
+    x: rect.x * transform.scale + transform.tx,
+    y: rect.y * transform.scale + transform.ty,
+    w: rect.w * transform.scale,
+    h: rect.h * transform.scale,
+  };
+}
+
 export interface FrameExpansion {
   subModel: FlowModel;
   frame: Rect;
@@ -248,6 +257,14 @@ export class ExpansionLayer {
 
   documentAt(path: string): FlowDocument | null {
     return this.externalDocs.get(path)?.doc ?? null;
+  }
+
+  loadedDocuments(): DocumentOwner[] {
+    const loaded: DocumentOwner[] = [];
+    for (const [path, entry] of this.externalDocs) {
+      if (entry.doc) loaded.push({ doc: entry.doc, path });
+    }
+    return loaded;
   }
 
   ensureDocument(path: string): Promise<FlowDocument | null> {

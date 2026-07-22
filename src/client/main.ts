@@ -511,6 +511,11 @@ function deleteNodesAction(nodes: FlowNode[]): void {
     groups.get(owner.doc)!.nodes.push(node);
   }
   for (const { owner, nodes: docNodes } of groups.values()) {
+    const clears: { identity: FlowDoc.ExpandIdentity; name: string }[] = [];
+    for (const node of docNodes) {
+      const identity = FlowDoc.expandIdentityForNode(owner.doc, owner.path, node);
+      if (identity) clears.push({ identity, name: node.name });
+    }
     applyToDoc(owner, () => {
       const byItems = new Map<ReturnType<typeof FlowDoc.containingItems>, FlowNode[]>();
       for (const node of docNodes) {
@@ -518,8 +523,13 @@ function deleteNodesAction(nodes: FlowNode[]): void {
         if (!byItems.has(items)) byItems.set(items, []);
         byItems.get(items)!.push(node);
       }
-      for (const [items, list] of byItems) FlowDoc.deleteNodes(items, list);
+      for (const [items, list] of byItems) {
+        FlowDoc.deleteNodes(items, list, owner.doc, { path: owner.path });
+      }
     }, { commit: 'now' });
+    for (const { identity, name } of clears) {
+      retargetInnersAcrossWorkspace(identity, name, null, owner.doc);
+    }
   }
 }
 
@@ -746,8 +756,77 @@ function findEdge(spec: EdgeSpec): ModelEdge | null {
   return state.model?.edges.find((edge) => edge.spec === spec) ?? expansions.findEdgeBySpec(spec);
 }
 
-function itemsFor(node: FlowNode) {
-  return FlowDoc.containingItems(ownerOf(node).doc, node);
+function knownDocuments(): DocumentOwner[] {
+  const docs: DocumentOwner[] = [];
+  if (state.doc && state.path) docs.push({ doc: state.doc, path: state.path });
+  for (const entry of expansions.loadedDocuments()) {
+    if (entry.doc !== state.doc) docs.push(entry);
+  }
+  return docs;
+}
+
+function retargetInnersAcrossWorkspace(
+  identity: FlowDoc.ExpandIdentity | null,
+  oldName: string,
+  newName: string | null,
+  alreadyUpdated: FlowDocument,
+): void {
+  if (!identity) return;
+  for (const entry of knownDocuments()) {
+    if (entry.doc === alreadyUpdated) continue;
+    if (!FlowDoc.hasInnerRefs([entry], identity, oldName)) continue;
+    applyToDoc(entry, () => {
+      FlowDoc.retargetInnerRefs([entry], identity, oldName, newName);
+    }, { commit: 'now' });
+  }
+}
+
+function renameNodeAction(node: FlowNode, requestedName: string): string {
+  const owner = ownerOf(node);
+  const oldName = node.name;
+  let finalName = oldName;
+  applyToDoc(owner, () => {
+    finalName = FlowDoc.renameNode(
+      FlowDoc.containingItems(owner.doc, node),
+      node,
+      requestedName,
+      owner.doc,
+      { path: owner.path },
+    );
+  });
+  if (finalName !== oldName) {
+    retargetInnersAcrossWorkspace(
+      FlowDoc.expandIdentityForNode(owner.doc, owner.path, node),
+      oldName,
+      finalName,
+      owner.doc,
+    );
+  }
+  return finalName;
+}
+
+function innerTargetOptions(edge: ModelEdge): string[] {
+  if (edge.kind !== 'flow') return [];
+  const owner = ownerOf(edge.from);
+  const targetNode = FlowDoc.nodesIn(FlowDoc.containingItems(owner.doc, edge.from))
+    .find((node) => node.name === edge.spec.target);
+  const expandValue = targetNode ? getProp(targetNode, 'expand') : null;
+  if (!expandValue) return [];
+  return FlowDoc.expandEntryNames(
+    expandValue,
+    owner.doc,
+    owner.path,
+    (path) => expandTargetDoc(path),
+  ) ?? [];
+}
+
+async function ensureInnerTargets(edge: ModelEdge): Promise<void> {
+  if (edge.kind !== 'flow') return;
+  const owner = ownerOf(edge.from);
+  const targetNode = FlowDoc.nodesIn(FlowDoc.containingItems(owner.doc, edge.from))
+    .find((node) => node.name === edge.spec.target);
+  const path = resolvedExpandPath(targetNode ? getProp(targetNode, 'expand') : null, owner.path);
+  if (path) await expansions.ensureDocument(path);
 }
 
 function commitMovesFor(nodes: FlowNode[]): void {
@@ -765,7 +844,11 @@ function completeEdge(
   fromNode: FlowNode,
   targetNode: FlowNode | null,
   worldPoint: Point,
-  extra?: { droppedOnSource: boolean; ghostTarget: GhostNode | null },
+  extra?: {
+    droppedOnSource: boolean;
+    ghostTarget: GhostNode | null;
+    innerName?: string;
+  },
 ): void {
   if (!state.doc || extra?.droppedOnSource) return;
 
@@ -790,7 +873,7 @@ function completeEdge(
       createdNode = FlowDoc.addNode(scopeItemsNow(), centeredDefaultRect(worldPoint));
       targetName = createdNode.name;
     }
-    createdSpec = FlowDoc.addEdge(fromNode, targetName);
+    createdSpec = FlowDoc.addEdge(fromNode, targetName, null, extra?.innerName ?? null);
   }, { commit: 'now' });
 
   if (createdNode && !extra?.ghostTarget) {
@@ -847,16 +930,18 @@ const editors: Editors = createEditors({
   view,
   findNode,
   findEdge,
-  itemsFor,
+  renameNode: renameNodeAction,
   applyEdit,
   applyEditNow: (node, mutation) => applyEdit(node, mutation, { commit: 'now' }),
   descriptionOf,
   applyDescriptionEdit,
   ensureExpandTarget,
+  ensureInnerTargets,
   canOpen: (node) => !expansions.isEmbedded(node),
   openExpand,
   toggleExpand: toggleInlineExpansion,
   deleteNodes: deleteNodesAction,
+  innerTargetOptions,
 });
 
 function wireGraphPanel(): void {

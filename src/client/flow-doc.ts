@@ -9,7 +9,9 @@ import {
   newUuid,
   parseEdgeExpression,
   serializeEdgeExpression,
+  parseExpandLink,
   parseListValue,
+  resolveLinkPath,
   sanitizeName,
   uniqueName,
   type EdgeSpec,
@@ -40,6 +42,16 @@ export interface EdgeGeometry {
   mid: Point;
   labelRect: Rect | null;
   selfLoop?: boolean;
+}
+
+/** Identity of a subgraph expansion that `{Inner}` names resolve against (spec §5.7). */
+export type ExpandIdentity =
+  | { kind: 'graph-block'; name: string }
+  | { kind: 'external-path'; path: string };
+
+export interface DocPath {
+  doc: FlowDocument;
+  path: string | null;
 }
 
 export interface ModelEdge {
@@ -120,6 +132,15 @@ export function containingItems(doc: FlowDocument, node: FlowNode): FlowItem[] {
     }
   }
   return doc.items;
+}
+
+export function containingGraphBlockName(doc: FlowDocument, node: FlowNode): string | null {
+  for (const item of doc.items) {
+    if (item.kind === 'graph' && item.items.some((inner) => inner.kind === 'node' && inner.node === node)) {
+      return item.name;
+    }
+  }
+  return null;
 }
 
 export function buildModel(doc: FlowDocument, scopeName: string | null): FlowModel {
@@ -261,7 +282,14 @@ export function addNode(items: FlowItem[], rect: Rect, requestedName = 'Untitled
   return node;
 }
 
-export function deleteNodes(items: FlowItem[], nodesToDelete: FlowNode[]): void {
+export function deleteNodes(
+  items: FlowItem[],
+  nodesToDelete: FlowNode[],
+  doc: FlowDocument,
+  options?: { path?: string | null; relatedDocs?: DocPath[] },
+): void {
+  clearInnerTargetsForNodes(nodesToDelete, doc, options);
+
   const deletedNames = new Set(nodesToDelete.map((node) => node.name));
   const deletedSet = new Set(nodesToDelete);
 
@@ -279,7 +307,13 @@ export function deleteNodes(items: FlowItem[], nodesToDelete: FlowNode[]): void 
   }
 }
 
-export function renameNode(items: FlowItem[], node: FlowNode, requestedName: string): string {
+export function renameNode(
+  items: FlowItem[],
+  node: FlowNode,
+  requestedName: string,
+  doc: FlowDocument,
+  options?: { path?: string | null; relatedDocs?: DocPath[] },
+): string {
   const cleanName = sanitizeName(requestedName);
   if (!cleanName || cleanName === node.name) return node.name;
 
@@ -300,6 +334,11 @@ export function renameNode(items: FlowItem[], node: FlowNode, requestedName: str
       }
     }
   }
+
+  const identity = expandIdentityForNode(doc, options?.path ?? null, node);
+  if (identity) {
+    retargetInnerRefs(docsForRetarget(doc, options), identity, oldName, node.name);
+  }
   return node.name;
 }
 
@@ -317,8 +356,18 @@ export function renameGraphBlock(doc: FlowDocument, graphItem: GraphItem, reques
   return graphItem.name;
 }
 
-export function addEdge(fromNode: FlowNode, targetName: string, label: string | null = null): EdgeSpec {
-  fromNode.edges.push({ target: targetName, label, data: null });
+export function addEdge(
+  fromNode: FlowNode,
+  targetName: string,
+  label: string | null = null,
+  innerTarget: string | null = null,
+): EdgeSpec {
+  fromNode.edges.push({
+    target: targetName,
+    innerTarget: innerTarget?.trim() || null,
+    label,
+    data: null,
+  });
   return fromNode.edges[fromNode.edges.length - 1];
 }
 
@@ -338,4 +387,136 @@ export function setEdgeLabel(edge: ModelEdge, label: string | null): void {
     return;
   }
   edge.spec.label = cleanLabel;
+}
+
+export function setEdgeInnerTarget(edge: ModelEdge, name: string | null): void {
+  if (edge.kind === 'error') return;
+  edge.spec.innerTarget = name?.trim() || null;
+}
+
+/** Top-level node names in an expansion (local `graph:` block or external file body). */
+export function expandEntryNames(
+  expandValue: string,
+  localDoc: FlowDocument,
+  containingPath: string | null,
+  resolveExternal: (path: string) => FlowDocument | null,
+): string[] | null {
+  const link = parseExpandLink(expandValue);
+  if (link) {
+    const path = resolveLinkPath(containingPath, link.path);
+    const external = resolveExternal(path);
+    if (!external) return null;
+    return nodesIn(external.items).map((node) => node.name);
+  }
+  return nodesIn(scopeItems(localDoc, expandValue)).map((node) => node.name);
+}
+
+/** How a node participates as an `{Inner}` entry when its containing expand is targeted. */
+export function expandIdentityForNode(
+  doc: FlowDocument,
+  path: string | null,
+  node: FlowNode,
+): ExpandIdentity | null {
+  const blockName = containingGraphBlockName(doc, node);
+  if (blockName) return { kind: 'graph-block', name: blockName };
+  if (path != null && nodesIn(doc.items).includes(node)) {
+    return { kind: 'external-path', path };
+  }
+  return null;
+}
+
+// Rewrite `{Inner}` on edges whose target expands to `identity` (spec §5.7). Returns docs
+// that had at least one edge updated.
+export function retargetInnerRefs(
+  docs: Iterable<DocPath>,
+  identity: ExpandIdentity,
+  oldName: string,
+  newName: string | null,
+): FlowDocument[] {
+  const touched: FlowDocument[] = [];
+  for (const { doc, path } of docs) {
+    let changed = false;
+    for (const node of allNodes(doc)) {
+      for (const edge of node.edges) {
+        if (edge.innerTarget !== oldName) continue;
+        if (!edgeExpandsTo(doc, path, node, edge, identity)) continue;
+        edge.innerTarget = newName;
+        changed = true;
+      }
+    }
+    if (changed) touched.push(doc);
+  }
+  return touched;
+}
+
+export function hasInnerRefs(
+  docs: Iterable<DocPath>,
+  identity: ExpandIdentity,
+  oldName: string,
+): boolean {
+  for (const { doc, path } of docs) {
+    for (const node of allNodes(doc)) {
+      for (const edge of node.edges) {
+        if (edge.innerTarget !== oldName) continue;
+        if (edgeExpandsTo(doc, path, node, edge, identity)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function clearInnerTargetsForNodes(
+  nodesToDelete: FlowNode[],
+  doc: FlowDocument,
+  options?: { path?: string | null; relatedDocs?: DocPath[] },
+): void {
+  const docs = docsForRetarget(doc, options);
+  const byIdentity = new Map<string, { identity: ExpandIdentity; names: Set<string> }>();
+  for (const node of nodesToDelete) {
+    const identity = expandIdentityForNode(doc, options?.path ?? null, node);
+    if (!identity) continue;
+    const key = expandIdentityKey(identity);
+    let group = byIdentity.get(key);
+    if (!group) {
+      group = { identity, names: new Set() };
+      byIdentity.set(key, group);
+    }
+    group.names.add(node.name);
+  }
+  for (const { identity, names } of byIdentity.values()) {
+    for (const name of names) {
+      retargetInnerRefs(docs, identity, name, null);
+    }
+  }
+}
+
+function docsForRetarget(
+  doc: FlowDocument,
+  options?: { path?: string | null; relatedDocs?: DocPath[] },
+): DocPath[] {
+  if (options?.relatedDocs?.length) return options.relatedDocs;
+  return [{ doc, path: options?.path ?? null }];
+}
+
+function expandIdentityKey(identity: ExpandIdentity): string {
+  return identity.kind === 'graph-block'
+    ? `graph:${identity.name}`
+    : `path:${identity.path}`;
+}
+
+function edgeExpandsTo(
+  doc: FlowDocument,
+  containingPath: string | null,
+  edgeSource: FlowNode,
+  edge: EdgeSpec,
+  identity: ExpandIdentity,
+): boolean {
+  const targetNode = nodesIn(containingItems(doc, edgeSource)).find((node) => node.name === edge.target);
+  if (!targetNode) return false;
+  const expandValue = getProp(targetNode, 'expand');
+  if (!expandValue) return false;
+  if (identity.kind === 'graph-block') return expandValue === identity.name;
+  const link = parseExpandLink(expandValue);
+  if (!link) return false;
+  return resolveLinkPath(containingPath, link.path) === identity.path;
 }

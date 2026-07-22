@@ -27,6 +27,7 @@ export interface EdgeDataField {
 
 export interface EdgeSpec {
   target: string;
+  innerTarget: string | null;
   label: string | null;
   data: EdgeDataField[] | null;
 }
@@ -73,7 +74,7 @@ export interface ExpandLink {
 }
 
 const PROPERTY_LINE = /^([A-Za-z_][\w-]*):\s?(.*)$/;
-const EDGE_LINE = /^->\s+(.+?)(?:\s+:\s+"(.*)")?$/;
+const EDGE_LINE = /^->\s+([^{]+?)(?:\s*\{([^}]*)\})?(?:\s+:\s+"(.*)")?$/;
 const GRAPH_HEADER = /^graph:\s+(.+)$/;
 const EXTERNAL_EXPAND_LINK = /^\[(.*)\]\((.*)\)$/;
 
@@ -203,14 +204,25 @@ function attachEdgeData(node: FlowNode, trimmed: string): void {
 export function parseEdgeExpression(text: string): EdgeSpec {
   const match = text.trim().match(EDGE_LINE);
   if (!match) {
-    return { target: text.trim().replace(/^->\s*/, ''), label: null, data: null };
+    return {
+      target: text.trim().replace(/^->\s*/, ''),
+      innerTarget: null,
+      label: null,
+      data: null,
+    };
   }
-  return { target: match[1].trim(), label: match[2] ?? null, data: null };
+  return {
+    target: match[1].trim(),
+    innerTarget: match[2]?.trim() || null,
+    label: match[3] ?? null,
+    data: null,
+  };
 }
 
 export function serializeEdgeExpression(edge: EdgeSpec): string {
+  const inner = edge.innerTarget ? ` {${edge.innerTarget}}` : '';
   const label = edge.label ? ` : "${edge.label}"` : '';
-  return `-> ${edge.target}${label}`;
+  return `-> ${edge.target}${inner}${label}`;
 }
 
 function parsePos(value: string): Rect | null {
@@ -371,10 +383,15 @@ export function writeDescriptionForNode(
   setProp(node, 'description', quotedValue);
 }
 
-// Node names may not contain ": " (spec §3.2) and the format is line-based, so names are
-// collapsed to a single line with that sequence rewritten.
+// Node names may not contain ": " or curly braces (spec §3.2); braces mark an inner
+// subgraph target on edges. The format is line-based, so names are collapsed to one line.
 export function sanitizeName(rawName: string): string {
-  return rawName.replace(/\s+/g, ' ').replace(/:(\s|$)/g, ' -$1').replace(/\s+/g, ' ').trim();
+  return rawName
+    .replace(/\s+/g, ' ')
+    .replace(/:(\s|$)/g, ' -$1')
+    .replace(/[{}]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 export function collapseToSingleLine(text: string): string {

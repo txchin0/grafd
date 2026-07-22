@@ -295,6 +295,7 @@ html, body {
 #node-editor input:not([type]),
 #node-editor textarea,
 #edge-editor input,
+#edge-editor select,
 #graph-panel input:not([type]),
 #graph-panel textarea {
   width: 100%;
@@ -312,6 +313,7 @@ html, body {
 #node-editor input:focus,
 #node-editor textarea:focus,
 #edge-editor input:focus,
+#edge-editor select:focus,
 #graph-panel input:focus,
 #graph-panel textarea:focus {
   border-color: var(--accent);

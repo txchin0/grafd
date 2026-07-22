@@ -11,7 +11,6 @@ import {
   parseListValue,
   formatListValue,
   type EdgeSpec,
-  type FlowItem,
   type FlowNode,
   type Rect,
 } from '../shared/flow-format.js';
@@ -23,17 +22,19 @@ export interface EditorContext {
   view: CanvasView;
   findNode(nodeId: string): FlowNode | null;
   findEdge(spec: EdgeSpec): ModelEdge | null;
-  itemsFor(node: FlowNode): FlowItem[];
+  renameNode(node: FlowNode, requestedName: string): string;
   applyEdit(node: FlowNode, mutation: () => void): void;
   applyEditNow(node: FlowNode, mutation: () => void): void;
   // External expand targets store description in the target file's preamble.
   descriptionOf(node: FlowNode): string;
   applyDescriptionEdit(node: FlowNode, text: string): void;
   ensureExpandTarget(node: FlowNode): Promise<void>;
+  ensureInnerTargets(edge: ModelEdge): Promise<void>;
   canOpen(node: FlowNode): boolean;
   openExpand(node: FlowNode): void;
   toggleExpand(node: FlowNode): void;
   deleteNodes(nodes: FlowNode[]): void;
+  innerTargetOptions(edge: ModelEdge): string[];
 }
 
 export interface Editors {
@@ -66,6 +67,7 @@ export function createEditors(context: EditorContext): Editors {
     deleteNode: elementById<HTMLButtonElement>('ne-delete'),
     edgeEditor: elementById<HTMLDivElement>('edge-editor'),
     edgeLabel: elementById<HTMLInputElement>('ee-label'),
+    edgeInnerTarget: elementById<HTMLSelectElement>('ee-inner-target'),
     deleteEdge: elementById<HTMLButtonElement>('ee-delete'),
   };
 
@@ -115,10 +117,38 @@ export function createEditors(context: EditorContext): Editors {
     closeNodeEditor();
     editingEdgeSpec = edge.spec;
     elements.edgeLabel.value = edge.spec.label ?? '';
+    fillInnerTargetSelect(edge);
     elements.edgeEditor.classList.remove('hidden');
     reposition();
     elements.edgeLabel.focus();
     elements.edgeLabel.select();
+    void context.ensureInnerTargets(edge).then(() => {
+      if (editingEdgeSpec === edge.spec) fillInnerTargetSelect(edge);
+    });
+  }
+
+  function fillInnerTargetSelect(edge: ModelEdge): void {
+    const options = edge.kind === 'flow' ? context.innerTargetOptions(edge) : [];
+    const select = elements.edgeInnerTarget;
+    select.replaceChildren();
+    const current = edge.spec.innerTarget;
+    if (options.length === 0 && !current) {
+      select.classList.add('hidden');
+      return;
+    }
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = '(entry point)';
+    select.append(blank);
+    const names = current && !options.includes(current) ? [...options, current] : options;
+    for (const name of names) {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      select.append(option);
+    }
+    select.value = current ?? '';
+    select.classList.remove('hidden');
   }
 
   // Closing must flush fields that commit on 'change': a click on the canvas closes the
@@ -137,9 +167,11 @@ export function createEditors(context: EditorContext): Editors {
     const onErrorChanged = elements.onError.value.trim() !== (getProp(node, 'on_error') ?? '');
     const updatesEntries = elements.updates.value.split(',').map((entry) => entry.trim()).filter(Boolean);
     const updatesChanged = updatesEntries.join(', ') !== parseListValue(getProp(node, 'updates')).join(', ');
-    if (!titleChanged && !expandChanged && !onErrorChanged && !updatesChanged) return;
+    if (titleChanged) {
+      elements.title.value = context.renameNode(node, elements.title.value);
+    }
+    if (!expandChanged && !onErrorChanged && !updatesChanged) return;
     context.applyEdit(node, () => {
-      if (titleChanged) FlowDoc.renameNode(context.itemsFor(node), node, elements.title.value);
       if (expandChanged) setProp(node, 'expand', elements.expand.value.trim() || null);
       if (onErrorChanged) setProp(node, 'on_error', elements.onError.value.trim() || null);
       if (updatesChanged) setProp(node, 'updates', updatesEntries.length ? formatListValue(updatesEntries) : null);
@@ -193,6 +225,7 @@ export function createEditors(context: EditorContext): Editors {
       fillNodeFields(node);
     }
     if (editingEdgeSpec && !editingEdge()) closeEdgeEditor();
+    else if (editingEdge()) fillInnerTargetSelect(editingEdge()!);
     reposition();
   }
 
@@ -205,10 +238,7 @@ export function createEditors(context: EditorContext): Editors {
   elements.title.addEventListener('change', () => {
     const node = editingNode();
     if (!node) return;
-    context.applyEdit(node, () => {
-      const finalName = FlowDoc.renameNode(context.itemsFor(node), node, elements.title.value);
-      elements.title.value = finalName;
-    });
+    elements.title.value = context.renameNode(node, elements.title.value);
   });
   elements.title.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') elements.description.focus();
@@ -271,6 +301,13 @@ export function createEditors(context: EditorContext): Editors {
       commitEdgeLabel();
       closeEdgeEditor();
     }
+  });
+
+  elements.edgeInnerTarget.addEventListener('change', () => {
+    const edge = editingEdge();
+    if (!edge) return;
+    const value = elements.edgeInnerTarget.value || null;
+    context.applyEdit(edge.from, () => FlowDoc.setEdgeInnerTarget(edge, value));
   });
 
   elements.deleteEdge.addEventListener('click', () => {

@@ -108,7 +108,7 @@ describe('parseFlow', () => {
 
   it('parses labeled edges', () => {
     const start = (doc.items[0] as NodeItem).node;
-    expect(start.edges).toEqual([{ target: 'Validate', label: 'ok', data: null }]);
+    expect(start.edges).toEqual([{ target: 'Validate', label: 'ok', innerTarget: null, data: null }]);
   });
 
   it('preserves comments between nodes as items', () => {
@@ -129,7 +129,7 @@ describe('parseFlow', () => {
     expect(graph.name).toBe('Details');
     const inner = (graph.items[0] as NodeItem).node;
     expect(inner.name).toBe('Inner');
-    expect(inner.edges).toEqual([{ target: 'Other', label: null, data: null }]);
+    expect(inner.edges).toEqual([{ target: 'Other', label: null, innerTarget: null, data: null }]);
   });
 
   it('treats a malformed pos as absent', () => {
@@ -155,16 +155,61 @@ describe('serializeFlow', () => {
 
 describe('edge expressions', () => {
   it('parses a bare target', () => {
-    expect(parseEdgeExpression('-> Target')).toEqual({ target: 'Target', label: null, data: null });
+    expect(parseEdgeExpression('-> Target')).toEqual({
+      target: 'Target',
+      innerTarget: null,
+      label: null,
+      data: null,
+    });
   });
 
   it('parses a labeled edge', () => {
-    expect(parseEdgeExpression('-> Target : "on success"')).toEqual({ target: 'Target', label: 'on success', data: null });
+    expect(parseEdgeExpression('-> Target : "on success"')).toEqual({
+      target: 'Target',
+      innerTarget: null,
+      label: 'on success',
+      data: null,
+    });
   });
 
-  it('serializes with and without labels', () => {
-    expect(serializeEdgeExpression({ target: 'T', label: null, data: null })).toBe('-> T');
-    expect(serializeEdgeExpression({ target: 'T', label: 'go', data: null })).toBe('-> T : "go"');
+  it('parses an inner subgraph target', () => {
+    expect(parseEdgeExpression('-> Process Payment {Charge Card}')).toEqual({
+      target: 'Process Payment',
+      innerTarget: 'Charge Card',
+      label: null,
+      data: null,
+    });
+  });
+
+  it('parses an inner target with a label', () => {
+    expect(parseEdgeExpression('-> Process Payment {Charge Card} : "cart valid"')).toEqual({
+      target: 'Process Payment',
+      innerTarget: 'Charge Card',
+      label: 'cart valid',
+      data: null,
+    });
+  });
+
+  it('serializes with and without labels and inner targets', () => {
+    expect(serializeEdgeExpression({ target: 'T', innerTarget: null, label: null, data: null })).toBe('-> T');
+    expect(serializeEdgeExpression({ target: 'T', innerTarget: null, label: 'go', data: null })).toBe('-> T : "go"');
+    expect(serializeEdgeExpression({
+      target: 'Process Payment',
+      innerTarget: 'Charge Card',
+      label: null,
+      data: null,
+    })).toBe('-> Process Payment {Charge Card}');
+    expect(serializeEdgeExpression({
+      target: 'Process Payment',
+      innerTarget: 'Charge Card',
+      label: 'cart valid',
+      data: null,
+    })).toBe('-> Process Payment {Charge Card} : "cart valid"');
+  });
+
+  it('round-trips inner targets through parse and serialize', () => {
+    const text = '-> Sub {Inner} : "label"';
+    expect(serializeEdgeExpression(parseEdgeExpression(text))).toBe(text);
   });
 });
 
@@ -273,6 +318,7 @@ describe('name helpers', () => {
     expect(sanitizeName('a: b')).toBe('a - b');
     expect(sanitizeName('multi\nline   name')).toBe('multi line name');
     expect(sanitizeName('trailing:')).toBe('trailing -');
+    expect(sanitizeName('Has {braces}')).toBe('Has braces');
   });
 
   it('collapses whitespace to a single line', () => {
