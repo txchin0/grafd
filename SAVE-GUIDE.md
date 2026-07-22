@@ -1,4 +1,4 @@
-# .flow Format Guide (flow/1)
+# .flow Format Guide (flow/1.1)
 
 You are reading a `.flow` workspace. This guide defines how to parse, interpret, and edit `.flow` files. Read once, then apply to every `.flow` file in the workspace.
 
@@ -42,7 +42,7 @@ entrypoint: true              # optional: explicit trigger override
 
 ## Nodes
 
-Declared as a bare name at column 0. Properties indented 2 spaces. Names are unique per graph. Names never contain `: ` (colon-space).
+Declared as a bare name at column 0. Properties indented 2 spaces. Names are unique per graph. Names never contain `: ` (colon-space) or curly braces `{` `}` (a trailing `{Inner}` on an edge target names a node inside the target subgraph).
 
 ```
 Node Name
@@ -54,6 +54,7 @@ Node Name
   updates: [ContextName]
   entrypoint: true
   -> Target Node : "optional label"
+  -> Subgraph {Inner Node} : "optional label"  # enter subgraph at Inner Node
 ```
 
 All properties are optional. A node with no properties is a valid leaf.
@@ -118,6 +119,27 @@ If `data` present, match that schema. If absent, infer from context and labels.
 ### Loops
 
 Backward edges (pointing to earlier-declared nodes) are cycles. Implement loop/retry logic. Termination conditions come from edge labels or descriptions.
+
+### Targeting a Node Inside a Subgraph
+
+An edge may optionally name a node inside the target subgraph with a `{Inner Node}` suffix:
+
+```
+Validate Cart
+  -> Process Payment {Charge Card} : "cart valid"
+
+Process Payment
+  expand: Payment Steps
+
+graph: Payment Steps
+  Charge Card
+    -> Send Receipt
+  Send Receipt
+```
+
+- The name before `{...}` is the subgraph node (resolved in the current scope); it must have `expand`.
+- The name inside `{...}` is the inner node, resolved against the top-level scope of that expansion (local `graph:` block or external file body). Single-level only — nested paths are not supported.
+- **Semantics:** control enters the subgraph at that inner node instead of its inferred entry point.
 
 ## Expansion
 
@@ -213,6 +235,7 @@ All other identifiers are user-defined node names or context names.
 | `id` / `pos` | Editor assigns them on next open |
 | Edge label | Sequential connection |
 | Edge `data` | Infer payload from context |
+| no `{...}` refinement | Edge enters the subgraph at its inferred entry point |
 | Fan-out strategy | You decide parallel vs sequential |
 
 ## Grammar (EBNF-ish)
@@ -227,7 +250,8 @@ body        := (node | graph_block | comment | blank)*
 
 node        := name NL (indent property)*
 property    := (key ": " value) | edge
-edge        := "-> " target (" : " quoted_label)? NL (indent data_block)?
+edge        := "-> " target ("{" inner_target "}")? (" : " quoted_label)? NL (indent data_block)?
+inner_target := name
 data_block  := "data:" NL (indent key ": " type NL)+
 
 graph_block := "graph: " name NL (node)*
@@ -246,7 +270,7 @@ When you create or edit `.flow` files, follow the editor's canonical style so fi
 - One blank line between top-level items (nodes, `graph:` blocks, the preamble).
 - Per-node line order: `id`, `pos`, other properties, then edges.
 - Quoted values use double quotes. The format has **no escape sequences** — a `"` character can never appear inside a label or quoted value.
-- Node names are unique within their graph and never contain `: ` (colon-space).
+- Node names are unique within their graph and never contain `: ` (colon-space) or curly braces `{` `}`. An optional `-> Subgraph {Inner}` edge target enters the subgraph at that inner node.
 
 ## Parsing Procedure
 

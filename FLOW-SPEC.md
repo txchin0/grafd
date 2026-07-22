@@ -1,7 +1,14 @@
 # .flow Format Specification
 
-**Version:** flow/1
+**Version:** flow/1.1
 **Status:** Draft
+
+## Revision History
+
+| Version  | Change                                                                              |
+| -------- | ----------------------------------------------------------------------------------- |
+| flow/1   | Initial draft.                                                                      |
+| flow/1.1 | Edges may target a node inside a subgraph via an optional `{Inner Node}` suffix. |
 
 ---
 
@@ -123,7 +130,7 @@ The `expand` property does not appear in the preamble — the file itself *is* t
 - **Indentation:** 2-space indentation. Tabs are forbidden.
 - **Encoding:** UTF-8.
 - **Comments:** Lines starting with `#` are comments. The LLM ignores them.
-- **Node names:** Cannot contain `:`  (colon followed by space). Enforced by the frontend.
+- **Node names:** Cannot contain `:`  (colon followed by space). Enforced by the frontend. Node names must also not contain `{` or `}` — a trailing `{Inner Node}` on an edge target names a node inside the target subgraph (see [Section 5.7](#57-targeting-a-node-inside-a-subgraph)).
 - **Node uniqueness:** Node names must be unique within a single graph. Enforced by the frontend.
 - **Blank lines:** Optional. Used for visual separation between nodes. No semantic meaning.
 
@@ -226,6 +233,8 @@ The label is optional. An unlabeled edge is a simple sequential connection:
 -> Target Node
 ```
 
+An edge may optionally name a node inside the target subgraph with `-> Subgraph {Inner}` — see [Section 5.7](#57-targeting-a-node-inside-a-subgraph).
+
 Examples:
 
 ```
@@ -304,6 +313,39 @@ Show Errors
 ```
 
 The LLM recognizes this as a cycle and implements appropriate loop/retry logic. If termination conditions matter, the user includes them in the edge label or node description.
+
+### 5.7 Targeting a Node Inside a Subgraph
+
+An edge target may optionally carry a `{Inner Node}` suffix naming a node inside the target subgraph's expansion. Curly braces are unused elsewhere in the format, so there is no collision with the `[Label](path)` markdown-link convention used by `expand`/`on_error`.
+
+```
+Validate Cart
+  -> Process Payment {Charge Card} : "cart valid"
+
+Process Payment
+  expand: Payment Steps
+
+graph: Payment Steps
+  Charge Card
+    -> Send Receipt
+  Send Receipt
+```
+
+- `-> Target : "label"` — unchanged, ordinary edge.
+- `-> Subgraph Node {Inner Node} : "label"` — optional form. The label remains optional and always trails the whole target.
+
+**Resolution & constraints:**
+
+1. The name **before** `{...}` is the **subgraph node**. It is resolved in the current scope exactly like any edge target, and it **must** be a node that has `expand` (a subgraph).
+2. The name **inside** `{...}` is the **inner node**. It is resolved against the top-level scope of the graph that the subgraph node's `expand` references (the local `graph:` block or the external file's body).
+3. The edge continues to point at the subgraph node — the inner name only refines *where inside it* control enters. This is single-level: the inner node lives directly in the subgraph node's expansion (nested paths are out of scope for this version).
+4. **Semantics for agents:** control flow enters the subgraph directly at the named inner node, bypassing the subgraph's normal (inferred) entry point.
+5. **Fallback:** if the subgraph node has no `expand`, or the inner node isn't found in the expansion, treat it as a plain edge to the subgraph node (the `{...}` refinement is ignored).
+
+**Display:**
+
+- **Collapsed** (subgraph not expanded inline): draw an ordinary edge to the subgraph node's border. The inner refinement is not visualized.
+- **Expanded inline** (frame unfolded): the edge continues past the frame border and terminates at the inner node's border **inside** the frame; the subgraph node's outer border no longer receives the arrowhead.
 
 ---
 
@@ -778,7 +820,8 @@ node          := name newline (property | edge)*
 name          := <text at column 0, no ": " allowed>
 
 property      := indent key ": " value newline
-edge          := indent "-> " target (" : " quoted_label)? newline (edge_data)?
+edge          := indent "-> " target ("{" inner_target "}")? (" : " quoted_label)? newline (edge_data)?
+inner_target  := name
 edge_data     := indent indent "data:" newline (indent indent indent key ": " type newline)+
 
 graph_block   := "graph: " name newline (node)*
@@ -832,6 +875,7 @@ The format has a minimal set of reserved keywords:
 | Sync strategy     | Structural reconciliation                                                         | No fragile ID contracts with LLM                 |
 | Indentation       | YAML-style, 2-space                                                               | Familiar, shallow nesting                        |
 | Edge syntax       | -> Target : "label"                                                               | Compact, colon-space forbidden in names          |
+| Subgraph entry targeting | Optional `{Inner}` suffix on the edge target                               | Keeps the edge anchored to the subgraph node while refining the entry point; braces are unused elsewhere, so no new keyword and no collision with the `[](path)` link form |
 | Comments          | # prefix                                                                          | Universal convention                             |
 | Versioning        | Defined in spec file, not in individual .flow files                               | Single source of truth, no duplication           |
 | Spec location     | Separate file, read once                                                          | No duplication across files                      |
