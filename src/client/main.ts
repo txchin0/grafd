@@ -239,6 +239,7 @@ function recordUiState(): void {
   if (state.path) {
     const { x, y, scale } = view.view;
     manifest.ui.cameras[state.path] = { x, y, scale };
+    manifest.ui.expansions[state.path] = expansions.openVisibleNodeIds();
   }
 }
 
@@ -291,6 +292,10 @@ async function openFile(
   view.clearSelection();
   elements.emptyState.classList.add('hidden');
   location.hash = path;
+  if (fit) {
+    const savedExpansions = manifest.ui.expansions[path];
+    if (savedExpansions) expansions.restoreOpen(savedExpansions);
+  }
   refresh();
   if (fit) {
     const savedCamera = manifest.ui.cameras[path];
@@ -313,6 +318,7 @@ function deleteFlowFile(path: string): void {
   workspace?.deleteFile(path);
   dropFromFileList(path);
   delete manifest.ui.cameras[path];
+  delete manifest.ui.expansions[path];
   if (manifest.ui.activeFlow === path) manifest.ui.activeFlow = null;
   if (manifest.entrypoint === path) manifest.entrypoint = defaultEntrypoint(state.files);
   scheduleManifestSave();
@@ -634,6 +640,7 @@ async function snapToEntry(entry: TrailEntry): Promise<void> {
 function toggleInlineExpansion(node: FlowNode): void {
   if (!getProp(node, 'expand')) return;
   expansions.toggle(node);
+  scheduleManifestSave();
 }
 
 // --- Editing routed by document ----------------------------------------------------------

@@ -14,6 +14,7 @@ describe('parseManifest', () => {
     manifest.entrypoint = 'main.flow';
     manifest.ui.activeFlow = 'auth/login.flow';
     manifest.ui.cameras['main.flow'] = { x: 10, y: -20, scale: 1.5 };
+    manifest.ui.expansions['main.flow'] = ['node-a', 'node-b'];
     expect(parseManifest(serializeManifest(manifest))).toEqual(manifest);
   });
 
@@ -29,7 +30,25 @@ describe('parseManifest', () => {
     expect(parsed).toEqual({
       format: MANIFEST_FORMAT,
       entrypoint: null,
-      ui: { activeFlow: null, cameras: { 'b.flow': { x: 1, y: 2, scale: 3 } } },
+      ui: { activeFlow: null, cameras: { 'b.flow': { x: 1, y: 2, scale: 3 } }, expansions: {} },
+    });
+  });
+
+  it('reads expansions and drops malformed entries', () => {
+    const parsed = parseManifest(
+      JSON.stringify({
+        ui: {
+          expansions: {
+            'main.flow': ['open-1', '', 42, 'open-2'],
+            'bad.flow': 'not-an-array',
+            'ok.flow': ['only-this'],
+          },
+        },
+      }),
+    );
+    expect(parsed?.ui.expansions).toEqual({
+      'main.flow': ['open-1', 'open-2'],
+      'ok.flow': ['only-this'],
     });
   });
 });

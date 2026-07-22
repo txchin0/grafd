@@ -1,9 +1,9 @@
 // graf.manifest.json is the editor-owned workspace state file that lives at the root of a
 // .flow workspace (a served project, an opened local folder, browser storage, or an
 // export). It records which flow is the workspace entrypoint plus session UI state — the
-// last opened flow and per-flow cameras — so reopening a workspace restores where the user
-// left off. Semantic content stays in the .flow files; agents read `entrypoint` and leave
-// `ui` alone.
+// last opened flow, per-flow cameras, and which nodes are inline-expanded — so reopening a
+// workspace restores where the user left off. Semantic content stays in the .flow files;
+// agents read `entrypoint` and leave `ui` alone.
 
 export const MANIFEST_FILE_NAME = 'graf.manifest.json';
 export const MANIFEST_FORMAT = 'graf-workspace/1';
@@ -20,11 +20,16 @@ export interface WorkspaceManifest {
   ui: {
     activeFlow: string | null;
     cameras: Record<string, CameraState>;
+    expansions: Record<string, string[]>;
   };
 }
 
 export function emptyManifest(): WorkspaceManifest {
-  return { format: MANIFEST_FORMAT, entrypoint: null, ui: { activeFlow: null, cameras: {} } };
+  return {
+    format: MANIFEST_FORMAT,
+    entrypoint: null,
+    ui: { activeFlow: null, cameras: {}, expansions: {} },
+  };
 }
 
 // Tolerant of hand-edited or older manifests: unknown fields are dropped, missing fields
@@ -46,6 +51,7 @@ export function parseManifest(text: string | null | undefined): WorkspaceManifes
     ui: {
       activeFlow: typeof ui.activeFlow === 'string' ? ui.activeFlow : null,
       cameras: readCameras(ui.cameras),
+      expansions: readExpansions(ui.expansions),
     },
   };
 }
@@ -65,6 +71,16 @@ function readCameras(raw: unknown): Record<string, CameraState> {
     }
   }
   return cameras;
+}
+
+function readExpansions(raw: unknown): Record<string, string[]> {
+  if (typeof raw !== 'object' || raw == null) return {};
+  const expansions: Record<string, string[]> = {};
+  for (const [path, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(value)) continue;
+    expansions[path] = value.filter((id): id is string => typeof id === 'string' && id.length > 0);
+  }
+  return expansions;
 }
 
 export function serializeManifest(manifest: WorkspaceManifest): string {

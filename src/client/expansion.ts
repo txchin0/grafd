@@ -1,12 +1,14 @@
-// Session-local inline expansion of subgraphs: a node whose `expand` points at a graph
-// block or another .flow file can unfold that subgraph inside its own frame on the current
-// canvas. This layer owns which nodes are unfolded, the open/close animation clock,
-// fetching of external .flow documents, and the per-frame geometry pass: expanded frame
-// rects, the transform that maps subgraph coordinates into a frame's interior, and the
-// gravity-style displacement that pushes surrounding nodes clear of a growing frame.
+// Inline expansion of subgraphs: a node whose `expand` points at a graph block or another
+// .flow file can unfold that subgraph inside its own frame on the current canvas. This
+// layer owns which nodes are unfolded, the open/close animation clock, fetching of
+// external .flow documents, and the per-frame geometry pass: expanded frame rects, the
+// transform that maps subgraph coordinates into a frame's interior, and the gravity-style
+// displacement that pushes surrounding nodes clear of a growing frame.
 //
-// Nothing here is persisted. All derived geometry lives in `model.display`, which the
-// canvas view prefers over a node's authored `pos`, so committed positions never change.
+// The open-set can be saved and restored via `openVisibleNodeIds` / `restoreOpen` (the
+// app shell persists it in graf.manifest.json). All derived geometry lives in
+// `model.display`, which the canvas view prefers over a node's authored `pos`, so
+// committed positions never change.
 
 import {
   getProp,
@@ -130,6 +132,27 @@ export class ExpansionLayer {
   isOpen(nodeId: string | null): boolean {
     if (nodeId == null) return false;
     return this.entries.get(nodeId)?.targetOpen ?? false;
+  }
+
+  // Open node ids currently visible in the active flow's rendered hierarchy (top-level and
+  // inside open frames at any depth). Scoped via the loci map, not the global entries map.
+  openVisibleNodeIds(): string[] {
+    if (!this.locus) return [];
+    const ids: string[] = [];
+    for (const node of this.locus.keys()) {
+      if (node.id && this.entries.get(node.id)?.targetOpen) ids.push(node.id);
+    }
+    return ids;
+  }
+
+  // Seed ids as fully open (progress 1) with no animation. The next layout pass realizes
+  // frames; nested/external entries activate as their sub-models become available.
+  restoreOpen(nodeIds: string[]): void {
+    const now = performance.now();
+    for (const id of nodeIds) {
+      this.entries.set(id, { targetOpen: true, startTime: now, startProgress: 1 });
+    }
+    this.onNeedsRender();
   }
 
   // Loci map every node visible on the canvas — top-level and inside unfolded frames, at

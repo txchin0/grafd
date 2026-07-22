@@ -85,6 +85,26 @@ describe('ExpansionLayer', () => {
     expect(onNeedsRender).toHaveBeenCalledTimes(2);
   });
 
+  it('restoreOpen seeds ids as fully open', () => {
+    const { layer, onNeedsRender } = layerWithSpy();
+    expect(layer.isOpen('a')).toBe(false);
+    layer.restoreOpen(['a', 'b']);
+    expect(layer.isOpen('a')).toBe(true);
+    expect(layer.isOpen('b')).toBe(true);
+    expect(onNeedsRender).toHaveBeenCalledTimes(1);
+  });
+
+  it('openVisibleNodeIds reports open loci only', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow('A\n  id: node-1\n  expand: Sub\nB\n  id: node-2\n');
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    layer.restoreOpen(['node-1']);
+    layer.layout(model, performance.now());
+    layer.collectLoci(model);
+    expect(layer.openVisibleNodeIds()).toEqual(['node-1']);
+  });
+
   it('ignores toggles for nodes without an id and null ids', () => {
     const { layer } = layerWithSpy();
     const doc = parseFlow('A\n');
