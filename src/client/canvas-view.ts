@@ -341,6 +341,11 @@ export class CanvasView {
     this.updateCursor(this.hoverPoint ?? undefined);
   }
 
+  private layoutDisplayGeometry(model: FlowModel): void {
+    this.expansionLayer?.layout(model, performance.now());
+    this.expansionLayer?.collectLoci(model);
+  }
+
   private rectOf(model: FlowModel, node: FlowNode): Rect {
     return model.display?.rects.get(node) ?? node.pos!;
   }
@@ -423,6 +428,11 @@ export class CanvasView {
   }
 
   private computeFitView(padding = 80): View {
+    // Fit runs synchronously right after a model/scope swap, before the render loop's
+    // next layout pass; without eager display layout, unfolded frames measure at their
+    // collapsed pos and expanded subgraphs get clipped — the same reason a manual
+    // zoom-to-fit a moment later frames them correctly.
+    this.layoutDisplayGeometry(this.model);
     const rects = [
       ...this.model.nodes.map((node) => this.rect(node)),
       ...this.model.ghosts.map((ghost) => ghost.pos),
@@ -493,6 +503,7 @@ export class CanvasView {
     }
     const bounds = this.canvas.getBoundingClientRect();
     const childModel = mode === 'in' ? this.model : held.model;
+    this.layoutDisplayGeometry(childModel);
     const contentRect = contentBoundsOf(childModel);
     const growth = Math.max(1.05, contentRect.w / nodeRect.w, contentRect.h / nodeRect.h);
     const nodeCenter = rectCenter(nodeRect);

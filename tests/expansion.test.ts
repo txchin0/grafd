@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseFlow } from '../src/shared/flow-format.js';
 import { allNodes, buildModel } from '../src/client/flow-doc.js';
 import {
@@ -9,6 +12,11 @@ import {
   subModelBounds,
   transformRect,
 } from '../src/client/expansion.js';
+
+const DASHBOARD_FLOW = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '../flows/dashboard.flow'),
+  'utf8',
+);
 
 describe('transformRect', () => {
   it('maps a local rect through a frame transform', () => {
@@ -173,5 +181,62 @@ describe('ExpansionLayer', () => {
     const doc = parseFlow('A\n  id: a\n');
     expect(layer.ownerOf(allNodes(doc)[0])).toBeNull();
     expect(layer.findNodeById('a')).toBeNull();
+  });
+
+  it('rebuilds loci for a scoped graph after parent inline expansion', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(DASHBOARD_FLOW);
+    const parentModel = buildModel(doc, null);
+    parentModel.sourceDoc = doc;
+    parentModel.sourcePath = 'dashboard.flow';
+
+    const childModel = buildModel(doc, 'Logout Confirmation');
+    childModel.sourceDoc = doc;
+    childModel.sourcePath = 'dashboard.flow';
+
+    const host = parentModel.nodes.find((node) => node.name === 'Handle Logout Button')!;
+    const inner = childModel.nodes.find((node) => node.name === 'Show Confirmation Dialog')!;
+
+    layer.restoreOpen([host.id!]);
+    layer.layout(parentModel, performance.now());
+    layer.collectLoci(parentModel);
+
+    const embedded = layer.locusOf(inner)!;
+    expect(layer.isEmbedded(inner)).toBe(true);
+    expect(embedded.host).toBe(host);
+    expect(embedded.model).not.toBe(childModel);
+
+    layer.layout(childModel, performance.now());
+    layer.collectLoci(childModel);
+
+    const topLevel = layer.locusOf(inner)!;
+    expect(layer.isEmbedded(inner)).toBe(false);
+    expect(topLevel.model).toBe(childModel);
+    expect(topLevel.host).toBeNull();
+    expect(topLevel.transform).toEqual({ scale: 1, tx: 0, ty: 0 });
+  });
+
+  it('leaves embedded loci stale when layout runs without collectLoci on the scoped graph', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(DASHBOARD_FLOW);
+    const parentModel = buildModel(doc, null);
+    parentModel.sourceDoc = doc;
+    parentModel.sourcePath = 'dashboard.flow';
+
+    const childModel = buildModel(doc, 'Logout Confirmation');
+    childModel.sourceDoc = doc;
+
+    const host = parentModel.nodes.find((node) => node.name === 'Handle Logout Button')!;
+    const inner = childModel.nodes.find((node) => node.name === 'Show Confirmation Dialog')!;
+
+    layer.restoreOpen([host.id!]);
+    layer.layout(parentModel, performance.now());
+    layer.collectLoci(parentModel);
+
+    layer.layout(childModel, performance.now());
+
+    const stale = layer.locusOf(inner)!;
+    expect(stale.host).toBe(host);
+    expect(stale.model).not.toBe(childModel);
   });
 });
