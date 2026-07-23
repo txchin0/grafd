@@ -996,8 +996,8 @@ function setTool(tool: Tool): void {
 function wireViewControls(): void {
   elements.toolSelectButton.addEventListener('click', () => setTool('select'));
   elements.toolNodeButton.addEventListener('click', () => setTool('node'));
-  elements.zoomIn.addEventListener('click', () => view.setZoom(view.view.scale * 1.2));
-  elements.zoomOut.addEventListener('click', () => view.setZoom(view.view.scale / 1.2));
+  elements.zoomIn.addEventListener('click', () => view.stepZoom(1));
+  elements.zoomOut.addEventListener('click', () => view.stepZoom(-1));
   elements.zoomLevel.addEventListener('click', () => view.setZoom(1));
   elements.zoomFit.addEventListener('click', () => view.fitToContent());
 }
@@ -1076,10 +1076,10 @@ function wireKeyboard(): void {
       view.fitToContent();
     } else if (ctrl && (event.key === '=' || event.key === '+')) {
       event.preventDefault();
-      view.setZoom(view.view.scale * 1.2);
+      view.stepZoom(1);
     } else if (ctrl && event.key === '-') {
       event.preventDefault();
-      view.setZoom(view.view.scale / 1.2);
+      view.stepZoom(-1);
     } else if (!ctrl && event.key.toLowerCase() === 'v') {
       setTool('select');
     } else if (!ctrl && event.key.toLowerCase() === 'n') {

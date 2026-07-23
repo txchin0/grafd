@@ -145,6 +145,7 @@ const COLORS = {
 
 const MIN_SCALE = 0.12;
 const MAX_SCALE = 3;
+const ZOOM_STEP_FACTOR = 1.1;
 const MIN_NODE_WIDTH = 120;
 const MIN_NODE_HEIGHT = 64;
 const DRAG_THRESHOLD_PX = 4;
@@ -409,6 +410,12 @@ export class CanvasView {
     this.zoomAt({ x: bounds.width / 2, y: bounds.height / 2 }, scale / this.view.scale);
   }
 
+  stepZoom(direction: 1 | -1, screenPoint?: Point): void {
+    const bounds = this.canvas.getBoundingClientRect();
+    const anchor = screenPoint ?? { x: bounds.width / 2, y: bounds.height / 2 };
+    this.zoomAt(anchor, direction > 0 ? ZOOM_STEP_FACTOR : 1 / ZOOM_STEP_FACTOR);
+  }
+
   setViewNow(view: View): void {
     this.view = { ...view };
     this.requestRender();
@@ -544,8 +551,8 @@ export class CanvasView {
       this.finishSceneTransition();
       return;
     }
-    const factor = Math.exp(-event.deltaY * (event.ctrlKey ? 0.008 : 0.0016));
-    this.zoomAt(this.eventPoint(event), factor);
+    if (event.deltaY === 0) return;
+    this.stepZoom(event.deltaY < 0 ? 1 : -1, this.eventPoint(event));
   }
 
   private onPointerDown(event: PointerEvent): void {
