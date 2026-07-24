@@ -1,6 +1,7 @@
 node_modules/
 dist/
 site/
+.tmp-font/
 graf.manifest.json
 .env
 .env.*
