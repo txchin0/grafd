@@ -27,7 +27,7 @@ Handle Logout Button
 graph: Logout Confirmation
   Show Confirmation Dialog
     id: 4a6c8e0f-2b4c-4a6a-b8e0-c2a4c6e8a0c2
-    pos: 80, 120, 220, 88
+    pos: 88, 128, 220, 88
     -> Confirm Logout : "user confirms"
     -> Dismiss : "user cancels"
 

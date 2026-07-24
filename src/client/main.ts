@@ -999,6 +999,28 @@ async function ensureInnerTargets(edge: ModelEdge): Promise<void> {
   if (path) await expansions.ensureDocument(path);
 }
 
+// The §5.8 source refinement resolves against the owning node's own expansion, unlike the
+// §5.7 target refinement which resolves against the edge target's expansion.
+function innerSourceOptions(edge: ModelEdge): string[] {
+  if (edge.kind !== 'flow') return [];
+  const owner = ownerOf(edge.from);
+  const expandValue = getProp(edge.from, 'expand');
+  if (!expandValue) return [];
+  return FlowDoc.expandEntryNames(
+    expandValue,
+    owner.doc,
+    owner.path,
+    (path) => expandTargetDoc(path),
+  ) ?? [];
+}
+
+async function ensureInnerSources(edge: ModelEdge): Promise<void> {
+  if (edge.kind !== 'flow') return;
+  const owner = ownerOf(edge.from);
+  const path = resolvedExpandPath(getProp(edge.from, 'expand'), owner.path);
+  if (path) await expansions.ensureDocument(path);
+}
+
 function commitMovesFor(nodes: FlowNode[]): void {
   const externalOwners = new Map<string, DocumentOwner>();
   for (const node of nodes) {
@@ -1018,9 +1040,26 @@ function completeEdge(
     droppedOnSource: boolean;
     ghostTarget: GhostNode | null;
     innerName?: string;
+    outerSource?: { host: FlowNode; innerName: string };
   },
 ): void {
   if (!state.doc || extra?.droppedOnSource) return;
+
+  // §5.8: dragging out of a frame onto a sibling of its host declares an `{Inner Source}`
+  // edge on the host — the edge lives in the parent graph, not inside the subgraph.
+  if (extra?.outerSource && targetNode) {
+    const { host, innerName } = extra.outerSource;
+    let createdSpec: EdgeSpec | null = null;
+    applyEdit(host, () => {
+      createdSpec = FlowDoc.addEdge(host, targetNode.name, null, null, innerName);
+    }, { commit: 'now' });
+    const createdEdge = createdSpec ? findEdge(createdSpec) : null;
+    if (createdEdge) {
+      view.selectedEdge = createdEdge;
+      editors.openEdgeEditor(createdEdge);
+    }
+    return;
+  }
 
   if (expansions.isEmbedded(fromNode)) {
     // Inside a frame, edges only connect existing nodes of that subgraph — dropping on
@@ -1108,11 +1147,13 @@ const editors: Editors = createEditors({
   applyDescriptionEdit,
   ensureExpandTarget,
   ensureInnerTargets,
+  ensureInnerSources,
   canOpen: (node) => !expansions.isEmbedded(node),
   openExpand,
   toggleExpand: toggleInlineExpansion,
   deleteNodes: deleteNodesAction,
   innerTargetOptions,
+  innerSourceOptions,
 });
 
 const contextMenu = createContextMenu();

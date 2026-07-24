@@ -108,7 +108,7 @@ describe('parseFlow', () => {
 
   it('parses labeled edges', () => {
     const start = (doc.items[0] as NodeItem).node;
-    expect(start.edges).toEqual([{ target: 'Validate', label: 'ok', innerTarget: null, data: null }]);
+    expect(start.edges).toEqual([{ target: 'Validate', label: 'ok', innerSource: null, innerTarget: null, data: null }]);
   });
 
   it('preserves comments between nodes as items', () => {
@@ -129,7 +129,7 @@ describe('parseFlow', () => {
     expect(graph.name).toBe('Details');
     const inner = (graph.items[0] as NodeItem).node;
     expect(inner.name).toBe('Inner');
-    expect(inner.edges).toEqual([{ target: 'Other', label: null, innerTarget: null, data: null }]);
+    expect(inner.edges).toEqual([{ target: 'Other', label: null, innerSource: null, innerTarget: null, data: null }]);
   });
 
   it('treats a malformed pos as absent', () => {
@@ -157,6 +157,7 @@ describe('edge expressions', () => {
   it('parses a bare target', () => {
     expect(parseEdgeExpression('-> Target')).toEqual({
       target: 'Target',
+      innerSource: null,
       innerTarget: null,
       label: null,
       data: null,
@@ -166,6 +167,7 @@ describe('edge expressions', () => {
   it('parses a labeled edge', () => {
     expect(parseEdgeExpression('-> Target : "on success"')).toEqual({
       target: 'Target',
+      innerSource: null,
       innerTarget: null,
       label: 'on success',
       data: null,
@@ -175,6 +177,7 @@ describe('edge expressions', () => {
   it('parses an inner subgraph target', () => {
     expect(parseEdgeExpression('-> Process Payment {Charge Card}')).toEqual({
       target: 'Process Payment',
+      innerSource: null,
       innerTarget: 'Charge Card',
       label: null,
       data: null,
@@ -184,27 +187,74 @@ describe('edge expressions', () => {
   it('parses an inner target with a label', () => {
     expect(parseEdgeExpression('-> Process Payment {Charge Card} : "cart valid"')).toEqual({
       target: 'Process Payment',
+      innerSource: null,
       innerTarget: 'Charge Card',
       label: 'cart valid',
       data: null,
     });
   });
 
-  it('serializes with and without labels and inner targets', () => {
-    expect(serializeEdgeExpression({ target: 'T', innerTarget: null, label: null, data: null })).toBe('-> T');
-    expect(serializeEdgeExpression({ target: 'T', innerTarget: null, label: 'go', data: null })).toBe('-> T : "go"');
+  it('parses an inner source prefix (§5.8)', () => {
+    expect(parseEdgeExpression('{Charge Card} -> Notify Admin : "charged"')).toEqual({
+      target: 'Notify Admin',
+      innerSource: 'Charge Card',
+      innerTarget: null,
+      label: 'charged',
+      data: null,
+    });
+  });
+
+  it('parses an inner source and inner target together', () => {
+    expect(parseEdgeExpression('{A} -> Sub {B}')).toEqual({
+      target: 'Sub',
+      innerSource: 'A',
+      innerTarget: 'B',
+      label: null,
+      data: null,
+    });
+  });
+
+  it('serializes with and without labels and inner refinements', () => {
+    expect(serializeEdgeExpression({ target: 'T', innerSource: null, innerTarget: null, label: null, data: null })).toBe('-> T');
+    expect(serializeEdgeExpression({ target: 'T', innerSource: null, innerTarget: null, label: 'go', data: null })).toBe('-> T : "go"');
     expect(serializeEdgeExpression({
       target: 'Process Payment',
+      innerSource: null,
       innerTarget: 'Charge Card',
       label: null,
       data: null,
     })).toBe('-> Process Payment {Charge Card}');
     expect(serializeEdgeExpression({
       target: 'Process Payment',
+      innerSource: null,
       innerTarget: 'Charge Card',
       label: 'cart valid',
       data: null,
     })).toBe('-> Process Payment {Charge Card} : "cart valid"');
+    expect(serializeEdgeExpression({
+      target: 'Notify Admin',
+      innerSource: 'Charge Card',
+      innerTarget: null,
+      label: 'charged',
+      data: null,
+    })).toBe('{Charge Card} -> Notify Admin : "charged"');
+    expect(serializeEdgeExpression({
+      target: 'Sub',
+      innerSource: 'A',
+      innerTarget: 'B',
+      label: null,
+      data: null,
+    })).toBe('{A} -> Sub {B}');
+  });
+
+  it('round-trips an inner-source edge through the full document parser', () => {
+    const text = 'Process Payment\n  expand: Payment Steps\n  {Charge Card} -> Notify Admin : "charged"\n';
+    const node = (parseFlow(text).items[0] as NodeItem).node;
+    expect(node.props).toEqual([{ key: 'expand', value: 'Payment Steps' }]);
+    expect(node.edges).toEqual([
+      { target: 'Notify Admin', innerSource: 'Charge Card', innerTarget: null, label: 'charged', data: null },
+    ]);
+    expect(serializeFlow(parseFlow(text))).toBe(text);
   });
 
   it('round-trips inner targets through parse and serialize', () => {

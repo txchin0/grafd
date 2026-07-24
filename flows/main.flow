@@ -25,13 +25,13 @@ Show Login
 
 Submit Credentials
   id: 4d6f8a0c-2e4b-4c6d-8e0f-1a3b5c7d9e2f
-  pos: 1000, 216, 220, 96
+  pos: 1064, 216, 220, 96
   expand: [Login Flow](auth/login.flow)
-  -> Load Dashboard : "login success"
   -> Show Login Error : "login failed"
     data:
       errorCode: string
       message: string
+  {Return Success} -> Load Dashboard : "login success"
 
 Show Login Error
   id: 9e1a3c5b-7d9f-4b1a-a3c5-b7d9f1a3c5e7
@@ -41,7 +41,7 @@ Show Login Error
 
 Load Dashboard
   id: 1a3c5e7b-9d1f-4c3a-b5e7-d9f1b3d5f7a9
-  pos: 648, 152, 200, 80
+  pos: 576, 40, 200, 80
   expand: [Dashboard](dashboard.flow)
 
 Logout

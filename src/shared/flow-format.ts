@@ -27,6 +27,7 @@ export interface EdgeDataField {
 
 export interface EdgeSpec {
   target: string;
+  innerSource: string | null;
   innerTarget: string | null;
   label: string | null;
   data: EdgeDataField[] | null;
@@ -74,7 +75,7 @@ export interface ExpandLink {
 }
 
 const PROPERTY_LINE = /^([A-Za-z_][\w-]*):\s?(.*)$/;
-const EDGE_LINE = /^->\s+([^{]+?)(?:\s*\{([^}]*)\})?(?:\s+:\s+"(.*)")?$/;
+const EDGE_LINE = /^(?:\{([^}]*)\}\s+)?->\s+([^{]+?)(?:\s*\{([^}]*)\})?(?:\s+:\s+"(.*)")?$/;
 const GRAPH_HEADER = /^graph:\s+(.+)$/;
 const EXTERNAL_EXPAND_LINK = /^\[(.*)\]\((.*)\)$/;
 
@@ -160,7 +161,7 @@ function parseItems(lines: string[], start: number, baseIndent: number): { items
 
     if (indent >= 4) {
       attachEdgeData(currentNode, trimmed);
-    } else if (trimmed.startsWith('->')) {
+    } else if (isEdgeLine(trimmed)) {
       currentNode.edges.push(parseEdgeExpression(trimmed));
     } else {
       const match = trimmed.match(PROPERTY_LINE);
@@ -201,28 +202,37 @@ function attachEdgeData(node: FlowNode, trimmed: string): void {
   if (match && lastEdge.data) lastEdge.data.push({ key: match[1], type: match[2].trim() });
 }
 
+// An edge line is `-> Target` or, with a §5.8 inner-source prefix, `{Inner Source} -> Target`.
+// The leading brace group is what distinguishes it from a `key: value` property line.
+export function isEdgeLine(trimmed: string): boolean {
+  return trimmed.startsWith('->') || /^\{[^}]*\}\s+->/.test(trimmed);
+}
+
 export function parseEdgeExpression(text: string): EdgeSpec {
   const match = text.trim().match(EDGE_LINE);
   if (!match) {
     return {
       target: text.trim().replace(/^->\s*/, ''),
+      innerSource: null,
       innerTarget: null,
       label: null,
       data: null,
     };
   }
   return {
-    target: match[1].trim(),
-    innerTarget: match[2]?.trim() || null,
-    label: match[3] ?? null,
+    target: match[2].trim(),
+    innerSource: match[1]?.trim() || null,
+    innerTarget: match[3]?.trim() || null,
+    label: match[4] ?? null,
     data: null,
   };
 }
 
 export function serializeEdgeExpression(edge: EdgeSpec): string {
+  const source = edge.innerSource ? `{${edge.innerSource}} ` : '';
   const inner = edge.innerTarget ? ` {${edge.innerTarget}}` : '';
   const label = edge.label ? ` : "${edge.label}"` : '';
-  return `-> ${edge.target}${inner}${label}`;
+  return `${source}-> ${edge.target}${inner}${label}`;
 }
 
 function parsePos(value: string): Rect | null {

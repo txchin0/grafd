@@ -243,7 +243,7 @@ describe('edge mutations', () => {
     const doc = docFrom('A\n\nB\n');
     const [a] = allNodes(doc);
     const spec = addEdge(a, 'B', 'go');
-    expect(a.edges).toEqual([{ target: 'B', innerTarget: null, label: 'go', data: null }]);
+    expect(a.edges).toEqual([{ target: 'B', innerSource: null, innerTarget: null, label: 'go', data: null }]);
     deleteEdge({ from: a, spec, kind: 'flow' });
     expect(a.edges).toEqual([]);
   });
@@ -252,7 +252,14 @@ describe('edge mutations', () => {
     const doc = docFrom('A\n\nB\n');
     const [a] = allNodes(doc);
     addEdge(a, 'B', null, 'Inner');
-    expect(a.edges[0]).toEqual({ target: 'B', innerTarget: 'Inner', label: null, data: null });
+    expect(a.edges[0]).toEqual({ target: 'B', innerSource: null, innerTarget: 'Inner', label: null, data: null });
+  });
+
+  it('stores an optional inner subgraph source on addEdge (§5.8)', () => {
+    const doc = docFrom('A\n\nB\n');
+    const [a] = allNodes(doc);
+    addEdge(a, 'B', null, null, 'Inner Source');
+    expect(a.edges[0]).toEqual({ target: 'B', innerSource: 'Inner Source', innerTarget: null, label: null, data: null });
   });
 
   it('routes error-edge mutations through the on_error prop', () => {
@@ -353,6 +360,60 @@ Capture Funds
       target: 'Process Payment',
       innerTarget: null,
     });
+  });
+});
+
+describe('inner-source propagation', () => {
+  // The edge is declared under the subgraph node itself; its {Inner Source} prefix names a
+  // node inside that node's own expansion (spec §5.8).
+  const subgraphDoc = () => docFrom(`Process Payment
+  expand: Payment Steps
+  {Charge Card} -> Notify Admin
+
+Notify Admin
+
+graph: Payment Steps
+  Charge Card
+
+  Capture Funds
+`);
+
+  it('retargets {Inner Source} when a local graph-block node is renamed', () => {
+    const doc = subgraphDoc();
+    const charge = allNodes(doc).find((node) => node.name === 'Charge Card')!;
+    renameNode(containingItems(doc, charge), charge, 'Bill Card', doc);
+    const processPayment = allNodes(doc).find((node) => node.name === 'Process Payment')!;
+    expect(processPayment.edges[0].innerSource).toBe('Bill Card');
+  });
+
+  it('clears {Inner Source} when a local graph-block node is deleted', () => {
+    const doc = subgraphDoc();
+    const charge = allNodes(doc).find((node) => node.name === 'Charge Card')!;
+    deleteNodes(containingItems(doc, charge), [charge], doc);
+    const processPayment = allNodes(doc).find((node) => node.name === 'Process Payment')!;
+    expect(processPayment.edges[0]).toMatchObject({ target: 'Notify Admin', innerSource: null });
+  });
+
+  it('retargets {Inner Source} across files when an external expand entry is renamed', () => {
+    const parent = docFrom(`Process Payment
+  expand: [Payment](payment.flow)
+  {Charge Card} -> Notify Admin
+
+Notify Admin
+`);
+    const payment = docFrom(`Charge Card
+
+Capture Funds
+`);
+    const charge = allNodes(payment).find((node) => node.name === 'Charge Card')!;
+    renameNode(payment.items, charge, 'Bill Card', payment, {
+      path: 'payment.flow',
+      relatedDocs: [
+        { doc: parent, path: 'cart.flow' },
+        { doc: payment, path: 'payment.flow' },
+      ],
+    });
+    expect(allNodes(parent).find((node) => node.name === 'Process Payment')!.edges[0].innerSource).toBe('Bill Card');
   });
 });
 

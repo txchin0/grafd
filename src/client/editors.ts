@@ -30,11 +30,13 @@ export interface EditorContext {
   applyDescriptionEdit(node: FlowNode, text: string): void;
   ensureExpandTarget(node: FlowNode): Promise<void>;
   ensureInnerTargets(edge: ModelEdge): Promise<void>;
+  ensureInnerSources(edge: ModelEdge): Promise<void>;
   canOpen(node: FlowNode): boolean;
   openExpand(node: FlowNode): void;
   toggleExpand(node: FlowNode): void;
   deleteNodes(nodes: FlowNode[]): void;
   innerTargetOptions(edge: ModelEdge): string[];
+  innerSourceOptions(edge: ModelEdge): string[];
 }
 
 export interface Editors {
@@ -67,6 +69,7 @@ export function createEditors(context: EditorContext): Editors {
     deleteNode: elementById<HTMLButtonElement>('ne-delete'),
     edgeEditor: elementById<HTMLDivElement>('edge-editor'),
     edgeLabel: elementById<HTMLInputElement>('ee-label'),
+    edgeInnerSource: elementById<HTMLSelectElement>('ee-inner-source'),
     edgeInnerTarget: elementById<HTMLSelectElement>('ee-inner-target'),
     deleteEdge: elementById<HTMLButtonElement>('ee-delete'),
   };
@@ -117,28 +120,45 @@ export function createEditors(context: EditorContext): Editors {
     closeNodeEditor();
     editingEdgeSpec = edge.spec;
     elements.edgeLabel.value = edge.spec.label ?? '';
-    fillInnerTargetSelect(edge);
+    fillRefinementSelects(edge);
     elements.edgeEditor.classList.remove('hidden');
     reposition();
     elements.edgeLabel.focus();
     elements.edgeLabel.select();
-    void context.ensureInnerTargets(edge).then(() => {
-      if (editingEdgeSpec === edge.spec) fillInnerTargetSelect(edge);
+    void Promise.all([context.ensureInnerTargets(edge), context.ensureInnerSources(edge)]).then(() => {
+      if (editingEdgeSpec === edge.spec) fillRefinementSelects(edge);
     });
   }
 
-  function fillInnerTargetSelect(edge: ModelEdge): void {
-    const options = edge.kind === 'flow' ? context.innerTargetOptions(edge) : [];
-    const select = elements.edgeInnerTarget;
+  function fillRefinementSelects(edge: ModelEdge): void {
+    fillRefinementSelect(
+      elements.edgeInnerSource,
+      edge.kind === 'flow' ? context.innerSourceOptions(edge) : [],
+      edge.spec.innerSource,
+      '(exit point)',
+    );
+    fillRefinementSelect(
+      elements.edgeInnerTarget,
+      edge.kind === 'flow' ? context.innerTargetOptions(edge) : [],
+      edge.spec.innerTarget,
+      '(entry point)',
+    );
+  }
+
+  function fillRefinementSelect(
+    select: HTMLSelectElement,
+    options: string[],
+    current: string | null,
+    blankLabel: string,
+  ): void {
     select.replaceChildren();
-    const current = edge.spec.innerTarget;
     if (options.length === 0 && !current) {
       select.classList.add('hidden');
       return;
     }
     const blank = document.createElement('option');
     blank.value = '';
-    blank.textContent = '(entry point)';
+    blank.textContent = blankLabel;
     select.append(blank);
     const names = current && !options.includes(current) ? [...options, current] : options;
     for (const name of names) {
@@ -225,7 +245,7 @@ export function createEditors(context: EditorContext): Editors {
       fillNodeFields(node);
     }
     if (editingEdgeSpec && !editingEdge()) closeEdgeEditor();
-    else if (editingEdge()) fillInnerTargetSelect(editingEdge()!);
+    else if (editingEdge()) fillRefinementSelects(editingEdge()!);
     reposition();
   }
 
@@ -308,6 +328,13 @@ export function createEditors(context: EditorContext): Editors {
     if (!edge) return;
     const value = elements.edgeInnerTarget.value || null;
     context.applyEdit(edge.from, () => FlowDoc.setEdgeInnerTarget(edge, value));
+  });
+
+  elements.edgeInnerSource.addEventListener('change', () => {
+    const edge = editingEdge();
+    if (!edge) return;
+    const value = elements.edgeInnerSource.value || null;
+    context.applyEdit(edge.from, () => FlowDoc.setEdgeInnerSource(edge, value));
   });
 
   elements.deleteEdge.addEventListener('click', () => {

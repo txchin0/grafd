@@ -404,9 +404,11 @@ export function addEdge(
   targetName: string,
   label: string | null = null,
   innerTarget: string | null = null,
+  innerSource: string | null = null,
 ): EdgeSpec {
   fromNode.edges.push({
     target: targetName,
+    innerSource: innerSource?.trim() || null,
     innerTarget: innerTarget?.trim() || null,
     label,
     data: null,
@@ -435,6 +437,11 @@ export function setEdgeLabel(edge: ModelEdge, label: string | null): void {
 export function setEdgeInnerTarget(edge: ModelEdge, name: string | null): void {
   if (edge.kind === 'error') return;
   edge.spec.innerTarget = name?.trim() || null;
+}
+
+export function setEdgeInnerSource(edge: ModelEdge, name: string | null): void {
+  if (edge.kind === 'error') return;
+  edge.spec.innerSource = name?.trim() || null;
 }
 
 /** Top-level node names in an expansion (local `graph:` block or external file body). */
@@ -468,8 +475,23 @@ export function expandIdentityForNode(
   return null;
 }
 
-// Rewrite `{Inner}` on edges whose target expands to `identity` (spec §5.7). Returns docs
-// that had at least one edge updated.
+// The two refinements an edge can carry: an `{Inner Source}` prefix (spec §5.8, resolved
+// against the owning node's expansion) and an `{Inner Target}` suffix (spec §5.7, resolved
+// against the target node's expansion). Both are kept consistent as inner nodes change.
+type RefinementSide = 'source' | 'target';
+const REFINEMENT_SIDES: RefinementSide[] = ['source', 'target'];
+
+function edgeRefinementName(edge: EdgeSpec, side: RefinementSide): string | null {
+  return side === 'source' ? edge.innerSource : edge.innerTarget;
+}
+
+function setEdgeRefinementName(edge: EdgeSpec, side: RefinementSide, name: string | null): void {
+  if (side === 'source') edge.innerSource = name;
+  else edge.innerTarget = name;
+}
+
+// Rewrite `{Inner Source}`/`{Inner Target}` on edges whose relevant side expands to
+// `identity` (spec §5.7 / §5.8). Returns docs that had at least one edge updated.
 export function retargetInnerRefs(
   docs: Iterable<DocPath>,
   identity: ExpandIdentity,
@@ -481,10 +503,12 @@ export function retargetInnerRefs(
     let changed = false;
     for (const node of allNodes(doc)) {
       for (const edge of node.edges) {
-        if (edge.innerTarget !== oldName) continue;
-        if (!edgeExpandsTo(doc, path, node, edge, identity)) continue;
-        edge.innerTarget = newName;
-        changed = true;
+        for (const side of REFINEMENT_SIDES) {
+          if (edgeRefinementName(edge, side) !== oldName) continue;
+          if (!edgeExpandsTo(doc, path, node, edge, identity, side)) continue;
+          setEdgeRefinementName(edge, side, newName);
+          changed = true;
+        }
       }
     }
     if (changed) touched.push(doc);
@@ -500,8 +524,10 @@ export function hasInnerRefs(
   for (const { doc, path } of docs) {
     for (const node of allNodes(doc)) {
       for (const edge of node.edges) {
-        if (edge.innerTarget !== oldName) continue;
-        if (edgeExpandsTo(doc, path, node, edge, identity)) return true;
+        for (const side of REFINEMENT_SIDES) {
+          if (edgeRefinementName(edge, side) !== oldName) continue;
+          if (edgeExpandsTo(doc, path, node, edge, identity, side)) return true;
+        }
       }
     }
   }
@@ -547,19 +573,27 @@ function expandIdentityKey(identity: ExpandIdentity): string {
     : `path:${identity.path}`;
 }
 
+// Whether the edge's refined side unfolds `identity`. Source-side (§5.8) resolves against
+// the owning node's own `expand`; target-side (§5.7) against the target node's `expand`.
 function edgeExpandsTo(
   doc: FlowDocument,
   containingPath: string | null,
   edgeSource: FlowNode,
   edge: EdgeSpec,
   identity: ExpandIdentity,
+  side: RefinementSide,
 ): boolean {
-  const targetNode = nodesIn(containingItems(doc, edgeSource)).find((node) => node.name === edge.target);
-  if (!targetNode) return false;
-  const expandValue = getProp(targetNode, 'expand');
+  const expandValue = side === 'source'
+    ? getProp(edgeSource, 'expand')
+    : expandValueOfTarget(doc, edgeSource, edge);
   if (!expandValue) return false;
   if (identity.kind === 'graph-block') return expandValue === identity.name;
   const link = parseExpandLink(expandValue);
   if (!link) return false;
   return resolveLinkPath(containingPath, link.path) === identity.path;
+}
+
+function expandValueOfTarget(doc: FlowDocument, edgeSource: FlowNode, edge: EdgeSpec): string | null {
+  const targetNode = nodesIn(containingItems(doc, edgeSource)).find((node) => node.name === edge.target);
+  return targetNode ? getProp(targetNode, 'expand') : null;
 }
