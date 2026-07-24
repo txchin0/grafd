@@ -1,3 +1,20 @@
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("fonts/HankenGrotesk-Variable.woff2") format("woff2-variations");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Hanken Grotesk Fallback";
+  src: local("Segoe UI"), local("Arial");
+  size-adjust: 100.06%;
+  ascent-override: 90%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}
+
 :root {
   --bg: #17191d;
   --panel: #1f2228;
@@ -6,7 +23,16 @@
   --muted: #9aa3ae;
   --accent: #6aa9e9;
   --danger: #d97a7a;
-  --hand-font: "Segoe Print", "Comic Sans MS", "Comic Sans", cursive;
+  --ui-font: "Hanken Grotesk", "Hanken Grotesk Fallback", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --text-caption: 0.6875rem;
+  --text-body: 0.8125rem;
+  --text-title: 0.9375rem;
+  --text-heading: 1.125rem;
+  --text-brand: 1.375rem;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
 }
 
 * { box-sizing: border-box; }
@@ -16,7 +42,12 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--ink);
-  font-family: var(--hand-font);
+  font-family: var(--ui-font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-kerning: normal;
+  font-optical-sizing: auto;
   overflow: hidden;
 }
 
@@ -40,13 +71,14 @@ html, body {
 }
 
 .logo {
-  font-size: 20px;
+  font-size: var(--text-brand);
+  font-weight: var(--weight-semibold);
   display: block;
 }
 
 .tagline {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 #file-list {
@@ -61,7 +93,7 @@ html, body {
   padding: 6px 10px;
   border-radius: 8px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--text-body);
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -69,7 +101,11 @@ html, body {
 }
 
 #file-list li:hover { background: #262a31; color: var(--ink); }
-#file-list li.active { background: #2b3644; color: var(--ink); }
+#file-list li.active {
+  background: #2b3644;
+  color: var(--ink);
+  font-weight: var(--weight-medium);
+}
 
 #file-list .folder-row,
 #file-list .file-row {
@@ -83,7 +119,7 @@ html, body {
 .folder-caret {
   width: 10px;
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--text-caption);
 }
 
 .file-name {
@@ -101,7 +137,7 @@ html, body {
   border-radius: 6px;
   color: var(--muted);
   font-family: inherit;
-  font-size: 11px;
+  font-size: var(--text-caption);
   cursor: pointer;
 }
 
@@ -116,6 +152,7 @@ html, body {
   border-radius: 8px;
   color: var(--muted);
   font-family: inherit;
+  font-size: var(--text-body);
   cursor: pointer;
 }
 
@@ -129,7 +166,7 @@ html, body {
   border-radius: 8px;
   color: var(--ink);
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--text-body);
   outline: none;
 }
 
@@ -143,7 +180,7 @@ html, body {
 
 #workspace-name {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-body);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -156,7 +193,7 @@ html, body {
   border-radius: 8px;
   color: var(--muted);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-body);
   cursor: pointer;
   text-align: left;
 }
@@ -176,7 +213,7 @@ html, body {
   border: none;
   color: var(--muted);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-body);
   cursor: pointer;
 }
 
@@ -209,7 +246,7 @@ html, body {
 }
 
 #breadcrumb {
-  font-size: 13px;
+  font-size: var(--text-body);
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -237,7 +274,7 @@ html, body {
   border-radius: 6px;
   color: var(--muted);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-body);
   min-width: 28px;
   padding: 3px 7px;
   cursor: pointer;
@@ -246,7 +283,13 @@ html, body {
 #toolbar button:hover,
 #view-controls button:hover { color: var(--ink); border-color: var(--muted); }
 
-#toolbar button.active { color: var(--accent); border-color: var(--accent); }
+#toolbar button.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: var(--weight-medium);
+}
+
+#zoom-level-button { font-variant-numeric: tabular-nums; }
 
 #canvas-container {
   position: relative;
@@ -274,8 +317,13 @@ html, body {
   pointer-events: none;
 }
 
-#empty-state h1 { font-weight: normal; margin: 0 0 6px; }
-#empty-state p { margin: 0; font-size: 13px; }
+#empty-state h1 {
+  font-size: var(--text-brand);
+  font-weight: var(--weight-semibold);
+  margin: 0 0 6px;
+}
+
+#empty-state p { margin: 0; font-size: var(--text-body); }
 
 .hidden { display: none !important; }
 
@@ -303,8 +351,8 @@ html, body {
   border: 1px solid var(--panel-border);
   border-radius: 7px;
   color: var(--ink);
-  font-family: var(--hand-font);
-  font-size: 13px;
+  font-family: var(--ui-font);
+  font-size: var(--text-body);
   padding: 6px 8px;
   outline: none;
   resize: vertical;
@@ -319,12 +367,12 @@ html, body {
   border-color: var(--accent);
 }
 
-#ne-title { font-size: 15px; }
+#ne-title { font-size: var(--text-title); }
 
 #ne-advanced summary {
   cursor: pointer;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-body);
   user-select: none;
 }
 
@@ -333,7 +381,7 @@ html, body {
 #ne-advanced label,
 #graph-panel label {
   display: block;
-  font-size: 11px;
+  font-size: var(--text-caption);
   color: var(--muted);
   margin-bottom: 6px;
 }
@@ -351,7 +399,7 @@ html, body {
   border-radius: 7px;
   color: var(--muted);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-body);
   padding: 4px 10px;
   cursor: pointer;
 }
@@ -375,7 +423,7 @@ html, body {
   border: none;
   color: var(--muted);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-body);
   cursor: pointer;
   padding: 4px 6px;
   width: 100%;
@@ -397,9 +445,13 @@ html, body {
   z-index: 20;
 }
 
-#help-overlay h2 { margin: 0 0 10px; font-weight: normal; font-size: 17px; }
+#help-overlay h2 {
+  margin: 0 0 10px;
+  font-size: var(--text-heading);
+  font-weight: var(--weight-semibold);
+}
 
-#help-overlay table { border-collapse: collapse; font-size: 12.5px; }
+#help-overlay table { border-collapse: collapse; font-size: var(--text-body); }
 #help-overlay td { padding: 3px 8px; }
 #help-overlay td:first-child { color: var(--accent); white-space: nowrap; }
 #help-overlay td:last-child { color: var(--muted); }
@@ -423,7 +475,7 @@ html, body {
   border-radius: 7px;
   color: var(--muted);
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--text-body);
   text-align: left;
   padding: 6px 10px;
   cursor: pointer;
