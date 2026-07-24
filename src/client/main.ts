@@ -45,7 +45,8 @@ import {
 } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
-import { CanvasView, type Tool, type View } from './canvas-view.js';
+import { CanvasView, type ContextTarget, type Tool, type View } from './canvas-view.js';
+import { createContextMenu, type MenuItem } from './context-menu.js';
 import { ExpansionLayer, inlineDiveAnchor, type DocumentOwner } from './expansion.js';
 import { createEditors, type Editors } from './editors.js';
 import {
@@ -393,6 +394,12 @@ function folderRow(folder: TreeFolder, depth: number): HTMLElement {
     else collapsedFolders.add(folder.path);
     renderFileList();
   });
+  row.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    contextMenu.open([
+      { label: 'New flow here', onSelect: () => showNewFileInput(`${folder.path}/`) },
+    ], { x: event.clientX, y: event.clientY });
+  });
   return row;
 }
 
@@ -410,7 +417,60 @@ function fileRow(file: TreeFile, depth: number): HTMLElement {
     navigation.trail.length = 0;
     openFile(file.path);
   });
+  row.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    const at = { x: event.clientX, y: event.clientY };
+    contextMenu.open(fileMenuItems(file, at), at);
+  });
   return row;
+}
+
+function folderOf(path: string): string {
+  const slash = path.lastIndexOf('/');
+  return slash === -1 ? '' : path.slice(0, slash);
+}
+
+function fileMenuItems(file: TreeFile, at: { x: number; y: number }): MenuItem[] {
+  const folder = folderOf(file.path);
+  return [
+    { label: 'Open', onSelect: () => { navigation.trail.length = 0; openFile(file.path); } },
+    { label: 'New flow here', onSelect: () => showNewFileInput(folder ? `${folder}/` : undefined) },
+    { label: 'Duplicate', onSelect: () => void duplicateFlowFile(file.path) },
+    { separator: true },
+    { label: 'Delete', danger: true, onSelect: () => confirmDeleteFlowFile(file, at) },
+  ];
+}
+
+// Same two-step confirmation as the sidebar ✕ button: dialog boxes are suppressed in several
+// embedded hosts, so the menu reopens with an explicit confirm instead of deleting on first click.
+function confirmDeleteFlowFile(file: TreeFile, at: { x: number; y: number }): void {
+  contextMenu.open([
+    { label: `Delete ${file.name}?`, danger: true, onSelect: () => deleteFlowFile(file.path) },
+    { label: 'Cancel', onSelect: () => {} },
+  ], at);
+}
+
+function uniqueFlowFilePath(path: string): string {
+  const base = path.replace(/\.flow$/, '');
+  let candidate = `${base} copy.flow`;
+  let counter = 2;
+  while (state.files.includes(candidate)) {
+    candidate = `${base} copy ${counter}.flow`;
+    counter += 1;
+  }
+  return candidate;
+}
+
+async function duplicateFlowFile(path: string): Promise<void> {
+  const text = path === state.path ? state.text : await workspace?.readFile(path);
+  if (text == null) return;
+  const newPath = uniqueFlowFilePath(path);
+  sendWrite(newPath, text);
+  if (!state.files.includes(newPath)) {
+    state.files.push(newPath);
+    state.files.sort();
+  }
+  renderFileList();
 }
 
 // Deleting takes two clicks on the same button — an inline confirmation, because dialog
@@ -543,6 +603,111 @@ function deleteSelection(): void {
     editors.closeAll();
     applyEdit(edge.from, () => FlowDoc.deleteEdge(edge), { commit: 'now' });
   }
+}
+
+// Session-local clipboard: detached node copies plus the path/scope they came from, so paste
+// can route back into an inline-expanded .flow (or graph block) the same way duplicate does.
+// Cloning up front means later edits to (or deletion of) the originals never disturb paste.
+const DUPLICATE_STEP = 24;
+
+interface ClipboardGroup {
+  path: string;
+  scope: string | null;
+  nodes: FlowNode[];
+}
+
+let clipboard: ClipboardGroup[] = [];
+
+function copySelection(): void {
+  if (view.selection.size === 0) return;
+  const groups = new Map<string, { path: string; scope: string | null; nodes: FlowNode[] }>();
+  for (const node of view.selection) {
+    const owner = ownerOf(node);
+    const scope = FlowDoc.containingGraphBlockName(owner.doc, node);
+    const key = `${owner.path}\0${scope ?? ''}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { path: owner.path, scope, nodes: [] };
+      groups.set(key, group);
+    }
+    group.nodes.push(node);
+  }
+  clipboard = [...groups.values()].map((group) => ({
+    path: group.path,
+    scope: group.scope,
+    nodes: FlowDoc.cloneNodesDetached(group.nodes),
+  }));
+}
+
+function cutSelection(): void {
+  if (view.selection.size === 0) return;
+  copySelection();
+  deleteSelection();
+}
+
+function clipboardHasNodes(): boolean {
+  return clipboard.some((group) => group.nodes.length > 0);
+}
+
+// Duplicate/paste route through the same owner→items grouping as deleteNodesAction, so nodes
+// selected inside an inline-expanded frame land in the .flow file that actually owns them.
+function duplicateNodesAction(nodes: FlowNode[], offset: Point): FlowNode[] {
+  const copies: FlowNode[] = [];
+  const groups = new Map<FlowDocument, { owner: DocumentOwner; nodes: FlowNode[] }>();
+  for (const node of nodes) {
+    const owner = ownerOf(node);
+    if (!groups.has(owner.doc)) groups.set(owner.doc, { owner, nodes: [] });
+    groups.get(owner.doc)!.nodes.push(node);
+  }
+  for (const { owner, nodes: docNodes } of groups.values()) {
+    applyToDoc(owner, () => {
+      const byItems = new Map<ReturnType<typeof FlowDoc.containingItems>, FlowNode[]>();
+      for (const node of docNodes) {
+        const items = FlowDoc.containingItems(owner.doc, node);
+        if (!byItems.has(items)) byItems.set(items, []);
+        byItems.get(items)!.push(node);
+      }
+      for (const [items, list] of byItems) {
+        copies.push(...FlowDoc.duplicateNodes(items, list, offset));
+      }
+    }, { commit: 'now' });
+  }
+  return copies;
+}
+
+function duplicateSelection(): void {
+  const nodes = [...view.selection];
+  if (nodes.length === 0) return;
+  const copies = duplicateNodesAction(nodes, { x: DUPLICATE_STEP, y: DUPLICATE_STEP });
+  if (copies.length > 0) view.setSelection(copies);
+}
+
+function pasteOffsetToward(world: Point | undefined): Point {
+  const anchor = clipboard.flatMap((group) => group.nodes).find((node) => node.pos)?.pos;
+  if (!world || !anchor) return { x: DUPLICATE_STEP, y: DUPLICATE_STEP };
+  return { x: Math.round(world.x - anchor.x), y: Math.round(world.y - anchor.y) };
+}
+
+function ownerForClipboardPath(path: string): DocumentOwner | null {
+  if (state.doc && state.path === path) return { doc: state.doc, path };
+  const doc = expansions.documentAt(path);
+  return doc ? { doc, path } : null;
+}
+
+function pasteClipboard(world?: Point): void {
+  if (!state.doc || !clipboardHasNodes()) return;
+  const offset = pasteOffsetToward(world);
+  const pasted: FlowNode[] = [];
+  for (const group of clipboard) {
+    const resolved = ownerForClipboardPath(group.path);
+    const owner = resolved ?? { doc: state.doc, path: state.path! };
+    const scope = resolved ? group.scope : state.scope;
+    const items = FlowDoc.scopeItems(owner.doc, scope);
+    applyToDoc(owner, () => {
+      pasted.push(...FlowDoc.duplicateNodes(items, group.nodes, offset));
+    }, { commit: 'now' });
+  }
+  if (pasted.length > 0) view.setSelection(pasted);
 }
 
 // Opening a subgraph plays a seamless dive-in: the outgoing scene is held on screen while
@@ -912,6 +1077,7 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
     const node = createNodeAndEdit(ghost.pos, ghost.name);
     view.select(node);
   },
+  contextMenu: openCanvasContextMenu,
   viewChanged: () => {
     editors.reposition();
     if (state.path) scheduleManifestSave();
@@ -948,6 +1114,61 @@ const editors: Editors = createEditors({
   deleteNodes: deleteNodesAction,
   innerTargetOptions,
 });
+
+const contextMenu = createContextMenu();
+
+function openCanvasContextMenu(target: ContextTarget, screenPoint: Point): void {
+  if (!state.doc) return;
+  const items =
+    target.kind === 'node' ? nodeMenuItems(target.node)
+    : target.kind === 'edge' ? edgeMenuItems(target.edge)
+    : canvasMenuItems(target.world);
+  contextMenu.open(items, screenPoint);
+}
+
+function nodeMenuItems(node: FlowNode): MenuItem[] {
+  const selectionCount = view.selection.size;
+  const items: MenuItem[] = [];
+  if (selectionCount <= 1) items.push({ label: 'Edit', onSelect: () => editors.openNodeEditor(node) });
+  items.push({ label: selectionCount > 1 ? `Duplicate ${selectionCount} nodes` : 'Duplicate', onSelect: duplicateSelection });
+  items.push({ label: 'Copy', onSelect: copySelection });
+  items.push({ label: 'Cut', onSelect: cutSelection });
+  if (getProp(node, 'expand')) {
+    if (!expansions.isEmbedded(node)) items.push({ label: 'Open ⤢', onSelect: () => void openExpand(node) });
+    items.push({
+      label: expansions.isOpen(node.id) ? 'Collapse ⊟' : 'Expand ⊞',
+      onSelect: () => toggleInlineExpansion(node),
+    });
+  }
+  if (selectionCount <= 1) {
+    const isEntrypoint = getProp(node, 'entrypoint') === 'true';
+    items.push({
+      label: isEntrypoint ? 'Unset entrypoint' : 'Set as entrypoint',
+      onSelect: () => applyEdit(node, () => setProp(node, 'entrypoint', isEntrypoint ? null : 'true'), { commit: 'now' }),
+    });
+  }
+  items.push({ separator: true });
+  items.push({ label: selectionCount > 1 ? `Delete ${selectionCount} nodes` : 'Delete', danger: true, onSelect: deleteSelection });
+  return items;
+}
+
+function edgeMenuItems(edge: ModelEdge): MenuItem[] {
+  return [
+    { label: 'Edit label', onSelect: () => editors.openEdgeEditor(edge) },
+    { separator: true },
+    { label: 'Delete edge', danger: true, onSelect: deleteSelection },
+  ];
+}
+
+function canvasMenuItems(world: Point): MenuItem[] {
+  return [
+    { label: 'Add node here', onSelect: () => createNodeAndEdit(centeredDefaultRect(world)) },
+    { label: 'Paste', disabled: !clipboardHasNodes(), onSelect: () => pasteClipboard(world) },
+    { separator: true },
+    { label: 'Fit to content', onSelect: () => view.fitToContent() },
+    { label: 'Reset zoom', onSelect: () => view.setZoom(1) },
+  ];
+}
 
 function wireGraphPanel(): void {
   elements.graphToggle.addEventListener('click', () => {
@@ -1008,20 +1229,24 @@ function wireViewControls(): void {
 }
 
 // An inline input instead of window.prompt: prompt dialogs are suppressed in several
-// embedded browser hosts, which made the button appear dead.
+// embedded browser hosts, which made the button appear dead. A folder prefix (e.g. "auth/")
+// seeds "New flow here" so the file lands inside the right-clicked folder.
+function showNewFileInput(prefill?: string): void {
+  const value = prefill ?? `untitled-${state.files.length + 1}.flow`;
+  elements.newFileButton.classList.add('hidden');
+  elements.newFileInput.classList.remove('hidden');
+  elements.newFileInput.value = value;
+  elements.newFileInput.focus();
+  if (value.endsWith('/')) elements.newFileInput.setSelectionRange(value.length, value.length);
+  else elements.newFileInput.select();
+}
+
 function wireNewFileForm(): void {
-  const showInput = () => {
-    elements.newFileButton.classList.add('hidden');
-    elements.newFileInput.classList.remove('hidden');
-    elements.newFileInput.value = `untitled-${state.files.length + 1}.flow`;
-    elements.newFileInput.focus();
-    elements.newFileInput.select();
-  };
   const hideInput = () => {
     elements.newFileInput.classList.add('hidden');
     elements.newFileButton.classList.remove('hidden');
   };
-  elements.newFileButton.addEventListener('click', showInput);
+  elements.newFileButton.addEventListener('click', () => showNewFileInput());
   elements.newFileInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       createFlowFile(elements.newFileInput.value);
@@ -1074,6 +1299,20 @@ function wireKeyboard(): void {
     } else if (ctrl && event.key.toLowerCase() === 'y') {
       event.preventDefault();
       redo();
+    } else if (ctrl && event.key.toLowerCase() === 'c') {
+      if (view.selection.size === 0) return;
+      event.preventDefault();
+      copySelection();
+    } else if (ctrl && event.key.toLowerCase() === 'x') {
+      if (view.selection.size === 0) return;
+      event.preventDefault();
+      cutSelection();
+    } else if (ctrl && event.key.toLowerCase() === 'v') {
+      event.preventDefault();
+      pasteClipboard();
+    } else if (ctrl && event.key.toLowerCase() === 'd') {
+      event.preventDefault();
+      duplicateSelection();
     } else if (event.key === 'Delete' || event.key === 'Backspace') {
       deleteSelection();
     } else if (ctrl && event.key === '0') {
@@ -1090,6 +1329,7 @@ function wireKeyboard(): void {
     } else if (!ctrl && event.key.toLowerCase() === 'n') {
       setTool('node');
     } else if (event.key === 'Escape') {
+      contextMenu.close();
       editors.closeAll();
       view.clearSelection();
       elements.helpOverlay.classList.add('hidden');

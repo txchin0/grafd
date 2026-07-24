@@ -282,6 +282,49 @@ export function addNode(items: FlowItem[], rect: Rect, requestedName = 'Untitled
   return node;
 }
 
+// Detached deep copies for the clipboard: they keep their original names and positions and
+// survive later edits to the source nodes. duplicateNodes assigns fresh identities on paste.
+export function cloneNodesDetached(sources: FlowNode[]): FlowNode[] {
+  return sources.map((source) => structuredClone(source));
+}
+
+// Inserts independent copies of `sources` into `items`, each with a fresh id, a name made
+// unique within `items`, and its position shifted by `offset`. Edges (and on_error targets)
+// that point at another node in the copied set are rewired to that node's new name, so a
+// duplicated cluster keeps its internal wiring while edges to untouched nodes are preserved.
+export function duplicateNodes(items: FlowItem[], sources: FlowNode[], offset: Point): FlowNode[] {
+  const takenNames = new Set(nodesIn(items).map((node) => node.name));
+  const newNameByOriginal = new Map<string, string>();
+  const copies = sources.map((source) => {
+    const copy = structuredClone(source);
+    copy.id = newUuid();
+    copy.name = uniqueName(takenNames, source.name);
+    takenNames.add(copy.name);
+    newNameByOriginal.set(source.name, copy.name);
+    if (copy.pos) copy.pos = { ...copy.pos, x: copy.pos.x + offset.x, y: copy.pos.y + offset.y };
+    return copy;
+  });
+
+  for (const copy of copies) {
+    for (const edge of copy.edges) {
+      const renamed = newNameByOriginal.get(edge.target);
+      if (renamed) edge.target = renamed;
+    }
+    const onError = getProp(copy, 'on_error');
+    if (onError?.startsWith('->')) {
+      const parsed = parseEdgeExpression(onError);
+      const renamed = newNameByOriginal.get(parsed.target);
+      if (renamed) {
+        parsed.target = renamed;
+        setProp(copy, 'on_error', serializeEdgeExpression(parsed));
+      }
+    }
+  }
+
+  for (const copy of copies) items.push({ kind: 'node', node: copy });
+  return copies;
+}
+
 export function deleteNodes(
   items: FlowItem[],
   nodesToDelete: FlowNode[],

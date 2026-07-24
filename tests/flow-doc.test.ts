@@ -9,6 +9,7 @@ import {
   containingItems,
   deleteEdge,
   deleteNodes,
+  duplicateNodes,
   expandEntryNames,
   findNodeById,
   graphBlockNames,
@@ -140,6 +141,44 @@ describe('addNode', () => {
     expect(node.id).toBeTruthy();
     expect(node.pos).toEqual({ x: 11, y: 19, w: 101, h: 50 });
     expect(allNodes(doc)).toHaveLength(2);
+  });
+});
+
+describe('duplicateNodes', () => {
+  it('gives copies unique names, fresh ids, and offset positions', () => {
+    const doc = docFrom(`Login
+  ${PLACED(0, 0)}
+`);
+    const [login] = allNodes(doc);
+    const [copy] = duplicateNodes(doc.items, [login], { x: 24, y: 24 });
+    expect(copy.name).toBe('Login 2');
+    expect(copy.id).toBeTruthy();
+    expect(copy.id).not.toBe(login.id);
+    expect(copy.pos).toEqual({ x: 24, y: 24, w: 200, h: 88 });
+    expect(allNodes(doc)).toHaveLength(2);
+  });
+
+  it('rewires edges among the copied set but leaves edges to untouched nodes alone', () => {
+    const doc = docFrom(`A
+  ${PLACED(0, 0)}
+  -> B
+  -> C
+  on_error: -> B
+
+B
+  ${PLACED(300, 0)}
+
+C
+  ${PLACED(0, 300)}
+`);
+    const [a, b] = allNodes(doc);
+    const [copyA, copyB] = duplicateNodes(doc.items, [a, b], { x: 24, y: 24 });
+    expect([copyA.name, copyB.name]).toEqual(['A 2', 'B 2']);
+    // Edge to the co-duplicated B is rewired to the copy; the edge to un-copied C is not.
+    expect(copyA.edges.map((edge) => edge.target)).toEqual(['B 2', 'C']);
+    expect(getProp(copyA, 'on_error')).toBe('-> B 2');
+    // Originals are untouched.
+    expect(a.edges.map((edge) => edge.target)).toEqual(['B', 'C']);
   });
 });
 

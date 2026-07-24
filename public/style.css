@@ -403,3 +403,38 @@ html, body {
 #help-overlay td { padding: 3px 8px; }
 #help-overlay td:first-child { color: var(--accent); white-space: nowrap; }
 #help-overlay td:last-child { color: var(--muted); }
+
+.context-menu {
+  position: fixed;
+  min-width: 168px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  padding: 4px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+}
+
+.context-menu-item {
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.context-menu-item:hover { background: #262a31; color: var(--ink); }
+.context-menu-item.danger:hover { background: #262a31; color: var(--danger); }
+.context-menu-item.disabled { color: var(--panel-border); cursor: default; pointer-events: none; }
+
+.context-menu-separator {
+  height: 1px;
+  background: var(--panel-border);
+  margin: 4px 6px;
+}

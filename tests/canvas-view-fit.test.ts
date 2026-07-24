@@ -126,7 +126,8 @@ describe('CanvasView fit after subgraph navigation', () => {
     });
 
     const canvas = createCanvasMock();
-    const view = new CanvasView(canvas, {});
+    // Fit-to-content never dispatches actions, so a bare stub is enough here.
+    const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1]);
     view.expansionLayer = expansions;
 
     view.setModel(parentModel);

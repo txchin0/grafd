@@ -122,9 +122,15 @@ export interface CanvasActions {
   openExpand(node: FlowNode): void;
   toggleExpand(node: FlowNode): void;
   materializeGhost(ghost: GhostNode): void;
+  contextMenu(target: ContextTarget, screenPoint: Point): void;
   viewChanged?(): void;
   afterRender?(): void;
 }
+
+export type ContextTarget =
+  | { kind: 'node'; node: FlowNode }
+  | { kind: 'edge'; edge: ModelEdge }
+  | { kind: 'canvas'; world: Point };
 
 const HAND_FONT = '"Segoe Print", "Comic Sans MS", cursive';
 
@@ -287,7 +293,7 @@ export class CanvasView {
     });
     this.canvas.addEventListener('dblclick', (event) => this.onDoubleClick(event));
     this.canvas.addEventListener('wheel', (event) => this.onWheel(event), { passive: false });
-    this.canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+    this.canvas.addEventListener('contextmenu', (event) => this.onContextMenu(event));
 
     window.addEventListener('keydown', (event) => {
       if (event.code === 'Space' && !isTypingTarget(event.target)) {
@@ -375,6 +381,12 @@ export class CanvasView {
 
   select(node: FlowNode): void {
     this.selection = new Set([node]);
+    this.selectedEdge = null;
+    this.requestRender();
+  }
+
+  setSelection(nodes: FlowNode[]): void {
+    this.selection = new Set(nodes);
     this.selectedEdge = null;
     this.requestRender();
   }
@@ -867,6 +879,31 @@ export class CanvasView {
     }
     if (this.hitNode(world) || this.hitGhost(world)) return;
     this.actions.quickCreateNode(world);
+  }
+
+  // Right-click classifies the target with the same hit chain as onPointerDown and hands it to
+  // the app to build a menu. A node that is not already part of the selection becomes the sole
+  // selection first, so the menu acts on it; an existing multi-selection is left intact.
+  private onContextMenu(event: MouseEvent): void {
+    event.preventDefault();
+    const world = this.screenToWorld(this.eventPoint(event));
+    const screenPoint = { x: event.clientX, y: event.clientY };
+
+    const node = this.hitNode(world);
+    if (node) {
+      if (!this.selection.has(node)) this.select(node);
+      this.actions.contextMenu({ kind: 'node', node }, screenPoint);
+      return;
+    }
+    const edge = this.hitEdge(world);
+    if (edge) {
+      this.selectedEdge = edge;
+      this.selection.clear();
+      this.requestRender();
+      this.actions.contextMenu({ kind: 'edge', edge }, screenPoint);
+      return;
+    }
+    this.actions.contextMenu({ kind: 'canvas', world }, screenPoint);
   }
 
   private hitNode(world: Point): FlowNode | null {
