@@ -42,7 +42,7 @@ entrypoint: true              # optional: explicit trigger override
 
 ## Nodes
 
-Declared as a bare name at column 0. Properties indented 2 spaces. Names are unique per graph. Names never contain `: ` (colon-space) or curly braces `{` `}` (a trailing `{Inner}` on an edge target names a node inside the target subgraph).
+Declared as a bare name at column 0. Properties indented 2 spaces. Names are unique per graph. Names never contain `: ` (colon-space) or curly braces `{` `}` (braces appear only on edges: a trailing `{Inner}` on an edge target names a node inside the target subgraph; a leading `{Inner Source}` prefix names a node inside the owning subgraph that the edge leaves from).
 
 ```
 Node Name
@@ -55,6 +55,7 @@ Node Name
   entrypoint: true
   -> Target Node : "optional label"
   -> Subgraph {Inner Node} : "optional label"  # enter subgraph at Inner Node
+  {Inner Source} -> Target Node : "optional label"  # leave subgraph from Inner Source
 ```
 
 All properties are optional. A node with no properties is a valid leaf.
@@ -140,6 +141,25 @@ graph: Payment Steps
 - The name before `{...}` is the subgraph node (resolved in the current scope); it must have `expand`.
 - The name inside `{...}` is the inner node, resolved against the top-level scope of that expansion (local `graph:` block or external file body). Single-level only — nested paths are not supported.
 - **Semantics:** control enters the subgraph at that inner node instead of its inferred entry point.
+
+### Originating an Edge From a Node Inside a Subgraph
+
+An edge declared under a subgraph node may optionally carry a `{Inner Source}` prefix before `->`:
+
+```
+Process Payment
+  expand: Payment Steps
+  {Charge Card} -> Notify Admin : "charged"
+
+graph: Payment Steps
+  Charge Card
+    -> Send Receipt
+  Send Receipt
+```
+
+- The name inside `{...}` is resolved against the top-level scope of the owning node's expansion (local `graph:` block or external file body). Single-level only — nested paths are not supported.
+- The target may still take its own `{Inner}` suffix (`{A} -> Sub {B}`).
+- **Semantics:** control leaves the subgraph at that inner node instead of its inferred exit.
 
 ## Expansion
 
@@ -236,6 +256,7 @@ All other identifiers are user-defined node names or context names.
 | Edge label | Sequential connection |
 | Edge `data` | Infer payload from context |
 | no `{...}` refinement | Edge enters the subgraph at its inferred entry point |
+| no `{...}` prefix | Edge originates at the subgraph's inferred exit |
 | Fan-out strategy | You decide parallel vs sequential |
 
 ## Grammar (EBNF-ish)
@@ -250,7 +271,8 @@ body        := (node | graph_block | comment | blank)*
 
 node        := name NL (indent property)*
 property    := (key ": " value) | edge
-edge        := "-> " target ("{" inner_target "}")? (" : " quoted_label)? NL (indent data_block)?
+edge        := ("{" inner_source "}" " ")? "-> " target ("{" inner_target "}")? (" : " quoted_label)? NL (indent data_block)?
+inner_source := name
 inner_target := name
 data_block  := "data:" NL (indent key ": " type NL)+
 
@@ -270,7 +292,7 @@ When you create or edit `.flow` files, follow the editor's canonical style so fi
 - One blank line between top-level items (nodes, `graph:` blocks, the preamble).
 - Per-node line order: `id`, `pos`, other properties, then edges.
 - Quoted values use double quotes. The format has **no escape sequences** — a `"` character can never appear inside a label or quoted value.
-- Node names are unique within their graph and never contain `: ` (colon-space) or curly braces `{` `}`. An optional `-> Subgraph {Inner}` edge target enters the subgraph at that inner node.
+- Node names are unique within their graph and never contain `: ` (colon-space) or curly braces `{` `}`. An optional `-> Subgraph {Inner}` edge target enters the subgraph at that inner node; an optional `{Inner Source} -> Target` prefix leaves the subgraph from that inner node.
 
 ## Parsing Procedure
 

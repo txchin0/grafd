@@ -1,4 +1,4 @@
 ---
 name: Flow Format Spec
-description: "Format guide for LLM agents: read ../FLOW-SPEC.md (version flow/1.1) before processing any .flow file in this project. Deviation: there are no .flow.meta files — nodes carry `id` (UUID) and `pos: x, y, w, h` properties for canvas layout; agents should preserve both and may ignore their values."
+description: "Format guide for LLM agents: read ../FLOW-SPEC.md (version flow/1.2) before processing any .flow file in this project. Deviation: there are no .flow.meta files — nodes carry `id` (UUID) and `pos: x, y, w, h` properties for canvas layout; agents should preserve both and may ignore their values."
 ---

@@ -1,6 +1,6 @@
 # .flow Format Specification
 
-**Version:** flow/1.1
+**Version:** flow/1.2
 **Status:** Draft
 
 ## Revision History
@@ -9,6 +9,7 @@
 | -------- | ----------------------------------------------------------------------------------- |
 | flow/1   | Initial draft.                                                                      |
 | flow/1.1 | Edges may target a node inside a subgraph via an optional `{Inner Node}` suffix. |
+| flow/1.2 | Edges may originate from a node inside a subgraph via an optional `{Inner Source}` prefix. |
 
 ---
 
@@ -130,7 +131,7 @@ The `expand` property does not appear in the preamble — the file itself *is* t
 - **Indentation:** 2-space indentation. Tabs are forbidden.
 - **Encoding:** UTF-8.
 - **Comments:** Lines starting with `#` are comments. The LLM ignores them.
-- **Node names:** Cannot contain `:`  (colon followed by space). Enforced by the frontend. Node names must also not contain `{` or `}` — a trailing `{Inner Node}` on an edge target names a node inside the target subgraph (see [Section 5.7](#57-targeting-a-node-inside-a-subgraph)).
+- **Node names:** Cannot contain `:`  (colon followed by space). Enforced by the frontend. Node names must also not contain `{` or `}` — braces appear only on edges: a trailing `{Inner Node}` on an edge target names a node inside the target subgraph (see [Section 5.7](#57-targeting-a-node-inside-a-subgraph)), and a leading `{Inner Source}` prefix names a node inside the owning subgraph that the edge leaves from (see [Section 5.8](#58-originating-an-edge-from-a-node-inside-a-subgraph)).
 - **Node uniqueness:** Node names must be unique within a single graph. Enforced by the frontend.
 - **Blank lines:** Optional. Used for visual separation between nodes. No semantic meaning.
 
@@ -342,10 +343,30 @@ graph: Payment Steps
 4. **Semantics for agents:** control flow enters the subgraph directly at the named inner node, bypassing the subgraph's normal (inferred) entry point.
 5. **Fallback:** if the subgraph node has no `expand`, or the inner node isn't found in the expansion, treat it as a plain edge to the subgraph node (the `{...}` refinement is ignored).
 
-**Display:**
+### 5.8 Originating an Edge From a Node Inside a Subgraph
 
-- **Collapsed** (subgraph not expanded inline): draw an ordinary edge to the subgraph node's border. The inner refinement is not visualized.
-- **Expanded inline** (frame unfolded): the edge continues past the frame border and terminates at the inner node's border **inside** the frame; the subgraph node's outer border no longer receives the arrowhead.
+An edge declared under a subgraph node may optionally carry a `{Inner Source}` prefix before `->`, naming the node inside that subgraph's expansion that the edge leaves from. This is the mirror of [Section 5.7](#57-targeting-a-node-inside-a-subgraph)'s target-side `{Inner Node}` suffix. Curly braces are unused elsewhere in the format, so there is no collision with the `[Label](path)` markdown-link convention used by `expand`/`on_error`.
+
+```
+Process Payment
+  expand: Payment Steps
+  {Charge Card} -> Notify Admin : "charged"
+
+graph: Payment Steps
+  Charge Card
+    -> Send Receipt
+  Send Receipt
+```
+
+- `{Inner Source} -> Target` — optional form. The edge is declared under the subgraph node; the prefix refines where inside it control leaves.
+- The target may still take its own §5.7 `{Inner}` suffix (`{A} -> Sub {B}`), so an edge from an inner node to an inner node of another subgraph falls out for free.
+
+**Resolution & constraints:**
+
+1. The prefix is only meaningful when the **owning node** (the node the edge is declared under) has `expand`.
+2. The name inside `{...}` is resolved against the top-level scope of the owning node's expansion (the local `graph:` block or the external file's body).
+3. The edge continues to belong to / be declared under the subgraph node — the prefix only refines *where inside it* control leaves. This is single-level: the inner source lives directly in the owning node's expansion (nested paths are out of scope for this version).
+4. **Semantics for agents:** control flow leaves the subgraph directly from the named inner node, bypassing the subgraph's normal (inferred) exit.
 
 ---
 
@@ -820,7 +841,8 @@ node          := name newline (property | edge)*
 name          := <text at column 0, no ": " allowed>
 
 property      := indent key ": " value newline
-edge          := indent "-> " target ("{" inner_target "}")? (" : " quoted_label)? newline (edge_data)?
+edge          := indent ("{" inner_source "}" " ")? "-> " target ("{" inner_target "}")? (" : " quoted_label)? newline (edge_data)?
+inner_source  := name
 inner_target  := name
 edge_data     := indent indent "data:" newline (indent indent indent key ": " type newline)+
 
@@ -876,6 +898,7 @@ The format has a minimal set of reserved keywords:
 | Indentation       | YAML-style, 2-space                                                               | Familiar, shallow nesting                        |
 | Edge syntax       | -> Target : "label"                                                               | Compact, colon-space forbidden in names          |
 | Subgraph entry targeting | Optional `{Inner}` suffix on the edge target                               | Keeps the edge anchored to the subgraph node while refining the entry point; braces are unused elsewhere, so no new keyword and no collision with the `[](path)` link form |
+| Subgraph exit origination | Optional `{Inner Source}` prefix on the edge | Keeps the edge on the parent graph under the subgraph node while refining the exit point; same brace convention as §5.7, no new keyword. |
 | Comments          | # prefix                                                                          | Universal convention                             |
 | Versioning        | Defined in spec file, not in individual .flow files                               | Single source of truth, no duplication           |
 | Spec location     | Separate file, read once                                                          | No duplication across files                      |
