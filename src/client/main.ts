@@ -46,7 +46,7 @@ import {
 import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
 import { CanvasView, type Tool, type View } from './canvas-view.js';
-import { ExpansionLayer, type DocumentOwner } from './expansion.js';
+import { ExpansionLayer, inlineDiveAnchor, type DocumentOwner } from './expansion.js';
 import { createEditors, type Editors } from './editors.js';
 import {
   MANIFEST_FILE_NAME,
@@ -556,7 +556,9 @@ async function openExpand(node: FlowNode): Promise<void> {
   try {
     editors.closeAll();
     const origin: TrailEntry = { path: state.path!, scope: state.scope, nodeId: node.id, view: { ...view.view } };
-    const nodeRect = { ...view.rect(node) };
+    expansions.layout(state.model!, performance.now());
+    const anchor = inlineDiveAnchor(state.model!, node);
+    const nodeRect = anchor ? { ...anchor.frame } : { ...view.rect(node) };
     view.beginSceneHold(state.model!, view.view);
 
     const link = parseExpandLink(expandValue);
@@ -577,7 +579,7 @@ async function openExpand(node: FlowNode): Promise<void> {
 
     navigation.trail.push(origin);
     renderBreadcrumb();
-    await view.zoomDiveIn({ nodeRect });
+    await view.zoomDiveIn({ nodeRect, inlineAnchor: anchor?.transform ?? null });
   } finally {
     navigation.inProgress = false;
   }
@@ -628,7 +630,10 @@ async function navigateBackTo(index: number): Promise<void> {
       view.setViewNow(entry.view);
       return;
     }
-    await view.zoomBackOut({ nodeRect: { ...enteredNode.pos }, targetView: entry.view });
+    expansions.layout(state.model!, performance.now());
+    const anchor = inlineDiveAnchor(state.model!, enteredNode);
+    const nodeRect = anchor ? { ...anchor.frame } : { ...enteredNode.pos };
+    await view.zoomBackOut({ nodeRect, targetView: entry.view, inlineAnchor: anchor?.transform ?? null });
   } finally {
     navigation.inProgress = false;
   }

@@ -15,13 +15,27 @@ import {
   type Rect,
 } from '../shared/flow-format.js';
 import type { FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
-import { transformRect, type ExpansionLayer, type FrameExpansion } from './expansion.js';
+import {
+  cameraLinkFromInlineModel,
+  cameraLinkFromRect,
+  childViewLinkedTo,
+  interpolateView,
+  modelContentBounds,
+  parentViewLinkedTo,
+  type CameraLink,
+  type View,
+  type ViewportSize,
+} from './camera-transition.js';
+import {
+  transformPoint,
+  transformRect,
+  type ExpansionLayer,
+  type FrameExpansion,
+  type FrameTransform,
+} from './expansion.js';
 
-export interface View {
-  x: number;
-  y: number;
-  scale: number;
-}
+export type { CameraLink, View } from './camera-transition.js';
+export { childViewLinkedTo, interpolateView, parentViewLinkedTo } from './camera-transition.js';
 
 export type Tool = 'select' | 'node';
 
@@ -69,17 +83,6 @@ interface HeldScene {
   view: View;
 }
 
-export interface CameraLink {
-  growth: number;
-  nodeCenter: Point;
-  contentCenter: Point;
-}
-
-interface ViewportSize {
-  width: number;
-  height: number;
-}
-
 type SceneTransition =
   | { phase: 'hold'; outgoing: HeldScene }
   | {
@@ -92,6 +95,7 @@ type SceneTransition =
       incomingEnd: View;
       nodeRect: Rect;
       link: CameraLink;
+      inlineAnchor: FrameTransform | null;
       bounds: ViewportSize;
       duration: number;
       startTime: number;
@@ -366,8 +370,7 @@ export class CanvasView {
     const mid = edge.geometry?.mid ?? rectCenter(this.rect(edge.from));
     const locus = this.expansionLayer?.locusOf(edge.from);
     if (!locus) return mid;
-    const { scale, tx, ty } = locus.transform;
-    return { x: mid.x * scale + tx, y: mid.y * scale + ty };
+    return transformPoint(mid, locus.transform);
   }
 
   select(node: FlowNode): void {
@@ -482,18 +485,23 @@ export class CanvasView {
     this.requestRender();
   }
 
-  zoomDiveIn({ nodeRect, duration = DIVE_IN_MS }: { nodeRect: Rect; duration?: number }): Promise<void> {
-    return this.startZoomTransition({ mode: 'in', nodeRect, duration });
+  zoomDiveIn(
+    { nodeRect, inlineAnchor = null, duration = DIVE_IN_MS }:
+      { nodeRect: Rect; inlineAnchor?: FrameTransform | null; duration?: number },
+  ): Promise<void> {
+    return this.startZoomTransition({ mode: 'in', nodeRect, inlineAnchor, duration });
   }
 
   zoomBackOut(
-    { nodeRect, targetView, duration = BACK_OUT_MS }: { nodeRect: Rect; targetView: View; duration?: number },
+    { nodeRect, targetView, inlineAnchor = null, duration = BACK_OUT_MS }:
+      { nodeRect: Rect; targetView: View; inlineAnchor?: FrameTransform | null; duration?: number },
   ): Promise<void> {
-    return this.startZoomTransition({ mode: 'out', nodeRect, targetView, duration });
+    return this.startZoomTransition({ mode: 'out', nodeRect, targetView, inlineAnchor, duration });
   }
 
   private startZoomTransition(
-    { mode, nodeRect, targetView, duration }: { mode: 'in' | 'out'; nodeRect: Rect; targetView?: View; duration: number },
+    { mode, nodeRect, targetView, inlineAnchor, duration }:
+      { mode: 'in' | 'out'; nodeRect: Rect; targetView?: View; inlineAnchor: FrameTransform | null; duration: number },
   ): Promise<void> {
     const held = this.sceneTransition?.phase === 'hold' ? this.sceneTransition.outgoing : null;
     if (!held) {
@@ -504,11 +512,9 @@ export class CanvasView {
     const bounds = this.canvas.getBoundingClientRect();
     const childModel = mode === 'in' ? this.model : held.model;
     this.layoutDisplayGeometry(childModel);
-    const contentRect = contentBoundsOf(childModel);
-    const growth = Math.max(1.05, contentRect.w / nodeRect.w, contentRect.h / nodeRect.h);
-    const nodeCenter = rectCenter(nodeRect);
-    const contentCenter = rectCenter(contentRect);
-    const link: CameraLink = { growth, nodeCenter, contentCenter };
+    const link = inlineAnchor
+      ? cameraLinkFromInlineModel(childModel, inlineAnchor)
+      : cameraLinkFromRect(modelContentBounds(childModel), nodeRect);
 
     let parentFrom: View;
     let parentTo: View;
@@ -535,6 +541,7 @@ export class CanvasView {
         incomingEnd,
         nodeRect,
         link,
+        inlineAnchor,
         bounds,
         duration,
         startTime: performance.now(),
@@ -1065,12 +1072,12 @@ export class CanvasView {
 
     const parentModel = parentIsIncoming ? transition.incoming.model : transition.outgoing.model;
     const childModel = parentIsIncoming ? transition.outgoing.model : transition.incoming.model;
-    this.expansionLayer?.layout(parentModel, now);
+    if (!transition.inlineAnchor) this.expansionLayer?.layout(parentModel, now);
     this.expansionLayer?.layout(childModel, now);
 
     this.view = { ...(parentIsIncoming ? parentView : childView) };
     const parentAlpha = parentIsIncoming ? eased : 1 - eased;
-    const childAlpha = parentIsIncoming ? 1 - eased : eased;
+    const childAlpha = transition.inlineAnchor ? 1 : (parentIsIncoming ? 1 - eased : eased);
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.drawGrid(this.view);
@@ -1585,65 +1592,5 @@ export class CanvasView {
 
 function isTypingTarget(element: EventTarget | null): boolean {
   return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
-}
-
-function viewCenterWorld(view: View, bounds: ViewportSize): Point {
-  return {
-    x: (bounds.width / 2 - view.x) / view.scale,
-    y: (bounds.height / 2 - view.y) / view.scale,
-  };
-}
-
-// Log-scale interpolation of the camera: the zoom rate feels constant and the world point
-// at the viewport center travels a straight line.
-export function interpolateView(fromView: View, toView: View, t: number, bounds: ViewportSize): View {
-  const scale = Math.exp(lerp(Math.log(fromView.scale), Math.log(toView.scale), t));
-  const fromCenter = viewCenterWorld(fromView, bounds);
-  const toCenter = viewCenterWorld(toView, bounds);
-  const centerX = lerp(fromCenter.x, toCenter.x, t);
-  const centerY = lerp(fromCenter.y, toCenter.y, t);
-  return { scale, x: bounds.width / 2 - centerX * scale, y: bounds.height / 2 - centerY * scale };
-}
-
-// The camera link between the two scenes of a zoom transition: the child camera is the
-// parent camera divided by `growth`, positioned so the child's content center sits exactly
-// where the node's center is on screen. The two functions are inverses of each other.
-export function childViewLinkedTo(parentView: View, link: CameraLink): View {
-  const scale = parentView.scale / link.growth;
-  const nodeCenterScreen = {
-    x: link.nodeCenter.x * parentView.scale + parentView.x,
-    y: link.nodeCenter.y * parentView.scale + parentView.y,
-  };
-  return {
-    scale,
-    x: nodeCenterScreen.x - link.contentCenter.x * scale,
-    y: nodeCenterScreen.y - link.contentCenter.y * scale,
-  };
-}
-
-export function parentViewLinkedTo(childView: View, link: CameraLink): View {
-  const scale = childView.scale * link.growth;
-  const contentCenterScreen = {
-    x: link.contentCenter.x * childView.scale + childView.x,
-    y: link.contentCenter.y * childView.scale + childView.y,
-  };
-  return {
-    scale,
-    x: contentCenterScreen.x - link.nodeCenter.x * scale,
-    y: contentCenterScreen.y - link.nodeCenter.y * scale,
-  };
-}
-
-function contentBoundsOf(model: FlowModel): Rect {
-  const rects = [
-    ...model.nodes.map((node) => model.display?.rects.get(node) ?? node.pos),
-    ...model.ghosts.map((ghost) => ghost.pos),
-  ].filter((rect): rect is Rect => rect != null);
-  if (rects.length === 0) return { x: 0, y: 0, w: 400, h: 300 };
-  const minX = Math.min(...rects.map((rect) => rect.x));
-  const minY = Math.min(...rects.map((rect) => rect.y));
-  const maxX = Math.max(...rects.map((rect) => rect.x + rect.w));
-  const maxY = Math.max(...rects.map((rect) => rect.y + rect.h));
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 

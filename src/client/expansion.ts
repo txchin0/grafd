@@ -30,12 +30,31 @@ export interface FrameTransform {
   ty: number;
 }
 
+export function transformPoint(point: Point, transform: FrameTransform): Point {
+  return { x: point.x * transform.scale + transform.tx, y: point.y * transform.scale + transform.ty };
+}
+
 export function transformRect(rect: Rect, transform: FrameTransform): Rect {
   return {
     x: rect.x * transform.scale + transform.tx,
     y: rect.y * transform.scale + transform.ty,
     w: rect.w * transform.scale,
     h: rect.h * transform.scale,
+  };
+}
+
+export interface InlineDiveAnchor {
+  frame: Rect;
+  transform: FrameTransform;
+}
+
+export function inlineDiveAnchor(model: FlowModel, node: FlowNode): InlineDiveAnchor | null {
+  const expansion = model.display?.expansions.get(node);
+  if (!expansion) return null;
+  const warpedFrame = model.display!.rects.get(node);
+  return {
+    frame: { ...(warpedFrame ?? expansion.frame) },
+    transform: { ...expansion.transform },
   };
 }
 

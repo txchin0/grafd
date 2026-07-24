@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  cameraLinkFromInlineTransform,
+  cameraLinkFromRect,
   childViewLinkedTo,
   parentViewLinkedTo,
   interpolateView,
   type CameraLink,
   type View,
-} from '../src/client/canvas-view.js';
+} from '../src/client/camera-transition.js';
 
 const BOUNDS = { width: 1280, height: 800 };
 
@@ -44,6 +46,30 @@ describe('camera link', () => {
 
     const child: View = { x: -300, y: 90, scale: 0.25 };
     expectViewsClose(childViewLinkedTo(parentViewLinkedTo(child, LINK), LINK), child);
+  });
+
+  it('cameraLinkFromRect scales content to fill the node rect', () => {
+    const nodeRect = { x: 100, y: 80, w: 200, h: 80 };
+    const contentBounds = { x: 0, y: 0, w: 800, h: 600 };
+    const link = cameraLinkFromRect(contentBounds, nodeRect);
+    expect(link.growth).toBeCloseTo(7.5, 8);
+    expect(link.nodeCenter).toEqual({ x: 200, y: 120 });
+    expect(link.contentCenter).toEqual({ x: 400, y: 300 });
+  });
+
+  it('inline-anchored link reproduces the on-screen frame transform', () => {
+    const inlineTransform = { scale: 0.3, tx: 220, ty: 130 };
+    const contentCenter = { x: 900, y: 600 };
+    const heldView: View = { x: 40, y: -20, scale: 1.5 };
+
+    const link = cameraLinkFromInlineTransform(contentCenter, inlineTransform);
+
+    const composed: View = {
+      scale: heldView.scale * inlineTransform.scale,
+      x: heldView.scale * inlineTransform.tx + heldView.x,
+      y: heldView.scale * inlineTransform.ty + heldView.y,
+    };
+    expectViewsClose(childViewLinkedTo(heldView, link), composed);
   });
 });
 
