@@ -272,6 +272,11 @@ export class ExpansionLayer {
     this.onNeedsRender();
   }
 
+  discardToggle(nodeId: string): void {
+    this.entries.delete(nodeId);
+    this.subModels.delete(nodeId);
+  }
+
   invalidateSubModels(): void {
     this.subModels.clear();
   }

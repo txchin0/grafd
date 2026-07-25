@@ -319,3 +319,34 @@ Host
     expect(expansion.transform.ty).toBeCloseTo(7, 5);
   });
 });
+
+describe('discardToggle', () => {
+  function layerWithSpy() {
+    const onNeedsRender = vi.fn();
+    const readExternalFile = vi.fn(async () => null);
+    return { layer: new ExpansionLayer({ onNeedsRender, readExternalFile }), onNeedsRender };
+  }
+
+  it('removes an open expansion entry and cached sub-model immediately', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(`graph: Sub
+  Inner
+    pos: 100, 100, 200, 88
+
+Host
+  id: host-1
+  pos: 200, 150, 200, 88
+  expand: Sub
+`);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+    layer.toggle(host);
+    layer.layout(model, performance.now());
+    expect(layer.isOpen(host.id!)).toBe(true);
+    layer.discardToggle(host.id!);
+    expect(layer.isOpen(host.id!)).toBe(false);
+    layer.layout(model, performance.now());
+    expect(model.display!.expansions.size).toBe(0);
+  });
+});

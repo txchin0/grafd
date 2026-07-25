@@ -626,9 +626,15 @@ function convertSelectionToSubgraph(): void {
     const identity = FlowDoc.expandIdentityForNode(owner.doc, owner.path, node);
     if (identity) retargets.push({ identity, name: node.name });
   }
+  for (const node of nodes) {
+    if (node.id) expansions.discardToggle(node.id);
+  }
   let host: FlowNode | null = null;
   applyToDoc(owner, () => {
     host = FlowDoc.extractSubgraph(items, nodes, owner.doc).host;
+    for (const { identity, name } of retargets) {
+      FlowDoc.retargetInnerRefs([{ doc: owner.doc, path: owner.path }], identity, name, host.name);
+    }
   }, { commit: 'now' });
   for (const { identity, name } of retargets) {
     retargetInnersAcrossWorkspace(identity, name, host!.name, owner.doc);

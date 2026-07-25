@@ -656,6 +656,42 @@ B
     expect(host.name).toBe('Subgraph 2');
   });
 
+  it('retargets same-file innerTarget and innerSource after extraction', () => {
+    const doc = docFrom(`Validate
+  -> Process Payment {Charge Card}
+
+Process Payment
+  expand: Payment Steps
+  {Charge Card} -> Notify Admin
+
+Notify Admin
+
+graph: Payment Steps
+  Charge Card
+    ${PLACED(100, 100)}
+  Capture Funds
+    ${PLACED(400, 100)}
+`);
+    const charge = allNodes(doc).find((node) => node.name === 'Charge Card')!;
+    const capture = allNodes(doc).find((node) => node.name === 'Capture Funds')!;
+    const retargets = [charge, capture].map((node) => ({
+      identity: expandIdentityForNode(doc, null, node)!,
+      name: node.name,
+    }));
+    const { host } = extractSubgraph(scopeItems(doc, 'Payment Steps'), [charge, capture], doc);
+    for (const { identity, name } of retargets) {
+      retargetInnerRefs([{ doc, path: null }], identity, name, host.name);
+    }
+    expect(allNodes(doc).find((node) => node.name === 'Validate')!.edges[0]).toMatchObject({
+      target: 'Process Payment',
+      innerTarget: host.name,
+    });
+    expect(allNodes(doc).find((node) => node.name === 'Process Payment')!.edges[0]).toMatchObject({
+      target: 'Notify Admin',
+      innerSource: host.name,
+    });
+  });
+
   it('retargets {Extracted} refs elsewhere to the host for graph-block and external-path identities', () => {
     const parent = docFrom(`Validate
   -> Process Payment {InnerA}
