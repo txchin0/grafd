@@ -124,6 +124,7 @@ const elements = {
   fileList: elementById<HTMLUListElement>('file-list'),
   newFileButton: elementById<HTMLButtonElement>('new-file-button'),
   newFileInput: elementById<HTMLInputElement>('new-file-input'),
+  newFileError: elementById<HTMLParagraphElement>('new-file-error'),
   breadcrumb: elementById<HTMLElement>('breadcrumb'),
   emptyState: elementById<HTMLDivElement>('empty-state'),
   emptyStateHint: elementById<HTMLParagraphElement>('empty-state-hint'),
@@ -1370,7 +1371,8 @@ function wireViewControls(): void {
 // embedded browser hosts, which made the button appear dead. A folder prefix (e.g. "auth/")
 // seeds "New flow here" so the file lands inside the right-clicked folder.
 function showNewFileInput(prefill?: string): void {
-  const value = prefill ?? `untitled-${state.files.length + 1}.flow`;
+  const value = prefill ?? nextUntitledFlowName();
+  clearNewFileError();
   elements.newFileButton.classList.add('hidden');
   elements.newFileInput.classList.remove('hidden');
   elements.newFileInput.value = value;
@@ -1383,34 +1385,80 @@ function wireNewFileForm(): void {
   const hideInput = () => {
     elements.newFileInput.classList.add('hidden');
     elements.newFileButton.classList.remove('hidden');
+    clearNewFileError();
   };
   elements.newFileButton.addEventListener('click', () => showNewFileInput());
   elements.newFileInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
-      createFlowFile(elements.newFileInput.value);
-      hideInput();
+      if (createFlowFile(elements.newFileInput.value)) hideInput();
     } else if (event.key === 'Escape') {
       hideInput();
+    } else {
+      clearNewFileError();
     }
     event.stopPropagation();
   });
-  elements.newFileInput.addEventListener('blur', hideInput);
+  // A rejected name keeps the input open and focused, so blur must not hide it.
+  elements.newFileInput.addEventListener('blur', () => {
+    if (!hasNewFileError()) hideInput();
+  });
 }
 
-function createFlowFile(rawName: string): void {
-  let name = rawName.trim().replace(/\\/g, '/');
-  if (!name) return;
-  if (!name.endsWith('.flow')) name += '.flow';
+function normalizeFlowPath(rawName: string): string {
+  const name = rawName.trim().replace(/\\/g, '/');
+  if (!name) return '';
+  return name.endsWith('.flow') ? name : `${name}.flow`;
+}
+
+// File systems Graf writes to are often case-insensitive, so a name differing only in
+// case would still clobber the existing file.
+function findExistingFile(name: string): string | undefined {
+  const lowered = name.toLowerCase();
+  return state.files.find((file) => file.toLowerCase() === lowered);
+}
+
+function nextUntitledFlowName(): string {
+  for (let index = state.files.length + 1; ; index += 1) {
+    const candidate = `untitled-${index}.flow`;
+    if (!findExistingFile(candidate)) return candidate;
+  }
+}
+
+function hasNewFileError(): boolean {
+  return !elements.newFileError.classList.contains('hidden');
+}
+
+function clearNewFileError(): void {
+  elements.newFileError.classList.add('hidden');
+  elements.newFileError.textContent = '';
+  elements.newFileInput.classList.remove('invalid');
+}
+
+function showNewFileError(message: string): void {
+  elements.newFileError.textContent = message;
+  elements.newFileError.classList.remove('hidden');
+  elements.newFileInput.classList.add('invalid');
+  elements.newFileInput.focus();
+  elements.newFileInput.select();
+}
+
+function createFlowFile(rawName: string): boolean {
+  const name = normalizeFlowPath(rawName);
+  if (!name) return false;
+  const existing = findExistingFile(name);
+  if (existing) {
+    showNewFileError(`${existing} already exists — pick another name.`);
+    return false;
+  }
   const graphName = name.split('/').pop()!.replace(/\.flow$/, '');
   const text = `---\nname: ${graphName}\n---\n`;
   sendWrite(name, text);
-  if (!state.files.includes(name)) {
-    state.files.push(name);
-    state.files.sort();
-  }
+  state.files.push(name);
+  state.files.sort();
   if (!manifest.entrypoint) manifest.entrypoint = name;
   navigation.trail.length = 0;
   openFile(name, { presetText: text });
+  return true;
 }
 
 function wireHelp(): void {

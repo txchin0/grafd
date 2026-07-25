@@ -170,6 +170,14 @@ html, body {
   outline: none;
 }
 
+#new-file-input.invalid { border-color: var(--danger); }
+
+#new-file-error {
+  margin: 0 8px 8px;
+  color: var(--danger);
+  font-size: var(--text-caption);
+}
+
 #workspace-bar {
   display: flex;
   flex-direction: column;
