@@ -97,8 +97,15 @@ const state: AppState = {
 
 const navigation = { trail: [] as TrailEntry[], inProgress: false };
 
-const undoStack: string[] = [];
-const redoStack: string[] = [];
+// Undo history spans every document reachable from the open file, not just the open file
+// itself: an edit inside an expanded frame lands in that frame's (possibly external) .flow
+// document, so each history entry snapshots the text of every document an action can touch.
+type WorkspaceSnapshot = { path: string; text: string }[];
+const undoStack: WorkspaceSnapshot[] = [];
+const redoStack: WorkspaceSnapshot[] = [];
+// Last text committed to each loaded external (frame) document. The open document's own
+// baseline is `state.text`; these are the baselines for everything an edit could reach.
+const externalCommittedTexts = new Map<string, string>();
 let commitTimer: ReturnType<typeof setTimeout> | undefined;
 
 let workspace: Workspace | null = null;
@@ -175,32 +182,61 @@ function commitNow(): void {
   FlowDoc.ensureLayoutEverywhere(state.doc);
   const newText = serializeFlow(state.doc);
   if (newText === state.text) return;
-  undoStack.push(state.text);
-  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
-  redoStack.length = 0;
+  pushHistory(workspaceSnapshot());
   state.text = newText;
   sendWrite(state.path, newText);
 }
 
-function applyHistoryText(text: string): void {
-  state.text = text;
-  state.doc = parseFlow(text);
-  FlowDoc.assignMissingIds(state.doc);
-  if (state.scope && !FlowDoc.graphBlockNames(state.doc).includes(state.scope)) state.scope = null;
+// Baseline text of every currently-tracked document (the open file plus loaded frames).
+function workspaceSnapshot(): WorkspaceSnapshot {
+  const snapshot: WorkspaceSnapshot = [];
+  if (state.path) snapshot.push({ path: state.path, text: state.text });
+  for (const [path, text] of externalCommittedTexts) snapshot.push({ path, text });
+  return snapshot;
+}
+
+function pushHistory(snapshot: WorkspaceSnapshot): void {
+  undoStack.push(snapshot);
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  redoStack.length = 0;
+}
+
+// Restore each document in a snapshot that differs from its current baseline: the open file
+// through the same parse/refresh path as a normal load, external frames through the
+// expansion cache. Both re-write to disk so other tools see the reverted state.
+function restoreSnapshot(snapshot: WorkspaceSnapshot): void {
+  for (const { path, text } of snapshot) {
+    if (path === state.path) {
+      if (text === state.text) continue;
+      state.text = text;
+      state.doc = parseFlow(text);
+      FlowDoc.assignMissingIds(state.doc);
+      expansions.adoptDocument(path, state.doc);
+      if (state.scope && !FlowDoc.graphBlockNames(state.doc).includes(state.scope)) state.scope = null;
+      sendWrite(path, text);
+    } else {
+      if (externalCommittedTexts.get(path) === text) continue;
+      externalCommittedTexts.set(path, text);
+      expansions.adoptExternalText(path, text);
+      sendWrite(path, text);
+    }
+  }
+  expansions.invalidateSubModels();
   refresh();
-  sendWrite(state.path!, text);
 }
 
 function undo(): void {
+  flushPendingCommits();
   if (undoStack.length === 0) return;
-  redoStack.push(state.text);
-  applyHistoryText(undoStack.pop()!);
+  redoStack.push(workspaceSnapshot());
+  restoreSnapshot(undoStack.pop()!);
 }
 
 function redo(): void {
+  flushPendingCommits();
   if (redoStack.length === 0) return;
-  undoStack.push(state.text);
-  applyHistoryText(redoStack.pop()!);
+  undoStack.push(workspaceSnapshot());
+  restoreSnapshot(redoStack.pop()!);
 }
 
 const workspaceDelegate: WorkspaceDelegate = {
@@ -223,6 +259,7 @@ const workspaceDelegate: WorkspaceDelegate = {
     if (path === state.path) {
       if (text !== state.text) adoptExternalText(text);
     } else if (expansions.watchesPath(path)) {
+      externalCommittedTexts.set(path, text);
       expansions.adoptExternalText(path, text);
     }
   },
@@ -289,6 +326,7 @@ async function openFile(
   state.scope = null;
   undoStack.length = 0;
   redoStack.length = 0;
+  externalCommittedTexts.clear();
   editors.closeAll();
   view.clearSelection();
   elements.emptyState.classList.add('hidden');
@@ -841,13 +879,22 @@ function commitExternalNow(doc: FlowDocument, path: string): void {
   clearTimeout(pendingExternalCommits.get(path)?.timer);
   pendingExternalCommits.delete(path);
   FlowDoc.ensureLayoutEverywhere(doc);
-  sendWrite(path, serializeFlow(doc));
+  const newText = serializeFlow(doc);
+  if (newText === externalCommittedTexts.get(path)) return;
+  pushHistory(workspaceSnapshot());
+  externalCommittedTexts.set(path, newText);
+  sendWrite(path, newText);
 }
 
 function applyToDoc(owner: DocumentOwner, mutation: () => void, { commit = 'debounce' }: { commit?: CommitTiming } = {}): void {
   if (owner.doc === state.doc) {
     mutate(mutation, { commit });
     return;
+  }
+  // Record the frame document's pre-edit text once, so the first edit to it can be undone
+  // even though it was loaded lazily by the expansion layer rather than opened.
+  if (!externalCommittedTexts.has(owner.path)) {
+    externalCommittedTexts.set(owner.path, serializeFlow(owner.doc));
   }
   mutation();
   expansions.invalidateSubModels();
@@ -1398,6 +1445,7 @@ function resetSessionState(): void {
   navigation.trail.length = 0;
   undoStack.length = 0;
   redoStack.length = 0;
+  externalCommittedTexts.clear();
   clearTimeout(commitTimer);
   for (const pending of pendingExternalCommits.values()) clearTimeout(pending.timer);
   pendingExternalCommits.clear();
