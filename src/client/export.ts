@@ -5,6 +5,7 @@
 
 import { MANIFEST_FILE_NAME, serializeManifest, type WorkspaceManifest } from '../shared/manifest.js';
 import { createZipArchive, type ZipEntry } from './zip.js';
+import { downloadBlob, safeFileStem } from './download.js';
 
 export const SAVE_GUIDE_FILE_NAME = 'SAVE-GUIDE.md';
 
@@ -25,7 +26,7 @@ export async function exportWorkspaceAsZip(source: ExportSource): Promise<void> 
   entries.push({ path: SAVE_GUIDE_FILE_NAME, text: await fetchSaveGuide() });
 
   const archive = createZipArchive(entries);
-  triggerDownload(archive, archiveName(source.workspaceLabel));
+  downloadBlob(new Blob([archive as BlobPart], { type: 'application/zip' }), archiveName(source.workspaceLabel));
 }
 
 async function fetchSaveGuide(): Promise<string> {
@@ -35,16 +36,5 @@ async function fetchSaveGuide(): Promise<string> {
 }
 
 function archiveName(workspaceLabel: string): string {
-  const safeLabel = workspaceLabel.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '');
-  return `${safeLabel || 'graf-workspace'}.flow.zip`;
-}
-
-function triggerDownload(archive: Uint8Array, fileName: string): void {
-  const blob = new Blob([archive as BlobPart], { type: 'application/zip' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName;
-  anchor.click();
-  URL.revokeObjectURL(url);
+  return `${safeFileStem(workspaceLabel) || 'graf-workspace'}.flow.zip`;
 }

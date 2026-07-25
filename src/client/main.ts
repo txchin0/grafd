@@ -64,6 +64,8 @@ import { ServerWorkspace, serverIsAvailable } from './workspace-server.js';
 import { BrowserWorkspace } from './workspace-browser.js';
 import { FolderWorkspace, folderPickingIsSupported, pickWorkspaceFolder } from './workspace-folder.js';
 import { exportWorkspaceAsZip } from './export.js';
+import { safeFileStem } from './download.js';
+import { createScreenshotDialog } from './screenshot.js';
 import { buildFileTree, type TreeFile, type TreeFolder } from './file-tree.js';
 
 interface AppState {
@@ -133,6 +135,7 @@ const elements = {
   openFolderButton: elementById<HTMLButtonElement>('open-folder-button'),
   closeFolderButton: elementById<HTMLButtonElement>('close-folder-button'),
   exportButton: elementById<HTMLButtonElement>('export-button'),
+  exportImageButton: elementById<HTMLButtonElement>('export-image-button'),
   helpToggle: elementById<HTMLButtonElement>('help-toggle'),
   helpOverlay: elementById<HTMLDivElement>('help-overlay'),
   toolSelectButton: elementById<HTMLButtonElement>('tool-select-button'),
@@ -1314,6 +1317,14 @@ const editors: Editors = createEditors({
 
 const contextMenu = createContextMenu();
 
+function screenshotFileStem(): string {
+  const baseName = (state.path ?? 'graf').split('/').pop()!.replace(/\.flow$/, '');
+  const scoped = state.scope ? `${baseName}-${state.scope}` : baseName;
+  return safeFileStem(scoped) || 'graf';
+}
+
+const screenshot = createScreenshotDialog({ view, fileStem: screenshotFileStem });
+
 function openCanvasContextMenu(target: ContextTarget, screenPoint: Point): void {
   if (!state.doc) return;
   const items =
@@ -1541,10 +1552,21 @@ function isTypingTarget(element: EventTarget | null): element is HTMLInputElemen
 
 function wireKeyboard(): void {
   window.addEventListener('keydown', (event) => {
+    const modalOpen = screenshot.isOpen();
+
     if (isTypingTarget(event.target)) {
-      if (event.key === 'Escape') event.target.blur();
+      if (event.key === 'Escape') {
+        if (modalOpen) screenshot.close();
+        else event.target.blur();
+      }
       return;
     }
+
+    if (modalOpen) {
+      if (event.key === 'Escape') screenshot.close();
+      return;
+    }
+
     const ctrl = event.ctrlKey || event.metaKey;
     if (ctrl && event.key.toLowerCase() === 'z') {
       event.preventDefault();
@@ -1709,6 +1731,9 @@ function wireWorkspaceControls(): void {
     void switchWorkspace(createDefaultWorkspace());
   });
   elements.exportButton.addEventListener('click', () => void exportWorkspace());
+  elements.exportImageButton.addEventListener('click', () => {
+    if (state.doc) screenshot.open();
+  });
 }
 
 async function boot(): Promise<void> {

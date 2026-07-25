@@ -34,7 +34,7 @@ import {
   type FrameTransform,
 } from './expansion.js';
 
-export type { CameraLink, View } from './camera-transition.js';
+export type { CameraLink, View, ViewportSize } from './camera-transition.js';
 export { childViewLinkedTo, interpolateView, parentViewLinkedTo } from './camera-transition.js';
 
 export type Tool = 'select' | 'node';
@@ -157,6 +157,7 @@ const COLORS = {
 
 const MIN_SCALE = 0.12;
 const MAX_SCALE = 3;
+const MAX_FIT_SCALE = 1.4;
 const ZOOM_STEP_FACTOR = 1.1;
 const MIN_NODE_WIDTH = 120;
 const MIN_NODE_HEIGHT = 64;
@@ -170,6 +171,46 @@ const BADGE_SLOT_SPACING = 24;
 const BADGE_SYMBOLS: Record<BadgeKind, string> = { open: '⤢', inline: '⊞', collapse: '⊟' };
 const DIVE_IN_MS = 650;
 const BACK_OUT_MS = 560;
+export const SNAPSHOT_PADDING = 48;
+
+// A surface the scene can be drawn onto. The live canvas is one; an export renders the same
+// scene onto a detached canvas at an arbitrary resolution by swapping the target for the
+// duration of one synchronous draw.
+export interface RenderTarget {
+  ctx: CanvasRenderingContext2D;
+  rough: ReturnType<typeof rough.canvas>;
+  viewport: ViewportSize;
+  pixelRatio: number;
+}
+
+export interface SnapshotRequest {
+  canvas: HTMLCanvasElement;
+  viewport: ViewportSize;
+  pixelRatio: number;
+  background: string | null;
+  grid: boolean;
+}
+
+function targetForCanvas(canvas: HTMLCanvasElement, viewport: ViewportSize, pixelRatio: number): RenderTarget {
+  return { ctx: canvas.getContext('2d')!, rough: rough.canvas(canvas), viewport, pixelRatio };
+}
+
+function centerBoundsAt(bounds: Rect, viewport: ViewportSize, scale: number): View {
+  return {
+    scale,
+    x: (viewport.width - bounds.w * scale) / 2 - bounds.x * scale,
+    y: (viewport.height - bounds.h * scale) / 2 - bounds.y * scale,
+  };
+}
+
+export function fitScaleFor(bounds: Rect, viewport: ViewportSize): number {
+  return Math.min(viewport.width / bounds.w, viewport.height / bounds.h);
+}
+
+// Camera that frames `bounds` centered inside `viewport`, with no scale limits applied.
+export function fitViewInto(bounds: Rect, viewport: ViewportSize): View {
+  return centerBoundsAt(bounds, viewport, fitScaleFor(bounds, viewport));
+}
 
 function snap(value: number): number {
   return Math.round(value / SNAP) * SNAP;
@@ -243,9 +284,28 @@ function distanceToSegment(point: Point, a: Point, b: Point): number {
 
 export class CanvasView {
   private readonly canvas: HTMLCanvasElement;
-  private readonly ctx: CanvasRenderingContext2D;
-  private readonly rough: ReturnType<typeof rough.canvas>;
+  private readonly liveTarget: RenderTarget;
   private readonly actions: CanvasActions;
+
+  // Every draw method reaches its surface through `target`, so a snapshot can retarget the
+  // whole scene by swapping this field for the duration of one synchronous render.
+  private target: RenderTarget;
+
+  private get ctx(): CanvasRenderingContext2D {
+    return this.target.ctx;
+  }
+
+  private get rough(): ReturnType<typeof rough.canvas> {
+    return this.target.rough;
+  }
+
+  private get devicePixelRatio(): number {
+    return this.target.pixelRatio;
+  }
+
+  private get viewport(): ViewportSize {
+    return this.target.viewport;
+  }
 
   view: View = { x: 0, y: 0, scale: 1 };
   model: FlowModel;
@@ -259,13 +319,12 @@ export class CanvasView {
   private tool: Tool = 'select';
   private sceneTransition: SceneTransition | null = null;
   private spaceDown = false;
-  private devicePixelRatio = window.devicePixelRatio || 1;
   private renderQueued = false;
 
   constructor(canvasElement: HTMLCanvasElement, actions: CanvasActions) {
     this.canvas = canvasElement;
-    this.ctx = canvasElement.getContext('2d')!;
-    this.rough = rough.canvas(canvasElement);
+    this.liveTarget = targetForCanvas(canvasElement, { width: 0, height: 0 }, window.devicePixelRatio || 1);
+    this.target = this.liveTarget;
     this.actions = actions;
     this.model = {
       nodes: [],
@@ -319,9 +378,11 @@ export class CanvasView {
 
   private syncCanvasSize(): void {
     const bounds = this.canvas.getBoundingClientRect();
-    this.devicePixelRatio = window.devicePixelRatio || 1;
-    this.canvas.width = Math.max(1, Math.round(bounds.width * this.devicePixelRatio));
-    this.canvas.height = Math.max(1, Math.round(bounds.height * this.devicePixelRatio));
+    const pixelRatio = window.devicePixelRatio || 1;
+    this.liveTarget.viewport = { width: bounds.width, height: bounds.height };
+    this.liveTarget.pixelRatio = pixelRatio;
+    this.canvas.width = Math.max(1, Math.round(bounds.width * pixelRatio));
+    this.canvas.height = Math.max(1, Math.round(bounds.height * pixelRatio));
     this.requestRender();
   }
 
@@ -428,13 +489,13 @@ export class CanvasView {
   }
 
   setZoom(scale: number): void {
-    const bounds = this.canvas.getBoundingClientRect();
-    this.zoomAt({ x: bounds.width / 2, y: bounds.height / 2 }, scale / this.view.scale);
+    const { width, height } = this.viewport;
+    this.zoomAt({ x: width / 2, y: height / 2 }, scale / this.view.scale);
   }
 
   stepZoom(direction: 1 | -1, screenPoint?: Point): void {
-    const bounds = this.canvas.getBoundingClientRect();
-    const anchor = screenPoint ?? { x: bounds.width / 2, y: bounds.height / 2 };
+    const { width, height } = this.viewport;
+    const anchor = screenPoint ?? { x: width / 2, y: height / 2 };
     this.zoomAt(anchor, direction > 0 ? ZOOM_STEP_FACTOR : 1 / ZOOM_STEP_FACTOR);
   }
 
@@ -444,34 +505,73 @@ export class CanvasView {
     this.actions.viewChanged?.();
   }
 
-  private computeFitView(padding = 80): View {
+  private paddedContentBounds(padding: number): Rect | null {
+    const rects = [
+      ...this.model.nodes.map((node) => this.rect(node)),
+      ...this.model.ghosts.map((ghost) => ghost.pos),
+    ].filter((rect): rect is Rect => rect != null);
+    if (rects.length === 0) return null;
+    const minX = Math.min(...rects.map((rect) => rect.x)) - padding;
+    const minY = Math.min(...rects.map((rect) => rect.y)) - padding;
+    const maxX = Math.max(...rects.map((rect) => rect.x + rect.w)) + padding;
+    const maxY = Math.max(...rects.map((rect) => rect.y + rect.h)) + padding;
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }
+
+  private computeFitView(padding = 80, viewport: ViewportSize = this.viewport): View {
     // Fit runs synchronously right after a model/scope swap, before the render loop's
     // next layout pass; without eager display layout, unfolded frames measure at their
     // collapsed pos and expanded subgraphs get clipped — the same reason a manual
     // zoom-to-fit a moment later frames them correctly.
     this.layoutDisplayGeometry(this.model);
-    const rects = [
-      ...this.model.nodes.map((node) => this.rect(node)),
-      ...this.model.ghosts.map((ghost) => ghost.pos),
-    ].filter((rect): rect is Rect => rect != null);
-    const bounds = this.canvas.getBoundingClientRect();
-    if (rects.length === 0) {
-      return { x: bounds.width / 2 - 200, y: bounds.height / 2 - 150, scale: 1 };
+    const bounds = this.paddedContentBounds(padding);
+    if (!bounds) {
+      return { x: viewport.width / 2 - 200, y: viewport.height / 2 - 150, scale: 1 };
     }
-    const minX = Math.min(...rects.map((rect) => rect.x)) - padding;
-    const minY = Math.min(...rects.map((rect) => rect.y)) - padding;
-    const maxX = Math.max(...rects.map((rect) => rect.x + rect.w)) + padding;
-    const maxY = Math.max(...rects.map((rect) => rect.y + rect.h)) + padding;
-    const scale = Math.max(MIN_SCALE, Math.min(bounds.width / (maxX - minX), bounds.height / (maxY - minY), 1.4));
-    return {
-      scale,
-      x: (bounds.width - (maxX - minX) * scale) / 2 - minX * scale,
-      y: (bounds.height - (maxY - minY) * scale) / 2 - minY * scale,
-    };
+    const scale = Math.max(MIN_SCALE, Math.min(fitScaleFor(bounds, viewport), MAX_FIT_SCALE));
+    return centerBoundsAt(bounds, viewport, scale);
   }
 
   fitToContent(padding = 80): void {
     this.setViewNow(this.computeFitView(padding));
+  }
+
+  // World-space rect a snapshot frames: the same padded content bounds zoom-to-fit uses,
+  // with display geometry laid out first so unfolded frames measure at their frame rect.
+  snapshotBounds(padding = SNAPSHOT_PADDING): Rect {
+    this.layoutDisplayGeometry(this.model);
+    return this.paddedContentBounds(padding) ?? { x: 0, y: 0, w: 400, h: 300 };
+  }
+
+  // Draws the scene onto a caller-owned canvas at an arbitrary resolution, framed exactly
+  // like zoom-to-fit. Editing chrome (selection, ports, gesture overlay) is deliberately
+  // omitted, and the draw is synchronous rather than rAF-queued so the caller can read the
+  // pixels back the moment this returns.
+  renderSnapshot({ canvas, viewport, pixelRatio, background, grid }: SnapshotRequest): void {
+    const previousTarget = this.target;
+    this.target = targetForCanvas(canvas, viewport, pixelRatio);
+    try {
+      const { ctx } = this;
+      const view = this.computeFitView(SNAPSHOT_PADDING, viewport);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (background) {
+        ctx.fillStyle = background;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      } else {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      if (grid) {
+        ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+        this.drawGrid(view);
+      }
+      ctx.setTransform(
+        pixelRatio * view.scale, 0, 0, pixelRatio * view.scale,
+        pixelRatio * view.x, pixelRatio * view.y,
+      );
+      this.drawScene(this.model);
+    } finally {
+      this.target = previousTarget;
+    }
   }
 
   // --- Seamless subgraph navigation ------------------------------------------------------
@@ -523,7 +623,7 @@ export class CanvasView {
       this.setViewNow(mode === 'in' ? this.computeFitView() : targetView!);
       return Promise.resolve();
     }
-    const bounds = this.canvas.getBoundingClientRect();
+    const bounds = this.viewport;
     const childModel = mode === 'in' ? this.model : held.model;
     this.layoutDisplayGeometry(childModel);
     const link = inlineAnchor
@@ -1195,7 +1295,7 @@ export class CanvasView {
     const { ctx } = this;
     const spacing = 32 * view.scale;
     if (spacing < 9) return;
-    const bounds = this.canvas.getBoundingClientRect();
+    const bounds = this.viewport;
     ctx.fillStyle = COLORS.grid;
     const offsetX = ((view.x % spacing) + spacing) % spacing;
     const offsetY = ((view.y % spacing) + spacing) % spacing;

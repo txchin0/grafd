@@ -24,6 +24,7 @@
         <button id="open-folder-button" type="button" class="hidden" title="Open a local folder of .flow files">📂 Open folder…</button>
         <button id="close-folder-button" type="button" class="hidden" title="Leave this folder and return to the default workspace">↩ Leave folder</button>
         <button id="export-button" type="button" title="Download this workspace as a .zip (flows, manifest, and the agent guide)">⇩ Export .zip</button>
+        <button id="export-image-button" type="button" title="Export this flow as a PNG image">🖼 Export image</button>
       </div>
       <footer id="sidebar-footer">
         <button id="help-toggle" type="button">? Shortcuts</button>
@@ -119,6 +120,30 @@
         </div>
       </div>
     </main>
+
+    <div id="screenshot-modal" class="hidden">
+      <div id="screenshot-panel">
+        <h2>Export image</h2>
+        <div id="screenshot-preview-frame">
+          <canvas id="screenshot-preview"></canvas>
+        </div>
+        <div id="screenshot-resolution">
+          <div id="screenshot-scale-presets"></div>
+          <label>width <input id="screenshot-width" type="number" min="1" step="1" /></label>
+          <span id="screenshot-dimensions"></span>
+        </div>
+        <div id="screenshot-options">
+          <label class="check-row"><input type="checkbox" id="screenshot-background" checked /> background</label>
+          <label class="check-row"><input type="checkbox" id="screenshot-grid" /> grid</label>
+        </div>
+        <p id="screenshot-error" class="hidden"></p>
+        <div class="editor-actions">
+          <span class="spacer"></span>
+          <button id="screenshot-close" type="button" class="quiet-button">Close</button>
+          <button id="screenshot-download" type="button" class="quiet-button">Download PNG</button>
+        </div>
+      </div>
+    </div>
   </div>
   <script type="importmap">
     { "imports": { "roughjs": "./vendor/roughjs/rough.esm.js" } }

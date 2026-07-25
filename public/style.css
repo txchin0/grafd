@@ -464,6 +464,76 @@ html, body {
 #help-overlay td:first-child { color: var(--accent); white-space: nowrap; }
 #help-overlay td:last-child { color: var(--muted); }
 
+#screenshot-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#screenshot-panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+#screenshot-panel h2 {
+  margin: 0;
+  font-size: var(--text-heading);
+  font-weight: var(--weight-semibold);
+}
+
+#screenshot-preview-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 560px;
+  height: 340px;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+
+#screenshot-resolution,
+#screenshot-options {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--text-body);
+  color: var(--muted);
+}
+
+#screenshot-scale-presets { display: flex; gap: 4px; }
+#screenshot-scale-presets .quiet-button.active { color: var(--accent); border-color: var(--accent); }
+#screenshot-scale-presets .quiet-button:disabled { color: var(--panel-border); border-color: var(--panel-border); cursor: default; }
+
+#screenshot-resolution label { display: flex; align-items: center; gap: 6px; }
+
+#screenshot-width {
+  width: 84px;
+  background: #171a1f;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  color: var(--ink);
+  font-family: var(--ui-font);
+  font-size: var(--text-body);
+  padding: 4px 6px;
+  outline: none;
+}
+
+#screenshot-width:focus { border-color: var(--accent); }
+#screenshot-dimensions { margin-left: auto; }
+#screenshot-error { margin: 0; font-size: var(--text-body); color: var(--danger); }
+#screenshot-download:disabled { color: var(--panel-border); border-color: var(--panel-border); cursor: default; }
+
 .context-menu {
   position: fixed;
   min-width: 168px;
