@@ -504,13 +504,7 @@ function uniqueFlowFilePath(path: string): string {
 async function duplicateFlowFile(path: string): Promise<void> {
   const text = path === state.path ? state.text : await workspace?.readFile(path);
   if (text == null) return;
-  const newPath = uniqueFlowFilePath(path);
-  sendWrite(newPath, text);
-  if (!state.files.includes(newPath)) {
-    state.files.push(newPath);
-    state.files.sort();
-  }
-  renderFileList();
+  registerCreatedFlowFile(uniqueFlowFilePath(path), text);
 }
 
 // Deleting takes two clicks on the same button — an inline confirmation, because dialog
@@ -643,6 +637,77 @@ function convertSelectionToSubgraph(): void {
   expansions.collapseFrom(host!);
   view.setSelection([host!]);
   setTimeout(() => editors.openNodeEditor(host!, { focusTitle: true }), TOGGLE_DURATION_MS);
+}
+
+// A node whose `expand` is a local `graph:` reference can be promoted to its own .flow file;
+// one already pointing at a file (the `[Label](path)` form) has nothing to extract.
+function extractableBlockNameFor(node: FlowNode): string | null {
+  const expandValue = getProp(node, 'expand');
+  if (!expandValue || parseExpandLink(expandValue)) return null;
+  return expandValue;
+}
+
+function kebabFileName(blockName: string): string {
+  const slug = blockName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return `${slug || 'subgraph'}.flow`;
+}
+
+// The extracted file lands beside the file that owns the node, so `expand` links inside the
+// moved nodes keep resolving and the parent's new link is a bare file name.
+function extractedFlowPathFor(ownerPath: string, graphName: string): string {
+  const folder = folderOf(ownerPath);
+  const name = kebabFileName(graphName);
+  let candidate = folder ? `${folder}/${name}` : name;
+  let counter = 2;
+  while (findExistingFile(candidate)) {
+    const numbered = name.replace(/\.flow$/, `-${counter}.flow`);
+    candidate = folder ? `${folder}/${numbered}` : numbered;
+    counter += 1;
+  }
+  return candidate;
+}
+
+function registerCreatedFlowFile(path: string, text: string): void {
+  sendWrite(path, text);
+  if (!state.files.includes(path)) {
+    state.files.push(path);
+    state.files.sort();
+  }
+  renderFileList();
+}
+
+// The extracted file is that node's definition (spec §3.1), so it takes the node's name —
+// the one the canvas shows. A block shared by several nodes has no single owner to name it
+// after and keeps the block's own name.
+function graphNameForExtraction(node: FlowNode, blockName: string, doc: FlowDocument): string {
+  const hosts = FlowDoc.allNodes(doc).filter((other) => getProp(other, 'expand') === blockName);
+  return hosts.length === 1 ? node.name : blockName;
+}
+
+function extractSubgraphIntoFile(node: FlowNode): void {
+  const blockName = extractableBlockNameFor(node);
+  if (!blockName) return;
+  editors.closeAll();
+  const owner = ownerOf(node);
+  const graphName = graphNameForExtraction(node, blockName, owner.doc);
+  const path = extractedFlowPathFor(owner.path, graphName);
+  const linkPath = path.split('/').pop()!;
+
+  let extracted: FlowDocument | null = null;
+  applyToDoc(owner, () => {
+    extracted = FlowDoc.extractGraphBlockToDocument(owner.doc, blockName, linkPath, graphName);
+  }, { commit: 'now' });
+  if (!extracted) return;
+
+  FlowDoc.ensureLayoutEverywhere(extracted);
+  const text = serializeFlow(extracted);
+  registerCreatedFlowFile(path, text);
+  externalCommittedTexts.set(path, text);
+  expansions.adoptExternalText(path, text);
+  if (owner.path === state.path && state.scope && !FlowDoc.graphBlockNames(state.doc!).includes(state.scope)) {
+    state.scope = null;
+  }
+  refresh();
 }
 
 function deleteNodesAction(nodes: FlowNode[]): void {
@@ -1278,6 +1343,9 @@ function nodeMenuItems(node: FlowNode): MenuItem[] {
       label: expansions.isOpen(node.id) ? 'Collapse ⊟' : 'Expand ⊞',
       onSelect: () => toggleInlineExpansion(node),
     });
+    if (selectionCount <= 1 && extractableBlockNameFor(node)) {
+      items.push({ label: 'Extract into file', onSelect: () => extractSubgraphIntoFile(node) });
+    }
   }
   if (selectionCount <= 1) {
     const isEntrypoint = getProp(node, 'entrypoint') === 'true';

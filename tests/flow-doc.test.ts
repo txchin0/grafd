@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { getProp, parseFlow, parseEdgeExpression, serializeFlow, type GraphItem } from '../src/shared/flow-format.js';
+import {
+  getPreambleField,
+  getProp,
+  parseFlow,
+  parseEdgeExpression,
+  serializeFlow,
+  type GraphItem,
+} from '../src/shared/flow-format.js';
 import {
   addEdge,
   addNode,
@@ -13,6 +20,7 @@ import {
   duplicateNodes,
   expandEntryNames,
   expandIdentityForNode,
+  extractGraphBlockToDocument,
   extractSubgraph,
   findNodeById,
   graphBlockNames,
@@ -775,5 +783,163 @@ Outside2
     expect(text).toContain('-> Subgraph {InnerA} : "in"');
     expect(text).toContain('{InnerA} -> Outside2 : "out"');
     expect(parseFlow(text).items.some((item) => item.kind === 'graph' && item.name === 'Subgraph')).toBe(true);
+  });
+});
+
+describe('extractGraphBlockToDocument', () => {
+  const HOSTED = `Host
+  ${PLACED(0, 0)}
+  expand: Payment Steps
+
+graph: Payment Steps
+  Charge Card
+    ${PLACED(0, 0)}
+    -> Send Receipt
+  Send Receipt
+    ${PLACED(300, 0)}
+`;
+
+  it('moves the block into a named document and relinks the host', () => {
+    const doc = docFrom(HOSTED);
+    const extracted = extractGraphBlockToDocument(doc, 'Payment Steps', 'payment-steps.flow');
+    expect(getPreambleField(extracted, 'name')).toBe('Payment Steps');
+    expect(nodesIn(extracted.items).map((node) => node.name)).toEqual(['Charge Card', 'Send Receipt']);
+    expect(graphBlockNames(doc)).toEqual([]);
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+    expect(getProp(host, 'expand')).toBe('[Payment Steps](payment-steps.flow)');
+  });
+
+  it('relinks every node that referenced the block', () => {
+    const doc = docFrom(`One
+  ${PLACED(0, 0)}
+  expand: Shared
+
+Two
+  ${PLACED(300, 0)}
+  expand: Shared
+
+graph: Shared
+  Step
+    ${PLACED(0, 0)}
+`);
+    extractGraphBlockToDocument(doc, 'Shared', 'shared.flow');
+    for (const node of allNodes(doc)) {
+      if (node.name === 'Step') continue;
+      expect(getProp(node, 'expand')).toBe('[Shared](shared.flow)');
+    }
+  });
+
+  it('moves a sole host description into the new preamble', () => {
+    const doc = docFrom(`Host
+  ${PLACED(0, 0)}
+  expand: Payment Steps
+  description: "charges the customer"
+
+graph: Payment Steps
+  Charge Card
+    ${PLACED(0, 0)}
+`);
+    const extracted = extractGraphBlockToDocument(doc, 'Payment Steps', 'payment-steps.flow');
+    expect(getPreambleField(extracted, 'description')).toBe('"charges the customer"');
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+    expect(getProp(host, 'description')).toBeNull();
+  });
+
+  it('leaves per-host descriptions alone when the block has several hosts', () => {
+    const doc = docFrom(`One
+  ${PLACED(0, 0)}
+  expand: Shared
+  description: "first"
+
+Two
+  ${PLACED(300, 0)}
+  expand: Shared
+  description: "second"
+
+graph: Shared
+  Step
+    ${PLACED(0, 0)}
+`);
+    const extracted = extractGraphBlockToDocument(doc, 'Shared', 'shared.flow');
+    expect(getPreambleField(extracted, 'description')).toBeNull();
+    expect(getProp(allNodes(doc).find((node) => node.name === 'One')!, 'description')).toBe('"first"');
+  });
+
+  it('keeps an inner refinement pointing into the relinked host', () => {
+    const doc = docFrom(`Outside
+  ${PLACED(0, 0)}
+  -> Host {Charge Card} : "in"
+
+${HOSTED}`);
+    extractGraphBlockToDocument(doc, 'Payment Steps', 'payment-steps.flow');
+    const outside = allNodes(doc).find((node) => node.name === 'Outside')!;
+    expect(outside.edges[0]).toMatchObject({ target: 'Host', innerTarget: 'Charge Card' });
+  });
+
+  it('takes a nested block that only the extracted content reaches', () => {
+    const doc = docFrom(`Host
+  ${PLACED(0, 0)}
+  expand: Outer
+
+graph: Outer
+  Step
+    ${PLACED(0, 0)}
+    expand: Nested
+
+graph: Nested
+  Deep
+    ${PLACED(0, 0)}
+`);
+    const extracted = extractGraphBlockToDocument(doc, 'Outer', 'outer.flow');
+    expect(graphBlockNames(doc)).toEqual([]);
+    expect(graphBlockNames(extracted)).toEqual(['Nested']);
+    expect(nodesIn(extracted.items).map((node) => node.name)).toEqual(['Step']);
+  });
+
+  it('copies a nested block the parent still reaches, with fresh ids', () => {
+    const doc = docFrom(`Host
+  ${PLACED(0, 0)}
+  expand: Outer
+
+Sibling
+  ${PLACED(300, 0)}
+  expand: Nested
+
+graph: Outer
+  Step
+    ${PLACED(0, 0)}
+    expand: Nested
+
+graph: Nested
+  Deep
+    ${PLACED(0, 0)}
+`);
+    const extracted = extractGraphBlockToDocument(doc, 'Outer', 'outer.flow');
+    expect(graphBlockNames(doc)).toEqual(['Nested']);
+    expect(graphBlockNames(extracted)).toEqual(['Nested']);
+    const originalId = allNodes(doc).find((node) => node.name === 'Deep')!.id;
+    const copyId = allNodes(extracted).find((node) => node.name === 'Deep')!.id;
+    expect(copyId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(copyId).not.toBe(originalId);
+  });
+
+  it('names the document and link label from the caller, not the block', () => {
+    const doc = docFrom(HOSTED);
+    const extracted = extractGraphBlockToDocument(doc, 'Payment Steps', 'host.flow', 'Host');
+    expect(getPreambleField(extracted, 'name')).toBe('Host');
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+    expect(getProp(host, 'expand')).toBe('[Host](host.flow)');
+  });
+
+  it('creates a preamble-only document when the block does not exist yet', () => {
+    const doc = docFrom(`Host
+  ${PLACED(0, 0)}
+  expand: Planned
+`);
+    const extracted = extractGraphBlockToDocument(doc, 'Planned', 'planned.flow');
+    expect(extracted.items).toEqual([]);
+    expect(serializeFlow(extracted)).toBe('---\nname: Planned\n---\n');
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+    expect(getProp(host, 'expand')).toBe('[Planned](planned.flow)');
   });
 });

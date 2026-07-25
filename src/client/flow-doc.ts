@@ -14,6 +14,7 @@ import {
   resolveLinkPath,
   sanitizeName,
   uniqueName,
+  writeDescriptionForNode,
   type EdgeSpec,
   type FlowDocument,
   type FlowItem,
@@ -458,6 +459,101 @@ function copyEntrypointToHost(nodesToExtract: FlowNode[], host: FlowNode): void 
   if (nodesToExtract.some((node) => getProp(node, 'entrypoint') === 'true')) {
     setProp(host, 'entrypoint', 'true');
   }
+}
+
+// Promotes a local `graph:` block into a standalone document: the block's items become the
+// new document's body, `graphName` its preamble `name` and link label, and every node that
+// expanded the block is relinked to `linkPath` (spec §6.2's external form). Local blocks
+// reachable only from inside the extracted content travel with it; one still reachable from
+// the parent's own top-level nodes is copied instead, with fresh ids so identities stay
+// unique across files. `linkPath` is written verbatim, so callers must make it relative to
+// the parent file.
+export function extractGraphBlockToDocument(
+  doc: FlowDocument,
+  blockName: string,
+  linkPath: string,
+  graphName = blockName,
+): FlowDocument {
+  const extracted: FlowDocument = {
+    leading: [],
+    preamble: { fields: [{ key: 'name', value: graphName }] },
+    items: [],
+  };
+  moveDescriptionOfSoleHost(doc, blockName, extracted);
+  relinkExpandsToPath(doc, blockName, linkPath, graphName);
+
+  const movedNames = reachableBlockNames(doc, [blockName]);
+  const retainedNames = reachableBlockNames(doc, localExpandTargets(nodesIn(doc.items)));
+
+  for (const name of movedNames) {
+    const block = graphBlockByName(doc, name);
+    const items = block ? takeBlockItems(doc, block, retainedNames.has(name)) : [];
+    if (name === blockName) extracted.items.push(...items);
+    else extracted.items.push({ kind: 'graph', name, items });
+  }
+  return extracted;
+}
+
+function graphBlockByName(doc: FlowDocument, name: string): GraphItem | null {
+  return doc.items.find((item): item is GraphItem => item.kind === 'graph' && item.name === name) ?? null;
+}
+
+function localExpandTargets(nodes: FlowNode[]): string[] {
+  const targets: string[] = [];
+  for (const node of nodes) {
+    const expandValue = getProp(node, 'expand');
+    if (expandValue && !parseExpandLink(expandValue)) targets.push(expandValue);
+  }
+  return targets;
+}
+
+/** Blocks reachable from `startNames` by following local `expand` references. */
+function reachableBlockNames(doc: FlowDocument, startNames: string[]): Set<string> {
+  const reached = new Set<string>();
+  const pending = [...startNames];
+  while (pending.length > 0) {
+    const name = pending.shift()!;
+    if (reached.has(name)) continue;
+    reached.add(name);
+    const block = graphBlockByName(doc, name);
+    if (block) pending.push(...localExpandTargets(nodesIn(block.items)));
+  }
+  return reached;
+}
+
+// Items for the extracted document: copies (with fresh ids) when the block must also stay
+// behind, otherwise the originals, with the block spliced out of the parent.
+function takeBlockItems(doc: FlowDocument, block: GraphItem, keepInParent: boolean): FlowItem[] {
+  if (keepInParent) return block.items.map(copyItemWithNewIds);
+  doc.items.splice(doc.items.indexOf(block), 1);
+  return block.items;
+}
+
+function copyItemWithNewIds(item: FlowItem): FlowItem {
+  const copy = structuredClone(item);
+  if (copy.kind === 'node') copy.node.id = newUuid();
+  return copy;
+}
+
+function relinkExpandsToPath(
+  doc: FlowDocument,
+  blockName: string,
+  linkPath: string,
+  graphName: string,
+): void {
+  for (const node of allNodes(doc)) {
+    if (getProp(node, 'expand') === blockName) setProp(node, 'expand', `[${graphName}](${linkPath})`);
+  }
+}
+
+// With the block in its own file its preamble becomes the node definition, so a lone host's
+// description belongs there. Several hosts each keep their own — there is no single owner.
+function moveDescriptionOfSoleHost(doc: FlowDocument, blockName: string, extracted: FlowDocument): void {
+  const hosts = allNodes(doc).filter((node) => getProp(node, 'expand') === blockName);
+  if (hosts.length !== 1) return;
+  const description = getProp(hosts[0], 'description');
+  if (description == null) return;
+  writeDescriptionForNode(hosts[0], extracted, description);
 }
 
 export function deleteNodes(
