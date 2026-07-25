@@ -39,6 +39,7 @@ import {
   type EdgeSpec,
   type ExpandLink,
   type FlowDocument,
+  type FlowItem,
   type FlowNode,
   type GraphItem,
   type Rect,
@@ -47,7 +48,7 @@ import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
 import { CanvasView, type ContextTarget, type Tool, type View } from './canvas-view.js';
 import { createContextMenu, type MenuItem } from './context-menu.js';
-import { ExpansionLayer, inlineDiveAnchor, type DocumentOwner } from './expansion.js';
+import { ExpansionLayer, inlineDiveAnchor, TOGGLE_DURATION_MS, type DocumentOwner } from './expansion.js';
 import { createEditors, type Editors } from './editors.js';
 import {
   MANIFEST_FILE_NAME,
@@ -599,6 +600,42 @@ function createNodeAndEdit(rect: Rect, requestedName = 'Untitled'): FlowNode {
   view.select(node!);
   editors.openNodeEditor(node!, { focusTitle: true });
   return node!;
+}
+
+function extractionTargetForSelection(): { owner: DocumentOwner; items: FlowItem[]; nodes: FlowNode[] } | null {
+  const nodes = [...view.selection];
+  if (nodes.length <= 1) return null;
+  const owner = ownerOf(nodes[0]);
+  const items = FlowDoc.containingItems(owner.doc, nodes[0]);
+  for (const node of nodes) {
+    const nodeOwner = ownerOf(node);
+    if (nodeOwner.doc !== owner.doc || nodeOwner.path !== owner.path) return null;
+    if (FlowDoc.containingItems(owner.doc, node) !== items) return null;
+    if (!FlowDoc.nodesIn(items).includes(node)) return null;
+  }
+  return { owner, items, nodes };
+}
+
+function convertSelectionToSubgraph(): void {
+  const target = extractionTargetForSelection();
+  if (!target) return;
+  editors.closeAll();
+  const { owner, items, nodes } = target;
+  const retargets: { identity: FlowDoc.ExpandIdentity; name: string }[] = [];
+  for (const node of nodes) {
+    const identity = FlowDoc.expandIdentityForNode(owner.doc, owner.path, node);
+    if (identity) retargets.push({ identity, name: node.name });
+  }
+  let host: FlowNode | null = null;
+  applyToDoc(owner, () => {
+    host = FlowDoc.extractSubgraph(items, nodes, owner.doc).host;
+  }, { commit: 'now' });
+  for (const { identity, name } of retargets) {
+    retargetInnersAcrossWorkspace(identity, name, host!.name, owner.doc);
+  }
+  expansions.collapseFrom(host!);
+  view.setSelection([host!]);
+  setTimeout(() => editors.openNodeEditor(host!, { focusTitle: true }), TOGGLE_DURATION_MS);
 }
 
 function deleteNodesAction(nodes: FlowNode[]): void {
@@ -1219,6 +1256,13 @@ function nodeMenuItems(node: FlowNode): MenuItem[] {
   const items: MenuItem[] = [];
   if (selectionCount <= 1) items.push({ label: 'Edit', onSelect: () => editors.openNodeEditor(node) });
   items.push({ label: selectionCount > 1 ? `Duplicate ${selectionCount} nodes` : 'Duplicate', onSelect: duplicateSelection });
+  if (selectionCount > 1) {
+    items.push({
+      label: `Convert ${selectionCount} nodes to subgraph`,
+      disabled: extractionTargetForSelection() === null,
+      onSelect: convertSelectionToSubgraph,
+    });
+  }
   items.push({ label: 'Copy', onSelect: copySelection });
   items.push({ label: 'Cut', onSelect: cutSelection });
   if (getProp(node, 'expand')) {

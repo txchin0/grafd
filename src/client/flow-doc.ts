@@ -83,6 +83,7 @@ export interface FlowModel {
 }
 
 export const DEFAULT_NODE_SIZE = { w: 200, h: 88 };
+const EXTRACTED_SUBGRAPH_NAME = 'Subgraph';
 const LAYOUT_COLUMN_WIDTH = 280;
 const LAYOUT_ROW_HEIGHT = 140;
 const LAYOUT_ORIGIN = { x: 80, y: 80 };
@@ -325,13 +326,147 @@ export function duplicateNodes(items: FlowItem[], sources: FlowNode[], offset: P
   return copies;
 }
 
+export function boundsOfNodes(nodes: FlowNode[]): Rect {
+  const placed = nodes.filter((node) => node.pos);
+  if (placed.length === 0) {
+    return { x: 0, y: 0, w: DEFAULT_NODE_SIZE.w, h: DEFAULT_NODE_SIZE.h };
+  }
+  const minX = Math.min(...placed.map((node) => node.pos!.x));
+  const minY = Math.min(...placed.map((node) => node.pos!.y));
+  const maxX = Math.max(...placed.map((node) => node.pos!.x + node.pos!.w));
+  const maxY = Math.max(...placed.map((node) => node.pos!.y + node.pos!.h));
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+export function extractSubgraph(
+  items: FlowItem[],
+  nodesToExtract: FlowNode[],
+  doc: FlowDocument,
+  requestedName?: string,
+): { host: FlowNode; blockName: string; innerNodes: FlowNode[] } {
+  const extractedSet = new Set(nodesToExtract);
+  const extractedNames = new Set(nodesToExtract.map((node) => node.name));
+  const blockName = nameForExtraction(doc, items, requestedName);
+  const block: GraphItem = { kind: 'graph', name: blockName, items: [] };
+  doc.items.push(block);
+
+  const firstRemovedIndex = moveNodeItemsInto(items, extractedSet, block);
+  const host = emptyNode(blockName);
+  host.id = newUuid();
+  host.pos = hostRectFor(nodesToExtract);
+  setProp(host, 'expand', blockName);
+  items.splice(firstRemovedIndex, 0, { kind: 'node', node: host });
+
+  redirectEdgesIntoHost(items, host, extractedSet, extractedNames);
+  liftEscapingEdgesOntoHost(nodesToExtract, host, extractedNames);
+  copyEntrypointToHost(nodesToExtract, host);
+
+  return { host, blockName, innerNodes: nodesToExtract };
+}
+
+function nameForExtraction(doc: FlowDocument, items: FlowItem[], requestedName?: string): string {
+  const takenNames = new Set([
+    ...graphBlockNames(doc),
+    ...nodesIn(items).map((node) => node.name),
+  ]);
+  return uniqueName(takenNames, (requestedName ? sanitizeName(requestedName) : '') || EXTRACTED_SUBGRAPH_NAME);
+}
+
+function hostRectFor(nodes: FlowNode[]): Rect {
+  const bbox = boundsOfNodes(nodes);
+  const centerX = bbox.x + bbox.w / 2;
+  const centerY = bbox.y + bbox.h / 2;
+  return {
+    x: Math.round(centerX - DEFAULT_NODE_SIZE.w / 2),
+    y: Math.round(centerY - DEFAULT_NODE_SIZE.h / 2),
+    w: DEFAULT_NODE_SIZE.w,
+    h: DEFAULT_NODE_SIZE.h,
+  };
+}
+
+function moveNodeItemsInto(
+  items: FlowItem[],
+  extractedSet: Set<FlowNode>,
+  block: GraphItem,
+): number {
+  let firstRemovedIndex = -1;
+  const toMove: FlowItem[] = [];
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.kind === 'node' && extractedSet.has(item.node)) {
+      if (firstRemovedIndex === -1 || index < firstRemovedIndex) firstRemovedIndex = index;
+      toMove.unshift(item);
+      items.splice(index, 1);
+    }
+  }
+  for (const item of toMove) block.items.push(item);
+  return firstRemovedIndex;
+}
+
+function entersExtraction(edge: EdgeSpec, extractedNames: Set<string>): boolean {
+  return extractedNames.has(edge.target);
+}
+
+function escapesExtraction(edge: EdgeSpec, extractedNames: Set<string>): boolean {
+  return !extractedNames.has(edge.target);
+}
+
+function redirectEdgesIntoHost(
+  items: FlowItem[],
+  host: FlowNode,
+  extractedSet: Set<FlowNode>,
+  extractedNames: Set<string>,
+): void {
+  for (const node of nodesIn(items)) {
+    if (extractedSet.has(node)) continue;
+    for (const edge of node.edges) {
+      if (!entersExtraction(edge, extractedNames)) continue;
+      const innerName = edge.target;
+      edge.target = host.name;
+      edge.innerTarget = innerName;
+    }
+    const onError = getProp(node, 'on_error');
+    if (!onError?.startsWith('->')) continue;
+    const parsed = parseEdgeExpression(onError);
+    if (!extractedNames.has(parsed.target)) continue;
+    parsed.target = host.name;
+    parsed.innerTarget = null;
+    setProp(node, 'on_error', serializeEdgeExpression(parsed));
+  }
+}
+
+function liftEscapingEdgesOntoHost(
+  nodesToExtract: FlowNode[],
+  host: FlowNode,
+  extractedNames: Set<string>,
+): void {
+  for (const node of nodesToExtract) {
+    const edgesToLift: EdgeSpec[] = [];
+    node.edges = node.edges.filter((edge) => {
+      if (!escapesExtraction(edge, extractedNames)) return true;
+      edgesToLift.push(edge);
+      return false;
+    });
+    for (const edge of edgesToLift) {
+      edge.innerSource = node.name;
+      host.edges.push(edge);
+    }
+  }
+}
+
+function copyEntrypointToHost(nodesToExtract: FlowNode[], host: FlowNode): void {
+  if (nodesToExtract.some((node) => getProp(node, 'entrypoint') === 'true')) {
+    setProp(host, 'entrypoint', 'true');
+  }
+}
+
 export function deleteNodes(
   items: FlowItem[],
   nodesToDelete: FlowNode[],
   doc: FlowDocument,
   options?: { path?: string | null; relatedDocs?: DocPath[] },
 ): void {
-  clearInnerTargetsForNodes(nodesToDelete, doc, options);
+  retargetInnerRefsForNodes(nodesToDelete, doc, null, options);
 
   const deletedNames = new Set(nodesToDelete.map((node) => node.name));
   const deletedSet = new Set(nodesToDelete);
@@ -534,14 +669,15 @@ export function hasInnerRefs(
   return false;
 }
 
-function clearInnerTargetsForNodes(
-  nodesToDelete: FlowNode[],
+export function retargetInnerRefsForNodes(
+  nodes: FlowNode[],
   doc: FlowDocument,
+  newName: string | null,
   options?: { path?: string | null; relatedDocs?: DocPath[] },
 ): void {
   const docs = docsForRetarget(doc, options);
   const byIdentity = new Map<string, { identity: ExpandIdentity; names: Set<string> }>();
-  for (const node of nodesToDelete) {
+  for (const node of nodes) {
     const identity = expandIdentityForNode(doc, options?.path ?? null, node);
     if (!identity) continue;
     const key = expandIdentityKey(identity);
@@ -554,7 +690,7 @@ function clearInnerTargetsForNodes(
   }
   for (const { identity, names } of byIdentity.values()) {
     for (const name of names) {
-      retargetInnerRefs(docs, identity, name, null);
+      retargetInnerRefs(docs, identity, name, newName);
     }
   }
 }

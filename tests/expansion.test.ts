@@ -10,6 +10,7 @@ import {
   ripplePush,
   separationVector,
   subModelBounds,
+  TOGGLE_DURATION_MS,
   transformRect,
 } from '../src/client/expansion.js';
 
@@ -238,5 +239,83 @@ describe('ExpansionLayer', () => {
     const stale = layer.locusOf(inner)!;
     expect(stale.host).toBe(host);
     expect(stale.model).not.toBe(childModel);
+  });
+});
+
+describe('collapseFrom', () => {
+  function layerWithSpy() {
+    const onNeedsRender = vi.fn();
+    const readExternalFile = vi.fn(async () => null);
+    return { layer: new ExpansionLayer({ onNeedsRender, readExternalFile }), onNeedsRender };
+  }
+
+  it('starts fully open and animating closed on the first layout pass', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(`graph: Sub
+  Inner
+    pos: 100, 100, 200, 88
+
+Host
+  id: host-1
+  pos: 200, 150, 200, 88
+  expand: Sub
+`);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+    layer.collapseFrom(host);
+    const now = performance.now();
+    layer.layout(model, now);
+    layer.collectLoci(model);
+    const expansion = model.display!.expansions.get(host)!;
+    expect(expansion.alpha).toBeCloseTo(1, 5);
+    expect(layer.isOpen(host.id)).toBe(false);
+    expect(layer.openVisibleNodeIds()).toEqual([]);
+    const { animating } = layer.layout(model, now);
+    expect(animating).toBe(true);
+  });
+
+  it('garbage-collects the entry after the toggle duration', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(`graph: Sub
+  Inner
+    pos: 100, 100, 200, 88
+
+Host
+  id: host-1
+  pos: 200, 150, 200, 88
+  expand: Sub
+`);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+    layer.collapseFrom(host);
+    const start = performance.now();
+    layer.layout(model, start + TOGGLE_DURATION_MS);
+    expect(model.display!.expansions.size).toBe(0);
+  });
+
+  it('maps frame-1 content at scale 1 with a 7px vertical offset for clusters within MAX_INNER_SIZE', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(`graph: Sub
+  A
+    pos: 100, 100, 200, 88
+  B
+    pos: 300, 100, 200, 88
+
+Host
+  id: host-1
+  pos: 200, 100, 200, 88
+  expand: Sub
+`);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+    layer.collapseFrom(host);
+    layer.layout(model, performance.now());
+    const expansion = model.display!.expansions.get(host)!;
+    expect(expansion.transform.scale).toBeCloseTo(1, 5);
+    expect(expansion.transform.tx).toBeCloseTo(0, 5);
+    expect(expansion.transform.ty).toBeCloseTo(7, 5);
   });
 });

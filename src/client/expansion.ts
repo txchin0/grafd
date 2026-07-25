@@ -96,7 +96,7 @@ interface ExternalDocEntry {
   loadPromise?: Promise<FlowDocument | null>;
 }
 
-const TOGGLE_DURATION_MS = 380;
+export const TOGGLE_DURATION_MS = 380;
 const FRAME_HEADER_HEIGHT = 30;
 const FRAME_PADDING = 16;
 const CONTENT_MARGIN = 36;
@@ -263,6 +263,12 @@ export class ExpansionLayer {
     } else {
       this.entries.set(node.id, { targetOpen: true, startTime: now, startProgress: 0 });
     }
+    this.onNeedsRender();
+  }
+
+  collapseFrom(node: FlowNode): void {
+    if (!node.id) return;
+    this.entries.set(node.id, { targetOpen: false, startTime: performance.now(), startProgress: 1 });
     this.onNeedsRender();
   }
 

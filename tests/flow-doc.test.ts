@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getProp, parseFlow, parseEdgeExpression, type GraphItem } from '../src/shared/flow-format.js';
+import { getProp, parseFlow, parseEdgeExpression, serializeFlow, type GraphItem } from '../src/shared/flow-format.js';
 import {
   addEdge,
   addNode,
@@ -7,15 +7,19 @@ import {
   assignMissingIds,
   buildModel,
   containingItems,
+  DEFAULT_NODE_SIZE,
   deleteEdge,
   deleteNodes,
   duplicateNodes,
   expandEntryNames,
+  expandIdentityForNode,
+  extractSubgraph,
   findNodeById,
   graphBlockNames,
   nodesIn,
   renameGraphBlock,
   renameNode,
+  retargetInnerRefs,
   scopeItems,
   setEdgeLabel,
   type ModelEdge,
@@ -457,5 +461,283 @@ B
     const [a, b] = allNodes(doc);
     expect(a.id).toBe('keep-me');
     expect(b.id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe('extractSubgraph', () => {
+  it('moves nodes into a new top-level graph block and sets expand on the host', () => {
+    const doc = docFrom(`Outside
+  ${PLACED(0, 0)}
+  -> InnerA
+
+InnerA
+  ${PLACED(300, 0)}
+
+InnerB
+  ${PLACED(300, 150)}
+`);
+    const [innerA, innerB] = allNodes(doc).filter((node) => node.name.startsWith('Inner'));
+    const { host, blockName } = extractSubgraph(doc.items, [innerA, innerB], doc);
+    expect(blockName).toBe('Subgraph');
+    expect(getProp(host, 'expand')).toBe('Subgraph');
+    const block = doc.items.find((item): item is GraphItem => item.kind === 'graph' && item.name === 'Subgraph');
+    expect(block).toBeDefined();
+    expect(nodesIn(block!.items).map((node) => node.name)).toEqual(['InnerA', 'InnerB']);
+    expect(nodesIn(doc.items).map((node) => node.name)).toEqual(['Outside', 'Subgraph']);
+  });
+
+  it('centres the host on the extracted bbox and splices it at the first-extracted index', () => {
+    const doc = docFrom(`Keep
+  ${PLACED(0, 0)}
+
+InnerA
+  ${PLACED(100, 100)}
+
+InnerB
+  ${PLACED(400, 200)}
+
+Tail
+  ${PLACED(700, 0)}
+`);
+    const innerA = allNodes(doc).find((node) => node.name === 'InnerA')!;
+    const innerB = allNodes(doc).find((node) => node.name === 'InnerB')!;
+    const { host } = extractSubgraph(doc.items, [innerA, innerB], doc);
+    expect(host.pos).toEqual({ x: 250, y: 150, w: DEFAULT_NODE_SIZE.w, h: DEFAULT_NODE_SIZE.h });
+    const names = doc.items.filter((item) => item.kind === 'node').map((item) => item.node.name);
+    expect(names).toEqual(['Keep', 'Subgraph', 'Tail']);
+  });
+
+  it('leaves internal edges untouched, including one carrying {Inner}', () => {
+    const doc = docFrom(`InnerA
+  ${PLACED(0, 0)}
+  -> InnerB
+  -> InnerB {InnerB}
+
+InnerB
+  ${PLACED(300, 0)}
+`);
+    const [innerA, innerB] = allNodes(doc);
+    extractSubgraph(doc.items, [innerA, innerB], doc);
+    const block = doc.items.find((item): item is GraphItem => item.kind === 'graph')!;
+    const movedA = nodesIn(block.items).find((node) => node.name === 'InnerA')!;
+    expect(movedA.edges).toEqual([
+      { target: 'InnerB', innerSource: null, innerTarget: null, label: null, data: null },
+      { target: 'InnerB', innerSource: null, innerTarget: 'InnerB', label: null, data: null },
+    ]);
+    expect(innerB.edges).toEqual([]);
+  });
+
+  it('rewires incoming flow edges to -> Host {Inner} preserving label and data', () => {
+    const doc = docFrom(`Outside
+  ${PLACED(0, 0)}
+  -> InnerA : "in"
+    data:
+      amount: number
+
+InnerA
+  ${PLACED(300, 0)}
+`);
+    const innerA = allNodes(doc).find((node) => node.name === 'InnerA')!;
+    const { host } = extractSubgraph(doc.items, [innerA], doc);
+    const outside = allNodes(doc).find((node) => node.name === 'Outside')!;
+    expect(outside.edges[0]).toMatchObject({
+      target: host.name,
+      innerTarget: 'InnerA',
+      label: 'in',
+      data: [{ key: 'amount', type: 'number' }],
+    });
+    expect(serializeFlow(doc)).toContain('-> Subgraph {InnerA} : "in"');
+  });
+
+  it('replaces an existing innerTarget on incoming edges (single-level truncation)', () => {
+    const doc = docFrom(`Outside
+  ${PLACED(0, 0)}
+  -> InnerA {Deep}
+
+InnerA
+  ${PLACED(300, 0)}
+`);
+    const innerA = allNodes(doc).find((node) => node.name === 'InnerA')!;
+    const { host } = extractSubgraph(doc.items, [innerA], doc);
+    const outside = allNodes(doc).find((node) => node.name === 'Outside')!;
+    expect(outside.edges[0]).toMatchObject({ target: host.name, innerTarget: 'InnerA' });
+  });
+
+  it('lifts outgoing edges onto the host with innerSource, preserving label and data', () => {
+    const doc = docFrom(`InnerA
+  ${PLACED(0, 0)}
+  -> Outside : "out"
+    data:
+      amount: number
+  {Deep} -> Far
+  -> Ghost
+
+InnerB
+  ${PLACED(300, 0)}
+
+Outside
+  ${PLACED(600, 0)}
+
+Far
+  ${PLACED(600, 150)}
+`);
+    const innerA = allNodes(doc).find((node) => node.name === 'InnerA')!;
+    const innerB = allNodes(doc).find((node) => node.name === 'InnerB')!;
+    const { host } = extractSubgraph(doc.items, [innerA, innerB], doc);
+    expect(innerA.edges).toEqual([]);
+    expect(host.edges).toEqual([
+      { target: 'Outside', innerSource: 'InnerA', innerTarget: null, label: 'out', data: [{ key: 'amount', type: 'number' }] },
+      { target: 'Far', innerSource: 'InnerA', innerTarget: null, label: null, data: null },
+      { target: 'Ghost', innerSource: 'InnerA', innerTarget: null, label: null, data: null },
+    ]);
+    expect(serializeFlow(doc)).toContain('{InnerA} -> Outside : "out"');
+  });
+
+  it('retargets incoming on_error to -> Host without braces and leaves escaping on_error intact', () => {
+    const doc = docFrom(`Outside
+  ${PLACED(0, 0)}
+  on_error: -> InnerA : "err"
+
+InnerA
+  ${PLACED(300, 0)}
+  on_error: -> Outside2 : "escape"
+
+Outside2
+  ${PLACED(600, 0)}
+`);
+    const innerA = allNodes(doc).find((node) => node.name === 'InnerA')!;
+    const { host } = extractSubgraph(doc.items, [innerA], doc);
+    const outside = allNodes(doc).find((node) => node.name === 'Outside')!;
+    expect(getProp(outside, 'on_error')).toBe('-> Subgraph : "err"');
+    const block = doc.items.find((item): item is GraphItem => item.kind === 'graph')!;
+    const movedInner = nodesIn(block.items)[0];
+    expect(getProp(movedInner, 'on_error')).toBe('-> Outside2 : "escape"');
+    expect(host.name).toBe('Subgraph');
+  });
+
+  it('copies entrypoint to the host, retains it inside, and preserves expand on extracted nodes', () => {
+    const doc = docFrom(`InnerA
+  ${PLACED(0, 0)}
+  entrypoint: true
+  expand: Other
+
+InnerB
+  ${PLACED(300, 0)}
+
+graph: Other
+  Nested
+`);
+    const [innerA, innerB] = allNodes(doc).filter((node) => node.name.startsWith('Inner'));
+    const { host } = extractSubgraph(doc.items, [innerA, innerB], doc);
+    expect(getProp(host, 'entrypoint')).toBe('true');
+    const block = doc.items.find((item): item is GraphItem => item.kind === 'graph' && item.name === 'Subgraph')!;
+    const movedA = nodesIn(block.items).find((node) => node.name === 'InnerA')!;
+    expect(getProp(movedA, 'entrypoint')).toBe('true');
+    expect(getProp(movedA, 'expand')).toBe('Other');
+  });
+
+  it('picks a unique name against existing graph blocks and node names', () => {
+    const doc = docFrom(`graph: Subgraph
+  Existing
+
+Subgraph
+  ${PLACED(0, 0)}
+
+A
+  ${PLACED(300, 0)}
+
+B
+  ${PLACED(300, 150)}
+`);
+    const a = allNodes(doc).find((node) => node.name === 'A')!;
+    const b = allNodes(doc).find((node) => node.name === 'B')!;
+    const { host, blockName } = extractSubgraph(doc.items, [a, b], doc);
+    expect(blockName).toBe('Subgraph 2');
+    expect(host.name).toBe('Subgraph 2');
+  });
+
+  it('retargets {Extracted} refs elsewhere to the host for graph-block and external-path identities', () => {
+    const parent = docFrom(`Validate
+  -> Process Payment {InnerA}
+
+Process Payment
+  expand: Payment Steps
+
+graph: Payment Steps
+  InnerA
+    ${PLACED(100, 100)}
+  InnerB
+    ${PLACED(400, 100)}
+`);
+    const innerA = allNodes(parent).find((node) => node.name === 'InnerA')!;
+    const innerB = allNodes(parent).find((node) => node.name === 'InnerB')!;
+    const identity = expandIdentityForNode(parent, null, innerA)!;
+    const { host } = extractSubgraph(scopeItems(parent, 'Payment Steps'), [innerA, innerB], parent);
+    retargetInnerRefs([{ doc: parent, path: null }], identity, 'InnerA', host.name);
+    expect(allNodes(parent).find((node) => node.name === 'Validate')!.edges[0]).toMatchObject({
+      target: 'Process Payment',
+      innerTarget: host.name,
+    });
+
+    const cart = docFrom(`Validate
+  -> Process Payment {InnerA}
+
+Process Payment
+  expand: [Payment](payment.flow)
+`);
+    const payment = docFrom(`InnerA
+  ${PLACED(0, 0)}
+
+InnerB
+  ${PLACED(300, 0)}
+`);
+    const payInnerA = allNodes(payment).find((node) => node.name === 'InnerA')!;
+    const payInnerB = allNodes(payment).find((node) => node.name === 'InnerB')!;
+    const extIdentity = expandIdentityForNode(payment, 'payment.flow', payInnerA)!;
+    const { host: payHost } = extractSubgraph(payment.items, [payInnerA, payInnerB], payment);
+    retargetInnerRefs(
+      [
+        { doc: cart, path: 'cart.flow' },
+        { doc: payment, path: 'payment.flow' },
+      ],
+      extIdentity,
+      'InnerA',
+      payHost.name,
+    );
+    expect(allNodes(cart).find((node) => node.name === 'Validate')!.edges[0]).toMatchObject({
+      target: 'Process Payment',
+      innerTarget: payHost.name,
+    });
+  });
+
+  it('builds a model without ghosts and round-trips brace forms through serialize', () => {
+    const doc = docFrom(`Outside
+  ${PLACED(0, 0)}
+  -> InnerA : "in"
+
+InnerA
+  ${PLACED(300, 0)}
+  -> InnerB
+  -> Outside2 : "out"
+
+InnerB
+  ${PLACED(300, 150)}
+
+Outside2
+  ${PLACED(600, 0)}
+`);
+    const innerA = allNodes(doc).find((node) => node.name === 'InnerA')!;
+    const innerB = allNodes(doc).find((node) => node.name === 'InnerB')!;
+    const { host, blockName } = extractSubgraph(doc.items, [innerA, innerB], doc);
+    const innerModel = buildModel(doc, blockName);
+    expect(innerModel.ghosts).toEqual([]);
+    const outerModel = buildModel(doc, null);
+    const incoming = outerModel.edges.find((edge) => edge.spec.label === 'in')!;
+    expect(incoming.spec.target).toBe(host.name);
+    expect(incoming.to).toBe(host);
+    const text = serializeFlow(doc);
+    expect(text).toContain('-> Subgraph {InnerA} : "in"');
+    expect(text).toContain('{InnerA} -> Outside2 : "out"');
+    expect(parseFlow(text).items.some((item) => item.kind === 'graph' && item.name === 'Subgraph')).toBe(true);
   });
 });
