@@ -7,13 +7,17 @@ import chokidar from 'chokidar';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { contentHash, listFlowFiles, resolveWorkspacePath, toPortablePath } from './flow-files.js';
 
-const PORT = 4600;
+const PORT = Number(process.env.PORT ?? 4600);
 const DEFAULT_WORKSPACE = 'flows';
+const COMPILED_OUTPUT_SETTLE_MS = 120;
 // This file runs from dist/server, two levels below the repo root. Static assets stay
 // under the repo; the .flow workspace defaults to flows/ and can be overridden with a
 // path argument (absolute, or relative to the repo root).
 const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const workspaceRoot = path.resolve(repoRoot, process.argv[2] ?? DEFAULT_WORKSPACE);
+const commandLineArguments = process.argv.slice(2);
+const developmentMode = commandLineArguments.includes('--dev');
+const workspaceArgument = commandLineArguments.find((argument) => !argument.startsWith('--'));
+const workspaceRoot = path.resolve(repoRoot, workspaceArgument ?? DEFAULT_WORKSPACE);
 
 const app = express();
 app.use(express.static(path.join(repoRoot, 'public')));
@@ -67,6 +71,9 @@ function broadcast(message: object, { except }: { except?: WebSocket } = {}): vo
 }
 
 socketServer.on('connection', (socket) => {
+  // The client reloads on any reconnect while this is set, which covers the compile that
+  // restarts the server before its own reload broadcast can go out.
+  socket.send(JSON.stringify({ type: 'hello', reloadOnReconnect: developmentMode }));
   socket.on('message', async (raw) => {
     let message: Partial<ClientMessage>;
     try {
@@ -133,6 +140,25 @@ watcher.on('add', async (relativePath) => {
 });
 watcher.on('unlink', broadcastFileList);
 
+// `tsc --watch` rewrites many files per compile, so the reload is deferred until emission
+// has gone quiet rather than fired per file.
+function watchCompiledOutputForReload(): void {
+  const compiledOutputWatcher = chokidar.watch(
+    [path.join(repoRoot, 'dist', 'client'), path.join(repoRoot, 'dist', 'shared')],
+    { ignoreInitial: true },
+  );
+  let pendingReload: NodeJS.Timeout | null = null;
+  const scheduleReload = (): void => {
+    if (pendingReload) clearTimeout(pendingReload);
+    pendingReload = setTimeout(() => broadcast({ type: 'reload' }), COMPILED_OUTPUT_SETTLE_MS);
+  };
+  compiledOutputWatcher.on('add', scheduleReload);
+  compiledOutputWatcher.on('change', scheduleReload);
+}
+
+if (developmentMode) watchCompiledOutputForReload();
+
 httpServer.listen(PORT, () => {
-  console.log(`Graf editor running at http://localhost:${PORT} (watching ${workspaceRoot})`);
+  const mode = developmentMode ? ', live reload on' : '';
+  console.log(`Graf editor running at http://localhost:${PORT} (watching ${workspaceRoot}${mode})`);
 });

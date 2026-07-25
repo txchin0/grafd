@@ -25,6 +25,10 @@ export class ServerWorkspace implements Workspace {
   private delegate: WorkspaceDelegate | null = null;
   private socket: WebSocket | null = null;
   private stopped = false;
+  // Set by the server's greeting when it was started with --dev. A reconnect then means the
+  // server restarted on a recompile, so the page is reloaded to pick up the new modules.
+  private reloadOnReconnect = false;
+  private hasConnectedBefore = false;
   // Messages composed while the socket was down, flushed in order on reconnect. Order
   // matters: a delete followed by a re-create must replay as such.
   private readonly pendingMessages: string[] = [];
@@ -65,6 +69,11 @@ export class ServerWorkspace implements Workspace {
     const socket = new WebSocket(`${protocol}://${location.host}`);
     this.socket = socket;
     socket.addEventListener('open', () => {
+      if (this.reloadOnReconnect && this.hasConnectedBefore) {
+        location.reload();
+        return;
+      }
+      this.hasConnectedBefore = true;
       this.delegate?.connectionChanged(true);
       for (const message of this.pendingMessages) socket.send(message);
       this.pendingMessages.length = 0;
@@ -72,9 +81,13 @@ export class ServerWorkspace implements Workspace {
     socket.addEventListener('message', (event) => {
       const message = JSON.parse(event.data as string) as
         | { type: 'files'; files: string[] }
-        | { type: 'file'; path: string; text: string };
+        | { type: 'file'; path: string; text: string }
+        | { type: 'hello'; reloadOnReconnect: boolean }
+        | { type: 'reload' };
       if (message.type === 'files') this.delegate?.filesChanged(message.files);
       else if (message.type === 'file') this.delegate?.fileChanged(message.path, message.text);
+      else if (message.type === 'hello') this.reloadOnReconnect = message.reloadOnReconnect;
+      else if (message.type === 'reload') location.reload();
     });
     socket.addEventListener('close', () => {
       this.delegate?.connectionChanged(false);
