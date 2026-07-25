@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseFlow } from '../src/shared/flow-format.js';
 import { allNodes, buildModel } from '../src/client/flow-doc.js';
 import {
+  composeTransforms,
   ExpansionLayer,
   pairMobility,
   ripplePush,
@@ -18,6 +19,25 @@ const DASHBOARD_FLOW = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '../flows/dashboard.flow'),
   'utf8',
 );
+
+// Two levels of expansion in one document: Host unfolds `Sub`, whose Middle node unfolds
+// `Deep` — the shape a dive from inside a frame has to navigate.
+const NESTED_FLOW = `graph: Deep
+  Leaf
+    id: leaf-1
+    pos: 0, 0, 200, 88
+
+graph: Sub
+  Middle
+    id: middle-1
+    pos: 100, 100, 200, 88
+    expand: Deep
+
+Host
+  id: host-1
+  pos: 200, 100, 200, 88
+  expand: Sub
+`;
 
 describe('transformRect', () => {
   it('maps a local rect through a frame transform', () => {
@@ -215,6 +235,78 @@ describe('ExpansionLayer', () => {
     expect(topLevel.model).toBe(childModel);
     expect(topLevel.host).toBeNull();
     expect(topLevel.transform).toEqual({ scale: 1, tx: 0, ty: 0 });
+  });
+
+  it('reports the frame hosts a twice-nested node sits inside, outermost first', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(NESTED_FLOW);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    const [host, middle, leaf] = ['Host', 'Middle', 'Leaf'].map(
+      (name) => allNodes(doc).find((node) => node.name === name)!,
+    );
+
+    layer.restoreOpen([host.id!, middle.id!]);
+    layer.layout(model, performance.now());
+    layer.collectLoci(model);
+
+    expect(layer.ancestorHosts(host)).toEqual([]);
+    expect(layer.ancestorHosts(middle)).toEqual([host]);
+    expect(layer.ancestorHosts(leaf)).toEqual([host, middle]);
+  });
+
+  it('composes the dive anchor of a nested frame through its locus', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(NESTED_FLOW);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+    const middle = allNodes(doc).find((node) => node.name === 'Middle')!;
+
+    layer.restoreOpen([host.id!, middle.id!]);
+    layer.layout(model, performance.now());
+    layer.collectLoci(model);
+
+    const hostExpansion = model.display!.expansions.get(host)!;
+    const middleExpansion = hostExpansion.subModel.display!.expansions.get(middle)!;
+    const anchor = layer.diveAnchor(middle)!;
+
+    expect(anchor.transform).toEqual(
+      composeTransforms(hostExpansion.transform, middleExpansion.transform),
+    );
+    expect(anchor.frame).toEqual(
+      transformRect(hostExpansion.subModel.display!.rects.get(middle)!, hostExpansion.transform),
+    );
+  });
+
+  it('leaves a top-level dive anchor untransformed', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(NESTED_FLOW);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+
+    layer.restoreOpen([host.id!]);
+    layer.layout(model, performance.now());
+    layer.collectLoci(model);
+
+    const expansion = model.display!.expansions.get(host)!;
+    const anchor = layer.diveAnchor(host)!;
+    expect(anchor.transform).toEqual(expansion.transform);
+    expect(anchor.frame).toEqual(model.display!.rects.get(host));
+  });
+
+  it('has no dive anchor for a node that is not unfolded', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(NESTED_FLOW);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+
+    layer.layout(model, performance.now());
+    layer.collectLoci(model);
+
+    expect(layer.diveAnchor(host)).toBeNull();
   });
 
   it('leaves embedded loci stale when layout runs without collectLoci on the scoped graph', () => {

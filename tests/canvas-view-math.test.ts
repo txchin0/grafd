@@ -5,9 +5,11 @@ import {
   childViewLinkedTo,
   parentViewLinkedTo,
   interpolateView,
+  transformFromCameraLink,
   type CameraLink,
   type View,
 } from '../src/client/camera-transition.js';
+import { composeTransforms } from '../src/client/expansion.js';
 
 const BOUNDS = { width: 1280, height: 800 };
 
@@ -70,6 +72,75 @@ describe('camera link', () => {
       y: heldView.scale * inlineTransform.ty + heldView.y,
     };
     expectViewsClose(childViewLinkedTo(heldView, link), composed);
+  });
+
+  // Diving into a frame nested inside another frame anchors on the composed transform; the
+  // dive must still start exactly where the subgraph already sits on screen.
+  it('inline-anchored link reproduces a twice-composed frame transform', () => {
+    const outer = { scale: 0.4, tx: 180, ty: 90 };
+    const inner = { scale: 0.5, tx: 60, ty: 25 };
+    const contentCenter = { x: 900, y: 600 };
+    const heldView: View = { x: 40, y: -20, scale: 1.5 };
+
+    const link = cameraLinkFromInlineTransform(contentCenter, composeTransforms(outer, inner));
+
+    const onScreen: View = {
+      scale: heldView.scale * outer.scale * inner.scale,
+      x: heldView.scale * (outer.scale * inner.tx + outer.tx) + heldView.x,
+      y: heldView.scale * (outer.scale * inner.ty + outer.ty) + heldView.y,
+    };
+    expectViewsClose(childViewLinkedTo(heldView, link), onScreen);
+  });
+});
+
+describe('transformFromCameraLink', () => {
+  it('round-trips an inline-anchored link', () => {
+    const transform = { scale: 0.3, tx: 220, ty: 130 };
+    const recovered = transformFromCameraLink(
+      cameraLinkFromInlineTransform({ x: 900, y: 600 }, transform),
+    );
+    expect(recovered.scale).toBeCloseTo(transform.scale, 8);
+    expect(recovered.tx).toBeCloseTo(transform.tx, 8);
+    expect(recovered.ty).toBeCloseTo(transform.ty, 8);
+  });
+
+  it('places a rect-anchored graph centered inside the node it dives from', () => {
+    const contentBounds = { x: 0, y: 0, w: 800, h: 600 };
+    const nodeRect = { x: 100, y: 80, w: 200, h: 80 };
+    const transform = transformFromCameraLink(cameraLinkFromRect(contentBounds, nodeRect));
+
+    const placed = {
+      x: contentBounds.x * transform.scale + transform.tx,
+      y: contentBounds.y * transform.scale + transform.ty,
+      w: contentBounds.w * transform.scale,
+      h: contentBounds.h * transform.scale,
+    };
+    expect(placed.w).toBeLessThanOrEqual(nodeRect.w + 1e-9);
+    expect(placed.h).toBeLessThanOrEqual(nodeRect.h + 1e-9);
+    expect(placed.x + placed.w / 2).toBeCloseTo(nodeRect.x + nodeRect.w / 2, 8);
+    expect(placed.y + placed.h / 2).toBeCloseTo(nodeRect.y + nodeRect.h / 2, 8);
+  });
+
+  // Two crumbs jumped at once compose into the single motion the two steps would have played.
+  it('composes two hops into the placement of the deeper graph in the outer one', () => {
+    const outerNode = { x: 100, y: 80, w: 200, h: 80 };
+    const middleContent = { x: 0, y: 0, w: 800, h: 600 };
+    const middleNode = { x: 300, y: 200, w: 180, h: 90 };
+    const deepContent = { x: -50, y: 0, w: 400, h: 400 };
+
+    const outerHop = transformFromCameraLink(cameraLinkFromRect(middleContent, outerNode));
+    const innerHop = transformFromCameraLink(cameraLinkFromRect(deepContent, middleNode));
+    const composed = composeTransforms(outerHop, innerHop);
+
+    const deepCenter = { x: deepContent.x + deepContent.w / 2, y: deepContent.y + deepContent.h / 2 };
+    const middleNodeCenter = { x: middleNode.x + middleNode.w / 2, y: middleNode.y + middleNode.h / 2 };
+    const throughBothHops = {
+      x: (middleNodeCenter.x * outerHop.scale) + outerHop.tx,
+      y: (middleNodeCenter.y * outerHop.scale) + outerHop.ty,
+    };
+    expect(deepCenter.x * composed.scale + composed.tx).toBeCloseTo(throughBothHops.x, 8);
+    expect(deepCenter.y * composed.scale + composed.ty).toBeCloseTo(throughBothHops.y, 8);
+    expect(composed.scale).toBeCloseTo(outerHop.scale * innerHop.scale, 8);
   });
 });
 

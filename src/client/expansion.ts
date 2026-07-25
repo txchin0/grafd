@@ -43,19 +43,19 @@ export function transformRect(rect: Rect, transform: FrameTransform): Rect {
   };
 }
 
+// Applying `inner` then `outer`: the transform that maps the inner space straight to
+// whatever space `outer` lands in.
+export function composeTransforms(outer: FrameTransform, inner: FrameTransform): FrameTransform {
+  return {
+    scale: outer.scale * inner.scale,
+    tx: inner.tx * outer.scale + outer.tx,
+    ty: inner.ty * outer.scale + outer.ty,
+  };
+}
+
 export interface InlineDiveAnchor {
   frame: Rect;
   transform: FrameTransform;
-}
-
-export function inlineDiveAnchor(model: FlowModel, node: FlowNode): InlineDiveAnchor | null {
-  const expansion = model.display?.expansions.get(node);
-  if (!expansion) return null;
-  const warpedFrame = model.display!.rects.get(node);
-  return {
-    frame: { ...(warpedFrame ?? expansion.frame) },
-    transform: { ...expansion.transform },
-  };
 }
 
 export interface FrameExpansion {
@@ -197,13 +197,7 @@ export class ExpansionLayer {
     for (const node of model.nodes) this.locus!.set(node, { model, transform, host });
     if (!model.display) return;
     for (const [frameHost, expansion] of model.display.expansions) {
-      const inner = expansion.transform;
-      const composed = {
-        scale: transform.scale * inner.scale,
-        tx: inner.tx * transform.scale + transform.tx,
-        ty: inner.ty * transform.scale + transform.ty,
-      };
-      this.addLoci(expansion.subModel, composed, frameHost);
+      this.addLoci(expansion.subModel, composeTransforms(transform, expansion.transform), frameHost);
     }
   }
 
@@ -221,6 +215,30 @@ export class ExpansionLayer {
 
   hostOf(node: FlowNode): FlowNode | null {
     return this.locusOf(node)?.host ?? null;
+  }
+
+  // The frame hosts a node sits inside, outermost first — the levels a full-page dive into
+  // that node skips over, and so the breadcrumb crumbs it has to synthesize. Empty for a
+  // node in the top-level model.
+  ancestorHosts(node: FlowNode): FlowNode[] {
+    const hosts: FlowNode[] = [];
+    for (let host = this.hostOf(node); host; host = this.hostOf(host)) hosts.unshift(host);
+    return hosts;
+  }
+
+  // World-space anchor for diving into an already-unfolded frame at any depth: the frame's
+  // warped rect and its subgraph→world transform, both composed through the node's locus so
+  // the dive starts from exactly what is on screen. Null when the node is not unfolded.
+  diveAnchor(node: FlowNode): InlineDiveAnchor | null {
+    const locus = this.locusOf(node);
+    if (!locus) return null;
+    const expansion = locus.model.display?.expansions.get(node);
+    if (!expansion) return null;
+    const warpedFrame = locus.model.display!.rects.get(node) ?? expansion.frame;
+    return {
+      frame: transformRect(warpedFrame, locus.transform),
+      transform: composeTransforms(locus.transform, expansion.transform),
+    };
   }
 
   isEmbedded(node: FlowNode): boolean {

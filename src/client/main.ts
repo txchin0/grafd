@@ -48,7 +48,17 @@ import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
 import { CanvasView, type ContextTarget, type Tool, type View } from './canvas-view.js';
 import { createContextMenu, type MenuItem } from './context-menu.js';
-import { ExpansionLayer, inlineDiveAnchor, TOGGLE_DURATION_MS, type DocumentOwner } from './expansion.js';
+import {
+  ExpansionLayer,
+  TOGGLE_DURATION_MS,
+  type DocumentOwner,
+} from './expansion.js';
+import {
+  backOutAnchorFor,
+  divePathTo,
+  type DiveTarget,
+  type TrailEntry,
+} from './dive-navigation.js';
 import { createEditors, type Editors } from './editors.js';
 import {
   MANIFEST_FILE_NAME,
@@ -77,12 +87,7 @@ interface AppState {
   model: FlowModel | null;
 }
 
-interface TrailEntry {
-  path: string;
-  scope: string | null;
-  nodeId: string | null;
-  view: View;
-}
+// TrailEntry and DiveTarget live in dive-navigation.ts.
 
 type CommitTiming = 'debounce' | 'now';
 
@@ -864,35 +869,30 @@ function pasteClipboard(world?: Point): void {
 // the destination loads, then both scenes render together — the subgraph riding inside the
 // node's rectangle as the camera zooms through it, crossfading as it grows (see
 // canvas-view's zoom transition).
+//
+// The node may live inside an unfolded frame, several levels down: the dive then lands
+// straight on its subgraph and synthesizes a crumb for every level it skipped, so the trail
+// reads as if the user had opened each level in turn.
 async function openExpand(node: FlowNode): Promise<void> {
-  const expandValue = getProp(node, 'expand');
-  if (!expandValue || navigation.inProgress || expansions.isEmbedded(node)) return;
+  if (!getProp(node, 'expand') || navigation.inProgress) return;
   navigation.inProgress = true;
   try {
     editors.closeAll();
-    const origin: TrailEntry = { path: state.path!, scope: state.scope, nodeId: node.id, view: { ...view.view } };
     expansions.layout(state.model!, performance.now());
-    const anchor = inlineDiveAnchor(state.model!, node);
+    expansions.collectLoci(state.model!);
+    const dive = divePathTo(diveNavigationContext(), node);
+    if (!dive) return;
+    const anchor = expansions.diveAnchor(node);
     const nodeRect = anchor ? { ...anchor.frame } : { ...view.rect(node) };
     view.beginSceneHold(state.model!, view.view);
 
-    const link = parseExpandLink(expandValue);
-    let swapped = true;
-    if (link) {
-      swapped = await openExternalFlow(link);
-    } else {
-      if (!FlowDoc.graphBlockNames(state.doc!).includes(expandValue)) {
-        mutate(() => state.doc!.items.push({ kind: 'graph', name: expandValue, items: [] }), { commit: 'now' });
-      }
-      setScope(expandValue, { fit: false });
-    }
-    if (!swapped) {
+    if (!(await enterDiveTarget(dive.destination))) {
       view.releaseSceneHold();
-      view.setViewNow(origin.view);
+      view.setViewNow(dive.entries[0].view);
       return;
     }
 
-    navigation.trail.push(origin);
+    navigation.trail.push(...dive.entries);
     renderBreadcrumb();
     await view.zoomDiveIn({ nodeRect, inlineAnchor: anchor?.transform ?? null });
   } finally {
@@ -900,34 +900,53 @@ async function openExpand(node: FlowNode): Promise<void> {
   }
 }
 
-async function openExternalFlow(link: ExpandLink): Promise<boolean> {
-  const resolved = resolveLinkPath(state.path, link.path);
-  if (state.files.includes(resolved)) {
-    return openFile(resolved, { fit: false });
-  }
-  const graphName = sanitizeName(link.label) || resolved.split('/').pop()!.replace(/\.flow$/, '');
-  const text = `---\nname: ${graphName}\n---\n`;
-  sendWrite(resolved, text);
-  state.files.push(resolved);
-  state.files.sort();
-  return openFile(resolved, { presetText: text, fit: false });
+function diveNavigationContext(model = state.model!) {
+  return {
+    path: state.path!,
+    scope: state.scope,
+    doc: state.doc,
+    model,
+    liveView: view.view,
+    fitViewForModel: (flowModel: FlowModel) => view.fitViewForModel(flowModel),
+    ancestorHosts: (node: FlowNode) => expansions.ancestorHosts(node),
+    modelOf: (node: FlowNode) => expansions.modelOf(node),
+    documentAt: (path: string) => expansions.documentAt(path),
+  };
 }
 
-// Stepping back one crumb reverses the dive: the subgraph shrinks back into the node it
-// came from while the parent graph fades in around it, ending exactly on the camera we
-// left. Jumping several crumbs at once just snaps.
+async function enterDiveTarget(target: DiveTarget): Promise<boolean> {
+  if (target.path !== state.path && !(await openDiveDocument(target))) return false;
+  if (target.scope && !FlowDoc.graphBlockNames(state.doc!).includes(target.scope)) {
+    mutate(() => state.doc!.items.push({ kind: 'graph', name: target.scope!, items: [] }), { commit: 'now' });
+  }
+  if (state.scope !== target.scope) setScope(target.scope, { fit: false });
+  return true;
+}
+
+async function openDiveDocument(target: DiveTarget): Promise<boolean> {
+  if (state.files.includes(target.path)) return openFile(target.path, { fit: false });
+  if (!target.link) return false;
+  const graphName = sanitizeName(target.link.label) || target.path.split('/').pop()!.replace(/\.flow$/, '');
+  const text = `---\nname: ${graphName}\n---\n`;
+  sendWrite(target.path, text);
+  state.files.push(target.path);
+  state.files.sort();
+  return openFile(target.path, { presetText: text, fit: false });
+}
+
+// Stepping back reverses the dive: the graph on screen shrinks back into the node it came
+// from while the destination graph fades in around it, ending exactly on the camera that
+// crumb was left at. Jumping several crumbs at once plays the same motion once, through the
+// composed placement of every level it spans.
 async function navigateBackTo(index: number): Promise<void> {
   if (navigation.inProgress || index >= navigation.trail.length) return;
   navigation.inProgress = true;
   try {
     editors.closeAll();
     const entry = navigation.trail[index];
-    const singleStep = index === navigation.trail.length - 1;
+    const dropped = navigation.trail.slice(index);
+    const leavingModel = state.model!;
     navigation.trail.length = index;
-    if (!singleStep) {
-      await snapToEntry(entry);
-      return;
-    }
     view.beginSceneHold(state.model!, view.view);
     if (entry.path !== state.path) {
       const opened = await openFile(entry.path, { fit: false });
@@ -946,25 +965,13 @@ async function navigateBackTo(index: number): Promise<void> {
       return;
     }
     expansions.layout(state.model!, performance.now());
-    const anchor = inlineDiveAnchor(state.model!, enteredNode);
-    const nodeRect = anchor ? { ...anchor.frame } : { ...enteredNode.pos };
+    expansions.collectLoci(state.model!);
+    const anchor = backOutAnchorFor(diveNavigationContext(), dropped, leavingModel);
+    const nodeRect = anchor ? anchor.rect : { ...view.rect(enteredNode) };
     await view.zoomBackOut({ nodeRect, targetView: entry.view, inlineAnchor: anchor?.transform ?? null });
   } finally {
     navigation.inProgress = false;
   }
-}
-
-async function snapToEntry(entry: TrailEntry): Promise<void> {
-  if (entry.path !== state.path) {
-    const opened = await openFile(entry.path, { fit: false });
-    if (!opened) {
-      renderBreadcrumb();
-      return;
-    }
-  }
-  if (state.scope !== entry.scope) setScope(entry.scope, { fit: false });
-  renderBreadcrumb();
-  view.setViewNow(entry.view);
 }
 
 function toggleInlineExpansion(node: FlowNode): void {
@@ -1307,7 +1314,6 @@ const editors: Editors = createEditors({
   ensureExpandTarget,
   ensureInnerTargets,
   ensureInnerSources,
-  canOpen: (node) => !expansions.isEmbedded(node),
   openExpand,
   toggleExpand: toggleInlineExpansion,
   deleteNodes: deleteNodesAction,
@@ -1349,7 +1355,7 @@ function nodeMenuItems(node: FlowNode): MenuItem[] {
   items.push({ label: 'Copy', onSelect: copySelection });
   items.push({ label: 'Cut', onSelect: cutSelection });
   if (getProp(node, 'expand')) {
-    if (!expansions.isEmbedded(node)) items.push({ label: 'Open ⤢', onSelect: () => void openExpand(node) });
+    items.push({ label: 'Open ⤢', onSelect: () => void openExpand(node) });
     items.push({
       label: expansions.isOpen(node.id) ? 'Collapse ⊟' : 'Expand ⊞',
       onSelect: () => toggleInlineExpansion(node),

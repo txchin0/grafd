@@ -31,7 +31,6 @@ export interface EditorContext {
   ensureExpandTarget(node: FlowNode): Promise<void>;
   ensureInnerTargets(edge: ModelEdge): Promise<void>;
   ensureInnerSources(edge: ModelEdge): Promise<void>;
-  canOpen(node: FlowNode): boolean;
   openExpand(node: FlowNode): void;
   toggleExpand(node: FlowNode): void;
   deleteNodes(nodes: FlowNode[]): void;
@@ -108,7 +107,7 @@ export function createEditors(context: EditorContext): Editors {
     setUnlessFocused(elements.updates, parseListValue(getProp(node, 'updates')).join(', '));
     elements.entrypoint.checked = getProp(node, 'entrypoint') === 'true';
     const lacksExpand = !getProp(node, 'expand');
-    elements.openExpand.classList.toggle('hidden', lacksExpand || !context.canOpen(node));
+    elements.openExpand.classList.toggle('hidden', lacksExpand);
     elements.inlineExpand.classList.toggle('hidden', lacksExpand);
   }
 

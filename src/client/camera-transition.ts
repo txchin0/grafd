@@ -57,6 +57,25 @@ export function cameraLinkFromInlineModel(childModel: FlowModel, inlineTransform
   return cameraLinkFromInlineTransform(rectCenter(subModelBounds(childModel)), inlineTransform);
 }
 
+// A camera link is a similarity mapping child coordinates into parent coordinates; this is
+// that map on its own, so links of either flavor can be composed with frame transforms.
+export function transformFromCameraLink(link: CameraLink): FrameTransform {
+  const scale = 1 / link.growth;
+  return {
+    scale,
+    tx: link.nodeCenter.x - link.contentCenter.x * scale,
+    ty: link.nodeCenter.y - link.contentCenter.y * scale,
+  };
+}
+
+export function cameraLinkFittingModelIntoRect(model: FlowModel, nodeRect: Rect): CameraLink {
+  return cameraLinkFromRect(modelContentBounds(model), nodeRect);
+}
+
+export function fitTransformIntoRect(model: FlowModel, nodeRect: Rect): FrameTransform {
+  return transformFromCameraLink(cameraLinkFittingModelIntoRect(model, nodeRect));
+}
+
 function viewCenterWorld(view: View, bounds: ViewportSize): Point {
   return {
     x: (bounds.width / 2 - view.x) / view.scale,

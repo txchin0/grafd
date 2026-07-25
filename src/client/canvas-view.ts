@@ -16,8 +16,8 @@ import {
 } from '../shared/flow-format.js';
 import type { FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
 import {
+  cameraLinkFittingModelIntoRect,
   cameraLinkFromInlineModel,
-  cameraLinkFromRect,
   childViewLinkedTo,
   interpolateView,
   modelContentBounds,
@@ -168,6 +168,7 @@ const PORT_HIT_RADIUS = 11;
 const EDGE_HIT_DISTANCE = 8;
 const BADGE_HIT_RADIUS = 12;
 const BADGE_SLOT_SPACING = 24;
+const FIT_PADDING = 80;
 const BADGE_SYMBOLS: Record<BadgeKind, string> = { open: '⤢', inline: '⊞', collapse: '⊟' };
 const DIVE_IN_MS = 650;
 const BACK_OUT_MS = 560;
@@ -201,6 +202,10 @@ function centerBoundsAt(bounds: Rect, viewport: ViewportSize, scale: number): Vi
     x: (viewport.width - bounds.w * scale) / 2 - bounds.x * scale,
     y: (viewport.height - bounds.h * scale) / 2 - bounds.y * scale,
   };
+}
+
+function padRect(rect: Rect, padding: number): Rect {
+  return { x: rect.x - padding, y: rect.y - padding, w: rect.w + padding * 2, h: rect.h + padding * 2 };
 }
 
 export function fitScaleFor(bounds: Rect, viewport: ViewportSize): number {
@@ -511,20 +516,14 @@ export class CanvasView {
       ...this.model.ghosts.map((ghost) => ghost.pos),
     ].filter((rect): rect is Rect => rect != null);
     if (rects.length === 0) return null;
-    const minX = Math.min(...rects.map((rect) => rect.x)) - padding;
-    const minY = Math.min(...rects.map((rect) => rect.y)) - padding;
-    const maxX = Math.max(...rects.map((rect) => rect.x + rect.w)) + padding;
-    const maxY = Math.max(...rects.map((rect) => rect.y + rect.h)) + padding;
-    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    const minX = Math.min(...rects.map((rect) => rect.x));
+    const minY = Math.min(...rects.map((rect) => rect.y));
+    const maxX = Math.max(...rects.map((rect) => rect.x + rect.w));
+    const maxY = Math.max(...rects.map((rect) => rect.y + rect.h));
+    return padRect({ x: minX, y: minY, w: maxX - minX, h: maxY - minY }, padding);
   }
 
-  private computeFitView(padding = 80, viewport: ViewportSize = this.viewport): View {
-    // Fit runs synchronously right after a model/scope swap, before the render loop's
-    // next layout pass; without eager display layout, unfolded frames measure at their
-    // collapsed pos and expanded subgraphs get clipped — the same reason a manual
-    // zoom-to-fit a moment later frames them correctly.
-    this.layoutDisplayGeometry(this.model);
-    const bounds = this.paddedContentBounds(padding);
+  private clampedFitView(bounds: Rect | null, viewport: ViewportSize): View {
     if (!bounds) {
       return { x: viewport.width / 2 - 200, y: viewport.height / 2 - 150, scale: 1 };
     }
@@ -532,7 +531,22 @@ export class CanvasView {
     return centerBoundsAt(bounds, viewport, scale);
   }
 
-  fitToContent(padding = 80): void {
+  private computeFitView(padding = FIT_PADDING, viewport: ViewportSize = this.viewport): View {
+    // Fit runs synchronously right after a model/scope swap, before the render loop's
+    // next layout pass; without eager display layout, unfolded frames measure at their
+    // collapsed pos and expanded subgraphs get clipped — the same reason a manual
+    // zoom-to-fit a moment later frames them correctly.
+    this.layoutDisplayGeometry(this.model);
+    return this.clampedFitView(this.paddedContentBounds(padding), viewport);
+  }
+
+  // The camera zoom-to-fit would give a model that is not the active one, in that model's own
+  // coordinates. Used to reconstruct the camera a skipped navigation level would have had.
+  fitViewForModel(model: FlowModel, padding = FIT_PADDING): View {
+    return this.clampedFitView(padRect(modelContentBounds(model), padding), this.viewport);
+  }
+
+  fitToContent(padding = FIT_PADDING): void {
     this.setViewNow(this.computeFitView(padding));
   }
 
@@ -628,7 +642,7 @@ export class CanvasView {
     this.layoutDisplayGeometry(childModel);
     const link = inlineAnchor
       ? cameraLinkFromInlineModel(childModel, inlineAnchor)
-      : cameraLinkFromRect(modelContentBounds(childModel), nodeRect);
+      : cameraLinkFittingModelIntoRect(childModel, nodeRect);
 
     let parentFrom: View;
     let parentTo: View;
@@ -1087,21 +1101,19 @@ export class CanvasView {
     return null;
   }
 
-  // Badge slots run right-to-left from the node's top-right corner. Embedded (inline
-  // expanded) subgraphs only offer the inline toggle: full-page navigation from inside a
-  // frame would skip levels of the breadcrumb trail.
+  // Badge slots run right-to-left from the node's top-right corner. Nodes inside unfolded
+  // frames offer full-page navigation too: the dive synthesizes a breadcrumb crumb for every
+  // frame level it skips over.
   private nodeBadges(model: FlowModel, node: FlowNode): Badge[] {
     if (!model.traits.get(node)?.expand) return [];
     const rect = this.rectOf(model, node);
     const slotCenter = (slot: number) => ({ x: rect.x + rect.w - 16 - slot * BADGE_SLOT_SPACING, y: rect.y + 15 });
     if (this.expansionLayer?.isOpen(node.id)) {
-      if (model.embedded) return [{ kind: 'collapse', ...slotCenter(0) }];
       return [
         { kind: 'open', ...slotCenter(0) },
         { kind: 'collapse', ...slotCenter(1) },
       ];
     }
-    if (model.embedded) return [{ kind: 'inline', ...slotCenter(0) }];
     return [
       { kind: 'open', ...slotCenter(0) },
       { kind: 'inline', ...slotCenter(1) },

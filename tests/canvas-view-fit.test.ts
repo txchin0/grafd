@@ -84,4 +84,29 @@ describe('CanvasView fit after subgraph navigation', () => {
       expect(worldRectVisibleInView(node.pos!, view.view, VIEWPORT)).toBe(true);
     }
   });
+
+  // A dive that skips levels reconstructs each skipped level's camera from its sub-model,
+  // which must match what zoom-to-fit gives that graph once it is the active model.
+  it('fitViewForModel matches fitToContent on the same graph', () => {
+    const doc = parseFlow(DASHBOARD_FLOW);
+    const parentModel = buildModel(doc, null);
+    parentModel.sourceDoc = doc;
+    parentModel.sourcePath = 'dashboard.flow';
+
+    const childModel = buildModel(doc, 'Logout Confirmation');
+    childModel.sourceDoc = doc;
+    childModel.sourcePath = 'dashboard.flow';
+
+    const canvas = createCanvasMock();
+    const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1]);
+    view.setModel(parentModel);
+    const reconstructed = view.fitViewForModel(childModel);
+
+    view.setModel(childModel);
+    view.fitToContent();
+
+    expect(reconstructed.scale).toBeCloseTo(view.view.scale, 8);
+    expect(reconstructed.x).toBeCloseTo(view.view.x, 8);
+    expect(reconstructed.y).toBeCloseTo(view.view.y, 8);
+  });
 });
