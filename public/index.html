@@ -21,10 +21,7 @@
       <p id="new-file-error" class="hidden"></p>
       <div id="workspace-bar">
         <span id="workspace-name"></span>
-        <button id="open-folder-button" type="button" class="hidden" title="Open a local folder of .flow files">📂 Open folder…</button>
-        <button id="close-folder-button" type="button" class="hidden" title="Leave this folder and return to the default workspace">↩ Leave folder</button>
-        <button id="export-button" type="button" title="Download this workspace as a .zip (flows, manifest, and the agent guide)">⇩ Export .zip</button>
-        <button id="export-image-button" type="button" title="Export this flow as a PNG image">🖼 Export image</button>
+        <button id="workspace-menu-button" type="button" aria-haspopup="menu" title="Workspace actions">☰</button>
       </div>
       <footer id="sidebar-footer">
         <button id="help-toggle" type="button">? Shortcuts</button>
@@ -126,8 +123,8 @@
       </div>
     </main>
 
-    <div id="screenshot-modal" class="hidden">
-      <div id="screenshot-panel">
+    <div id="screenshot-modal" class="modal hidden">
+      <div id="screenshot-panel" class="modal-panel">
         <h2>Export image</h2>
         <div id="screenshot-preview-frame">
           <canvas id="screenshot-preview"></canvas>
@@ -146,6 +143,19 @@
           <span class="spacer"></span>
           <button id="screenshot-close" type="button" class="quiet-button">Close</button>
           <button id="screenshot-download" type="button" class="quiet-button">Download PNG</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="preferences-modal" class="modal hidden">
+      <div id="preferences-panel" class="modal-panel">
+        <h2>Preferences</h2>
+        <div id="preferences-options">
+          <label class="check-row"><input type="checkbox" id="pref-canvas-grid" /> Show canvas grid</label>
+        </div>
+        <div class="editor-actions">
+          <span class="spacer"></span>
+          <button id="preferences-close" type="button" class="quiet-button">Close</button>
         </div>
       </div>
     </div>

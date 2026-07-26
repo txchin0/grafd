@@ -48,6 +48,9 @@ import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
 import { CanvasView, type ContextTarget, type Tool, type View } from './canvas-view.js';
 import { createContextMenu, type MenuItem } from './context-menu.js';
+import type { Modal } from './modal.js';
+import { createPreferencesDialog } from './preferences-dialog.js';
+import { loadPreferences, type Preferences } from './preferences.js';
 import {
   ExpansionLayer,
   TOGGLE_DURATION_MS,
@@ -137,10 +140,7 @@ const elements = {
   emptyStateHint: elementById<HTMLParagraphElement>('empty-state-hint'),
   connectionDot: elementById<HTMLSpanElement>('connection-dot'),
   workspaceName: elementById<HTMLSpanElement>('workspace-name'),
-  openFolderButton: elementById<HTMLButtonElement>('open-folder-button'),
-  closeFolderButton: elementById<HTMLButtonElement>('close-folder-button'),
-  exportButton: elementById<HTMLButtonElement>('export-button'),
-  exportImageButton: elementById<HTMLButtonElement>('export-image-button'),
+  workspaceMenuButton: elementById<HTMLButtonElement>('workspace-menu-button'),
   helpToggle: elementById<HTMLButtonElement>('help-toggle'),
   helpOverlay: elementById<HTMLDivElement>('help-overlay'),
   toolSelectButton: elementById<HTMLButtonElement>('tool-select-button'),
@@ -1331,6 +1331,20 @@ function screenshotFileStem(): string {
 
 const screenshot = createScreenshotDialog({ view, fileStem: screenshotFileStem });
 
+function applyPreferences(preferences: Preferences): void {
+  view.gridIsVisible = preferences.showCanvasGrid;
+  view.requestRender();
+}
+
+const preferencesDialog = createPreferencesDialog(applyPreferences);
+
+// Only one modal is ever up at a time; Escape closes whichever it is.
+const modals: Modal[] = [screenshot, preferencesDialog];
+
+function openModal(): Modal | null {
+  return modals.find((modal) => modal.isOpen()) ?? null;
+}
+
 function openCanvasContextMenu(target: ContextTarget, screenPoint: Point): void {
   if (!state.doc) return;
   const items =
@@ -1558,18 +1572,18 @@ function isTypingTarget(element: EventTarget | null): element is HTMLInputElemen
 
 function wireKeyboard(): void {
   window.addEventListener('keydown', (event) => {
-    const modalOpen = screenshot.isOpen();
+    const modal = openModal();
 
     if (isTypingTarget(event.target)) {
       if (event.key === 'Escape') {
-        if (modalOpen) screenshot.close();
+        if (modal) modal.close();
         else event.target.blur();
       }
       return;
     }
 
-    if (modalOpen) {
-      if (event.key === 'Escape') screenshot.close();
+    if (modal) {
+      if (event.key === 'Escape') modal.close();
       return;
     }
 
@@ -1706,8 +1720,6 @@ function renderWorkspaceBar(): void {
   elements.workspaceName.textContent = names[workspace.kind];
   elements.workspaceName.title =
     workspace.kind === 'folder' ? `Local folder “${workspace.label}”` : names[workspace.kind];
-  elements.closeFolderButton.classList.toggle('hidden', workspace.kind !== 'folder');
-  elements.openFolderButton.classList.toggle('hidden', !folderPickingIsSupported() || workspace.kind === 'folder');
 }
 
 async function exportWorkspace(): Promise<void> {
@@ -1728,17 +1740,28 @@ async function exportWorkspace(): Promise<void> {
   }
 }
 
+async function openWorkspaceFolder(): Promise<void> {
+  const folder = await pickWorkspaceFolder();
+  if (folder) await switchWorkspace(new FolderWorkspace(folder));
+}
+
+function workspaceMenuItems(): MenuItem[] {
+  const items: MenuItem[] = [];
+  if (workspace?.kind === 'folder') {
+    items.push({ label: '↩ Leave folder', onSelect: () => void switchWorkspace(createDefaultWorkspace()) });
+  } else if (folderPickingIsSupported()) {
+    items.push({ label: '📂 Open folder…', onSelect: () => void openWorkspaceFolder() });
+  }
+  items.push({ label: '⇩ Export .zip', onSelect: () => void exportWorkspace() });
+  items.push({ label: '🖼 Export image…', disabled: !state.doc, onSelect: () => screenshot.open() });
+  items.push({ separator: true });
+  items.push({ label: '⚙ Preferences…', onSelect: () => preferencesDialog.open() });
+  return items;
+}
+
 function wireWorkspaceControls(): void {
-  elements.openFolderButton.addEventListener('click', async () => {
-    const folder = await pickWorkspaceFolder();
-    if (folder) await switchWorkspace(new FolderWorkspace(folder));
-  });
-  elements.closeFolderButton.addEventListener('click', () => {
-    void switchWorkspace(createDefaultWorkspace());
-  });
-  elements.exportButton.addEventListener('click', () => void exportWorkspace());
-  elements.exportImageButton.addEventListener('click', () => {
-    if (state.doc) screenshot.open();
+  elements.workspaceMenuButton.addEventListener('click', () => {
+    contextMenu.toggleFromButton(elements.workspaceMenuButton, workspaceMenuItems());
   });
 }
 
@@ -1749,6 +1772,7 @@ async function boot(): Promise<void> {
   wireHelp();
   wireKeyboard();
   wireWorkspaceControls();
+  applyPreferences(loadPreferences());
   setTool('select');
 
   defaultWorkspaceKind = (await serverIsAvailable()) ? 'server' : 'browser';

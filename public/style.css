@@ -180,13 +180,14 @@ html, body {
 
 #workspace-bar {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
   padding: 8px 12px;
   border-top: 1px solid var(--panel-border);
 }
 
 #workspace-name {
+  flex: 1;
   color: var(--muted);
   font-size: var(--text-body);
   white-space: nowrap;
@@ -195,18 +196,24 @@ html, body {
 }
 
 #workspace-bar button {
-  padding: 6px 8px;
-  background: transparent;
-  border: 1px solid var(--panel-border);
+  flex-shrink: 0;
+  padding: 4px 8px;
+  background: none;
+  border: none;
   border-radius: 8px;
   color: var(--muted);
   font-family: inherit;
   font-size: var(--text-body);
   cursor: pointer;
-  text-align: left;
 }
 
-#workspace-bar button:hover { color: var(--ink); border-color: var(--muted); }
+/* The button's edge is an inset shadow rather than a border so revealing it on hover cannot
+   shift the bar's layout by the border's width. */
+#workspace-bar button:hover {
+  background: #262a31;
+  box-shadow: inset 0 0 0 1px var(--panel-border);
+  color: var(--ink);
+}
 
 #sidebar-footer {
   display: flex;
@@ -483,7 +490,7 @@ html, body {
 #help-overlay td:first-child { color: var(--accent); white-space: nowrap; }
 #help-overlay td:last-child { color: var(--muted); }
 
-#screenshot-modal {
+.modal {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
@@ -493,7 +500,7 @@ html, body {
   justify-content: center;
 }
 
-#screenshot-panel {
+.modal-panel {
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 12px;
@@ -504,10 +511,20 @@ html, body {
   gap: 12px;
 }
 
-#screenshot-panel h2 {
+.modal-panel h2 {
   margin: 0;
   font-size: var(--text-heading);
   font-weight: var(--weight-semibold);
+}
+
+#preferences-panel { min-width: 280px; }
+
+#preferences-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: var(--text-body);
+  color: var(--muted);
 }
 
 #screenshot-preview-frame {

@@ -343,6 +343,7 @@ export class CanvasView {
   selection = new Set<FlowNode>();
   selectedEdge: ModelEdge | null = null;
   expansionLayer: ExpansionLayer | null = null;
+  gridIsVisible = true;
 
   private hoverNode: FlowNode | null = null;
   private hoverPoint: Point | null = null;
@@ -1230,7 +1231,7 @@ export class CanvasView {
     this.expansionLayer?.collectLoci(this.model);
     const dpr = this.devicePixelRatio;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.drawGrid(this.view);
+    this.drawGridIfVisible(this.view);
 
     const { x, y, scale } = this.view;
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * x, dpr * y);
@@ -1252,7 +1253,7 @@ export class CanvasView {
     if (transition.phase === 'hold') {
       this.expansionLayer?.layout(transition.outgoing.model, now);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      this.drawGrid(transition.outgoing.view);
+      this.drawGridIfVisible(transition.outgoing.view);
       this.drawWorldScene(transition.outgoing.model, transition.outgoing.view, 1);
       return;
     }
@@ -1273,7 +1274,7 @@ export class CanvasView {
     const childAlpha = transition.inlineAnchor ? 1 : (parentIsIncoming ? 1 - eased : eased);
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.drawGrid(this.view);
+    this.drawGridIfVisible(this.view);
     this.drawWorldScene(parentModel, parentView, parentAlpha);
 
     // The child scene is clipped to the node's on-screen rectangle so the subgraph reads
@@ -1327,6 +1328,12 @@ export class CanvasView {
     for (const edge of redirected) this.drawEdge(edge);
     for (const edge of model.edges) this.drawEdgeLabel(edge);
     for (const ghost of model.ghosts) this.drawGhost(ghost, { clickable: !model.embedded });
+  }
+
+  // Only the live canvas honours the preference; an export draws whatever its own grid
+  // checkbox asked for, so renderSnapshot calls drawGrid directly.
+  private drawGridIfVisible(view: View): void {
+    if (this.gridIsVisible) this.drawGrid(view);
   }
 
   private drawGrid(view: View): void {

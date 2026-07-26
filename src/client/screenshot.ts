@@ -8,6 +8,7 @@
 
 import type { CanvasView, ViewportSize } from './canvas-view.js';
 import { downloadBlob } from './download.js';
+import { createModal, type Modal } from './modal.js';
 
 export const SCALE_PRESETS = [1, 2, 3, 4];
 
@@ -53,11 +54,7 @@ export interface ScreenshotContext {
   fileStem(): string;
 }
 
-export interface ScreenshotDialog {
-  open(): void;
-  close(): void;
-  isOpen(): boolean;
-}
+export type ScreenshotDialog = Modal;
 
 function elementById<T extends HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -90,9 +87,8 @@ export function previewLayoutFor(logical: ViewportSize, displayPixelRatio: numbe
 }
 
 export function createScreenshotDialog(context: ScreenshotContext): ScreenshotDialog {
+  const modal = createModal('screenshot-modal', 'screenshot-panel');
   const elements = {
-    modal: elementById<HTMLDivElement>('screenshot-modal'),
-    panel: elementById<HTMLDivElement>('screenshot-panel'),
     preview: elementById<HTMLCanvasElement>('screenshot-preview'),
     presets: elementById<HTMLDivElement>('screenshot-scale-presets'),
     width: elementById<HTMLInputElement>('screenshot-width'),
@@ -175,17 +171,9 @@ export function createScreenshotDialog(context: ScreenshotContext): ScreenshotDi
     const bounds = context.view.snapshotBounds();
     logicalSize = { width: bounds.w, height: bounds.h };
     pixelRatio = DEFAULT_SCALE;
-    elements.modal.classList.remove('hidden');
+    modal.open();
     renderPreview();
     renderResolutionControls();
-  }
-
-  function close(): void {
-    elements.modal.classList.add('hidden');
-  }
-
-  function isOpen(): boolean {
-    return !elements.modal.classList.contains('hidden');
   }
 
   async function download(): Promise<void> {
@@ -195,7 +183,7 @@ export function createScreenshotDialog(context: ScreenshotContext): ScreenshotDi
       const canvas = document.createElement('canvas');
       drawInto(canvas, size);
       downloadBlob(await canvasToPngBlob(canvas), `${context.fileStem()}.png`);
-      close();
+      modal.close();
     } catch (error) {
       console.error('Image export failed', error);
       showError('Export failed — see the browser console for details.');
@@ -211,11 +199,8 @@ export function createScreenshotDialog(context: ScreenshotContext): ScreenshotDi
   for (const checkbox of [elements.background, elements.grid]) {
     checkbox.addEventListener('change', renderPreview);
   }
-  elements.close.addEventListener('click', close);
+  elements.close.addEventListener('click', modal.close);
   elements.download.addEventListener('click', () => void download());
-  // Clicks inside the panel must not reach the scrim's dismiss handler.
-  elements.panel.addEventListener('click', (event) => event.stopPropagation());
-  elements.modal.addEventListener('click', close);
 
-  return { open, close, isOpen };
+  return { ...modal, open };
 }

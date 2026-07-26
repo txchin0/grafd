@@ -75,6 +75,11 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   that lets nodes inside frames be edited in place (mutations are routed to the .flow file
   that owns them).
 - `src/client/editors.ts` — floating DOM overlays for node and edge editing.
+- `src/client/modal.ts` — the scrim/panel shell shared by the full-screen dialogs
+  (`screenshot.ts`, `preferences-dialog.ts`).
+- `src/client/preferences.ts` / `preferences-dialog.ts` — user-level display options, stored in
+  localStorage (not the manifest: they describe this browser, not the workspace) and edited in
+  the Preferences modal reached from the sidebar's workspace menu.
 - `src/client/main.ts` — app state, WebSocket sync, undo/redo, sidebar, keyboard shortcuts.
 - `tests/` — Vitest unit tests for the parser/serializer, document mutations, server file
   logic, expansion geometry, and camera math.
