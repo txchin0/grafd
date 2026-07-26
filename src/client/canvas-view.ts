@@ -11,10 +11,11 @@ import rough from 'roughjs';
 import type { Options as RoughOptions } from 'roughjs/bin/core';
 import {
   descriptionForNode,
+  type EdgeDataField,
   type FlowNode,
   type Rect,
 } from '../shared/flow-format.js';
-import type { FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
+import type { EdgeGeometry, FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
 import {
   cameraLinkFittingModelIntoRect,
   cameraLinkFromInlineModel,
@@ -166,6 +167,9 @@ const SNAP = 8;
 const PORT_RADIUS = 5;
 const PORT_HIT_RADIUS = 11;
 const EDGE_HIT_DISTANCE = 8;
+const EDGE_LABEL_BOW_BIAS = 0.85;
+const EDGE_DATA_LINE_HEIGHT = 13;
+const EDGE_DATA_GAP = 2;
 const BADGE_HIT_RADIUS = 12;
 const BADGE_SLOT_SPACING = 24;
 const FIT_PADDING = 80;
@@ -250,6 +254,28 @@ function rectContains(rect: Rect, point: Point): boolean {
 
 function rectsIntersect(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function unionRect(a: Rect, b: Rect): Rect {
+  const left = Math.min(a.x, b.x);
+  const top = Math.min(a.y, b.y);
+  return {
+    x: left,
+    y: top,
+    w: Math.max(a.x + a.w, b.x + b.w) - left,
+    h: Math.max(a.y + a.h, b.y + b.h) - top,
+  };
+}
+
+// Labels sit near the curve's midpoint, biased toward its control point so they follow the bow.
+function edgeLabelAnchor(geometry: EdgeGeometry): Point {
+  if (geometry.selfLoop) return { x: geometry.mid.x, y: geometry.mid.y };
+  const chordMidX = (geometry.a.x + geometry.b.x) / 2;
+  const chordMidY = (geometry.a.y + geometry.b.y) / 2;
+  return {
+    x: chordMidX + (geometry.mid.x - chordMidX) * EDGE_LABEL_BOW_BIAS,
+    y: chordMidY + (geometry.mid.y - chordMidY) * EDGE_LABEL_BOW_BIAS,
+  };
 }
 
 function normalizedRect(pointA: Point, pointB: Point): Rect {
@@ -1414,44 +1440,78 @@ export class CanvasView {
   private drawEdgeLabel(edge: ModelEdge): void {
     const geometry = edge.geometry;
     if (!geometry) return;
-    const { ctx } = this;
     const labelText = edge.spec.label ?? (edge.kind === 'error' ? 'on error' : null);
-    const labelAnchor = geometry.selfLoop
-      ? { x: geometry.mid.x, y: geometry.mid.y }
-      : { x: (geometry.a.x + geometry.b.x) / 2 + (geometry.mid.x - (geometry.a.x + geometry.b.x) / 2) * 0.85,
-          y: (geometry.a.y + geometry.b.y) / 2 + (geometry.mid.y - (geometry.a.y + geometry.b.y) / 2) * 0.85 };
+    const anchor = edgeLabelAnchor(geometry);
+    const fields = edge.spec.data ?? [];
 
-    if (labelText) {
-      ctx.font = `12px ${HAND_FONT}`;
-      const textWidth = ctx.measureText(labelText).width;
-      const paddingX = 7;
-      const labelRect = {
-        x: labelAnchor.x - textWidth / 2 - paddingX,
-        y: labelAnchor.y - 11,
-        w: textWidth + paddingX * 2,
-        h: 21,
-      };
-      ctx.fillStyle = COLORS.edgeLabelBg;
-      this.roundedRect(labelRect, 7);
-      ctx.fill();
-      ctx.fillStyle = edge.kind === 'error' ? COLORS.error : COLORS.edgeLabel;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(labelText, labelAnchor.x, labelAnchor.y + 1);
+    const labelRect = labelText
+      ? this.drawEdgeLabelPill(labelText, anchor, edge.kind === 'error')
+      : null;
+    if (!fields.length) {
       geometry.labelRect = labelRect;
-
-      if (edge.spec.data?.length) {
-        ctx.font = `10.5px ${HAND_FONT}`;
-        ctx.fillStyle = COLORS.muted;
-        ctx.fillText(`⧉ ${edge.spec.data.length} fields`, labelAnchor.x, labelAnchor.y + 20);
-      }
-    } else if (edge.spec.data?.length) {
-      ctx.font = `10.5px ${HAND_FONT}`;
-      ctx.fillStyle = COLORS.muted;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(`⧉ ${edge.spec.data.length} fields`, labelAnchor.x, labelAnchor.y);
+      return;
     }
+
+    const fieldsTop = labelRect
+      ? labelRect.y + labelRect.h + EDGE_DATA_GAP
+      : anchor.y - (fields.length * EDGE_DATA_LINE_HEIGHT) / 2;
+    const fieldsRect = this.drawEdgeDataFields(fields, anchor.x, fieldsTop);
+    geometry.labelRect = labelRect ? unionRect(labelRect, fieldsRect) : fieldsRect;
+  }
+
+  private drawEdgeLabelPill(text: string, anchor: Point, isError: boolean): Rect {
+    const { ctx } = this;
+    ctx.font = `12px ${HAND_FONT}`;
+    const paddingX = 7;
+    const rect = {
+      x: anchor.x - ctx.measureText(text).width / 2 - paddingX,
+      y: anchor.y - 11,
+      w: ctx.measureText(text).width + paddingX * 2,
+      h: 21,
+    };
+    ctx.fillStyle = COLORS.edgeLabelBg;
+    this.roundedRect(rect, 7);
+    ctx.fill();
+    ctx.fillStyle = isError ? COLORS.error : COLORS.edgeLabel;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, anchor.x, anchor.y + 1);
+    return rect;
+  }
+
+  // Each field paints as `key: type`, the key in label ink and the type muted, so the schema
+  // is readable on the canvas without opening the edge editor.
+  private drawEdgeDataFields(fields: EdgeDataField[], centerX: number, top: number): Rect {
+    const { ctx } = this;
+    ctx.font = `10.5px ${HAND_FONT}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+
+    const keyTexts = fields.map((field) => (field.type ? `${field.key}:` : field.key));
+    const lineWidths = fields.map(
+      (field, index) => ctx.measureText(`${keyTexts[index]} ${field.type}`).width,
+    );
+    const paddingX = 6;
+    const paddingY = 3;
+    const rect = {
+      x: centerX - Math.max(...lineWidths) / 2 - paddingX,
+      y: top - paddingY,
+      w: Math.max(...lineWidths) + paddingX * 2,
+      h: fields.length * EDGE_DATA_LINE_HEIGHT + paddingY * 2,
+    };
+    ctx.fillStyle = COLORS.edgeLabelBg;
+    this.roundedRect(rect, 6);
+    ctx.fill();
+
+    fields.forEach((field, index) => {
+      const lineLeft = centerX - lineWidths[index] / 2;
+      const lineMiddle = top + index * EDGE_DATA_LINE_HEIGHT + EDGE_DATA_LINE_HEIGHT / 2;
+      ctx.fillStyle = COLORS.edgeLabel;
+      ctx.fillText(keyTexts[index], lineLeft, lineMiddle);
+      ctx.fillStyle = COLORS.muted;
+      ctx.fillText(field.type, lineLeft + ctx.measureText(`${keyTexts[index]} `).width, lineMiddle);
+    });
+    return rect;
   }
 
   private drawArrowhead(fromPoint: Point, tip: Point, color: string): void {

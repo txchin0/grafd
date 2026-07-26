@@ -18,6 +18,7 @@ import {
   deleteEdge,
   deleteNodes,
   duplicateNodes,
+  edgeSupportsData,
   expandEntryNames,
   expandIdentityForNode,
   extractGraphBlockToDocument,
@@ -29,6 +30,7 @@ import {
   renameNode,
   retargetInnerRefs,
   scopeItems,
+  setEdgeData,
   setEdgeLabel,
   type ModelEdge,
 } from '../src/client/flow-doc.js';
@@ -286,6 +288,40 @@ H
     expect(getProp(a, 'on_error')).toBe('-> H : "boom"');
     deleteEdge(edge);
     expect(getProp(a, 'on_error')).toBeNull();
+  });
+
+  it('writes an edge data schema, sanitizing keys and dropping keyless rows', () => {
+    const doc = docFrom('A\n  -> B\n\nB\n');
+    const [a] = allNodes(doc);
+    const model = buildModel(doc, null);
+    setEdgeData(model.edges[0], [
+      { key: 'cart id', type: 'string' },
+      { key: '  ', type: 'number' },
+      { key: '2fa', type: ' boolean ' },
+    ]);
+    expect(a.edges[0].data).toEqual([
+      { key: 'cart_id', type: 'string' },
+      { key: '_2fa', type: 'boolean' },
+    ]);
+    expect(serializeFlow(doc)).toContain('    data:\n      cart_id: string\n      _2fa: boolean');
+  });
+
+  it('drops an emptied edge data schema', () => {
+    const doc = docFrom('A\n  -> B\n    data:\n      cartId: string\n\nB\n');
+    const [a] = allNodes(doc);
+    const model = buildModel(doc, null);
+    setEdgeData(model.edges[0], []);
+    expect(a.edges[0].data).toBeNull();
+    expect(serializeFlow(doc)).not.toContain('data:');
+  });
+
+  it('refuses edge data on error edges, which serialize to a single line', () => {
+    const doc = docFrom('A\n  on_error: -> H\n\nH\n');
+    const [a] = allNodes(doc);
+    const edge: ModelEdge = { from: a, spec: parseEdgeExpression(getProp(a, 'on_error')!), kind: 'error' };
+    setEdgeData(edge, [{ key: 'reason', type: 'string' }]);
+    expect(edgeSupportsData(edge)).toBe(false);
+    expect(edge.spec.data).toBeNull();
   });
 
   it('clears an edge label set to blank', () => {

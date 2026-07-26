@@ -3,6 +3,7 @@
 // deterministic auto-layout for nodes that have no `pos` yet, and all editor mutations.
 
 import {
+  collapseToSingleLine,
   emptyNode,
   getProp,
   setProp,
@@ -12,9 +13,11 @@ import {
   parseExpandLink,
   parseListValue,
   resolveLinkPath,
+  sanitizeDataKey,
   sanitizeName,
   uniqueName,
   writeDescriptionForNode,
+  type EdgeDataField,
   type EdgeSpec,
   type FlowDocument,
   type FlowItem,
@@ -663,6 +666,24 @@ export function setEdgeLabel(edge: ModelEdge, label: string | null): void {
     return;
   }
   edge.spec.label = cleanLabel;
+}
+
+// Error edges live inside the single-line `on_error` property, which has no room for the
+// indented data block an edge data schema is written as.
+export function edgeSupportsData(edge: ModelEdge): boolean {
+  return edge.kind === 'flow';
+}
+
+export function normalizeEdgeDataFields(fields: EdgeDataField[]): EdgeDataField[] {
+  return fields
+    .map((field) => ({ key: sanitizeDataKey(field.key), type: collapseToSingleLine(field.type) }))
+    .filter((field) => field.key !== '');
+}
+
+export function setEdgeData(edge: ModelEdge, fields: EdgeDataField[]): void {
+  if (!edgeSupportsData(edge)) return;
+  const normalized = normalizeEdgeDataFields(fields);
+  edge.spec.data = normalized.length ? normalized : null;
 }
 
 export function setEdgeInnerTarget(edge: ModelEdge, name: string | null): void {

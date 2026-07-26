@@ -1,5 +1,5 @@
 // Floating DOM overlays for editing a node (title, description, advanced properties) and an
-// edge label. Overlays anchor to canvas geometry and are repositioned after every render.
+// edge (label, subgraph refinements, data schema). Overlays anchor to canvas geometry and are repositioned after every render.
 // Field changes mutate the document immediately through the context callbacks; external file
 // updates refresh unfocused fields only, so in-progress typing is never clobbered.
 
@@ -10,6 +10,7 @@ import {
   collapseToSingleLine,
   parseListValue,
   formatListValue,
+  type EdgeDataField,
   type EdgeSpec,
   type FlowNode,
   type Rect,
@@ -70,6 +71,9 @@ export function createEditors(context: EditorContext): Editors {
     edgeLabel: elementById<HTMLInputElement>('ee-label'),
     edgeInnerSource: elementById<HTMLSelectElement>('ee-inner-source'),
     edgeInnerTarget: elementById<HTMLSelectElement>('ee-inner-target'),
+    edgeData: elementById<HTMLDivElement>('ee-data'),
+    edgeDataRows: elementById<HTMLDivElement>('ee-data-rows'),
+    addDataField: elementById<HTMLButtonElement>('ee-add-field'),
     deleteEdge: elementById<HTMLButtonElement>('ee-delete'),
   };
 
@@ -119,7 +123,9 @@ export function createEditors(context: EditorContext): Editors {
     closeNodeEditor();
     editingEdgeSpec = edge.spec;
     elements.edgeLabel.value = edge.spec.label ?? '';
+    elements.edgeDataRows.replaceChildren();
     fillRefinementSelects(edge);
+    fillDataFields(edge);
     elements.edgeEditor.classList.remove('hidden');
     reposition();
     elements.edgeLabel.focus();
@@ -170,6 +176,73 @@ export function createEditors(context: EditorContext): Editors {
     select.classList.remove('hidden');
   }
 
+  function fillDataFields(edge: ModelEdge): void {
+    const supportsData = FlowDoc.edgeSupportsData(edge);
+    elements.edgeData.classList.toggle('hidden', !supportsData);
+    if (!supportsData) return;
+    // Rebuilding discards rows the user is still filling in (a blank row, a key typed but
+    // not yet committed), so only reload when the document itself diverged from the rows.
+    if (dataFieldsSignature(readDataFieldRows()) === dataFieldsSignature(edge.spec.data ?? [])) return;
+    elements.edgeDataRows.replaceChildren(
+      ...(edge.spec.data ?? []).map((field) => createDataFieldRow(field)),
+    );
+  }
+
+  function createDataFieldRow(field: EdgeDataField): HTMLDivElement {
+    const row = document.createElement('div');
+    row.className = 'data-row';
+    const key = createDataFieldInput('key', field.key);
+    const type = createDataFieldInput('type', field.type);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'row-remove';
+    remove.title = 'Remove field';
+    remove.textContent = '×';
+    remove.addEventListener('click', () => {
+      row.remove();
+      commitDataFields();
+    });
+    row.append(key, type, remove);
+    return row;
+  }
+
+  function createDataFieldInput(placeholder: string, value: string): HTMLInputElement {
+    const input = document.createElement('input');
+    input.placeholder = placeholder;
+    input.value = value;
+    input.spellcheck = false;
+    input.autocomplete = 'off';
+    input.addEventListener('change', commitDataFields);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') input.blur();
+    });
+    return input;
+  }
+
+  function readDataFieldRows(): EdgeDataField[] {
+    return [...elements.edgeDataRows.querySelectorAll('.data-row')].map((row) => {
+      const inputs = row.querySelectorAll('input');
+      return { key: inputs[0].value, type: inputs[1].value };
+    });
+  }
+
+  function commitDataFields(): void {
+    const edge = editingEdge();
+    if (!edge || !FlowDoc.edgeSupportsData(edge)) return;
+    context.applyEdit(edge.from, () => FlowDoc.setEdgeData(edge, readDataFieldRows()));
+  }
+
+  function dataFieldsSignature(fields: EdgeDataField[]): string {
+    return FlowDoc.normalizeEdgeDataFields(fields).map((field) => `${field.key}: ${field.type}`).join('\n');
+  }
+
+  function commitPendingDataFields(edge: ModelEdge): void {
+    if (!FlowDoc.edgeSupportsData(edge)) return;
+    const edited = dataFieldsSignature(readDataFieldRows());
+    if (edited === dataFieldsSignature(edge.spec.data ?? [])) return;
+    commitDataFields();
+  }
+
   // Closing must flush fields that commit on 'change': a click on the canvas closes the
   // editor before the browser fires blur/change, which would silently drop the edit.
   function closeNodeEditor(): void {
@@ -202,6 +275,7 @@ export function createEditors(context: EditorContext): Editors {
     if (edge && (elements.edgeLabel.value.trim() || null) !== (edge.spec.label ?? null)) {
       context.applyEdit(edge.from, () => FlowDoc.setEdgeLabel(edge, elements.edgeLabel.value));
     }
+    if (edge) commitPendingDataFields(edge);
     editingEdgeSpec = null;
     elements.edgeEditor.classList.add('hidden');
   }
@@ -243,8 +317,13 @@ export function createEditors(context: EditorContext): Editors {
     } else if (node) {
       fillNodeFields(node);
     }
-    if (editingEdgeSpec && !editingEdge()) closeEdgeEditor();
-    else if (editingEdge()) fillRefinementSelects(editingEdge()!);
+    const edge = editingEdge();
+    if (editingEdgeSpec && !edge) {
+      closeEdgeEditor();
+    } else if (edge) {
+      fillRefinementSelects(edge);
+      fillDataFields(edge);
+    }
     reposition();
   }
 
@@ -334,6 +413,13 @@ export function createEditors(context: EditorContext): Editors {
     if (!edge) return;
     const value = elements.edgeInnerSource.value || null;
     context.applyEdit(edge.from, () => FlowDoc.setEdgeInnerSource(edge, value));
+  });
+
+  elements.addDataField.addEventListener('click', () => {
+    const row = createDataFieldRow({ key: '', type: '' });
+    elements.edgeDataRows.append(row);
+    row.querySelector('input')?.focus();
+    reposition();
   });
 
   elements.deleteEdge.addEventListener('click', () => {

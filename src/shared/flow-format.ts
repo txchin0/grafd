@@ -277,7 +277,7 @@ function serializeNode(node: FlowNode, indent: string): string {
     lines.push(`${propIndent}${serializeEdgeExpression(edge)}`);
     if (edge.data?.length) {
       lines.push(`${propIndent}  data:`);
-      for (const field of edge.data) lines.push(`${propIndent}    ${field.key}: ${field.type}`);
+      for (const field of edge.data) lines.push(`${propIndent}    ${field.key}: ${field.type}`.trimEnd());
     }
   }
   return lines.join('\n');
@@ -402,6 +402,14 @@ export function sanitizeName(rawName: string): string {
     .replace(/[{}]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// Edge data keys are read back with PROPERTY_LINE, so a key that is not a single identifier
+// token would be silently dropped on the next parse.
+export function sanitizeDataKey(rawKey: string): string {
+  const cleaned = rawKey.trim().replace(/\s+/g, '_').replace(/[^\w-]/g, '');
+  if (cleaned === '') return '';
+  return /^[A-Za-z_]/.test(cleaned) ? cleaned : `_${cleaned}`;
 }
 
 export function collapseToSingleLine(text: string): string {

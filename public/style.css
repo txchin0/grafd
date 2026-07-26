@@ -415,7 +415,26 @@ html, body {
 .quiet-button:hover { color: var(--accent); border-color: var(--accent); }
 .danger-button:hover { color: var(--danger); border-color: var(--danger); }
 
-#edge-editor { width: 230px; display: flex; flex-direction: column; gap: 8px; }
+#edge-editor { width: 248px; display: flex; flex-direction: column; gap: 8px; }
+
+#ee-data { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+#ee-data-rows { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+
+.field-caption { font-size: var(--text-caption); color: var(--muted); }
+
+.data-row { display: flex; align-items: center; gap: 4px; }
+.data-row input { flex: 1 1 0; min-width: 0; }
+.data-row .row-remove {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--text-body);
+  line-height: 1;
+  padding: 2px 4px;
+}
+.data-row .row-remove:hover { color: var(--danger); }
 
 #graph-panel {
   left: 14px;
