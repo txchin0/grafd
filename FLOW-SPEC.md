@@ -1,6 +1,6 @@
 # .flow Format Specification
 
-**Version:** flow/1.2
+**Version:** flow/1.3
 **Status:** Draft
 
 ## Revision History
@@ -10,6 +10,7 @@
 | flow/1   | Initial draft.                                                                      |
 | flow/1.1 | Edges may target a node inside a subgraph via an optional `{Inner Node}` suffix. |
 | flow/1.2 | Edges may originate from a node inside a subgraph via an optional `{Inner Source}` prefix. |
+| flow/1.3 | Nodes and preambles may carry a `references` block linking to related source files, documents, and URLs. Indented blocks are generalized: a block belongs to the line directly above it. |
 
 ---
 
@@ -109,6 +110,7 @@ These are the same properties available on any inline node:
 | `on_error`    | Error handler for this graph. Catches unhandled errors from any node within. See [Section 7: Error Handling](#7-error-handling) |
 | `updates`     | Lists context providers this graph as a whole modifies. See [Section 8: Context Providers](#8-context-providers)                |
 | `entrypoint`  | Boolean. Marks this graph as an explicit entry point/trigger. See [Section 4.4: Entry Points](#44-entry-points)                 |
+| `references`  | Block of links to the material this graph corresponds to — source files, documents, URLs. See [Section 4.5: References](#45-references) |
 
 
 #### Optional Fields — Graph-Scoping Properties
@@ -129,6 +131,7 @@ The `expand` property does not appear in the preamble — the file itself *is* t
 ### 3.2 Syntax Rules
 
 - **Indentation:** 2-space indentation. Tabs are forbidden.
+- **Indented blocks:** A property may take a block of lines indented one level deeper than itself. The block belongs to the line directly above it — `data:` under an edge ([Section 5.5](#55-edge-data)), `references:` under a node or in a preamble ([Section 4.5](#45-references)).
 - **Encoding:** UTF-8.
 - **Comments:** Lines starting with `#` are comments. The LLM ignores them.
 - **Node names:** Cannot contain `:`  (colon followed by space). Enforced by the frontend. Node names must also not contain `{` or `}` — braces appear only on edges: a trailing `{Inner Node}` on an edge target names a node inside the target subgraph (see [Section 5.7](#57-targeting-a-node-inside-a-subgraph)), and a leading `{Inner Source}` prefix names a node inside the owning subgraph that the edge leaves from (see [Section 5.8](#58-originating-an-edge-from-a-node-inside-a-subgraph)).
@@ -168,6 +171,7 @@ All properties are optional. A node can have any combination:
 | `entrypoint`  | Boolean. Marks this node as an explicit entry point/trigger. See [Section 4.4: Entry Points](#44-entry-points)                                              |
 | `context`     | Declares context providers. Only applicable when the node is a graph (preamble or `graph:` block). See [Section 8: Context Providers](#8-context-providers) |
 | `inherits`    | **Auto-generated.** Lists context from parent graphs. Only applicable when the node is a graph. See [Section 8: Context Providers](#8-context-providers)    |
+| `references`  | Block of links to the material this node corresponds to — source files, documents, URLs. See [Section 4.5: References](#45-references)                      |
 
 
 A node and a graph preamble share the same property set. The only difference is that a preamble uses `name:` instead of a bare name at column 0, and the `expand` property is not used in preambles (the file *is* the expansion).
@@ -215,6 +219,72 @@ Handle Webhook
   description: "Triggered by Stripe webhook POST"
   -> Validate Signature
 ```
+
+### 4.5 References
+
+A node can point at the material it corresponds to — the source files that implement it, a design document, an external API spec. This is the `references` block:
+
+```
+Show Login
+  description: "Email and password form"
+  references:
+    - [Login form](src/client/login.tsx:42-88)
+    - [Session cookie decision](docs/decisions/0007-session-cookies.md)
+    - https://stripe.com/docs/auth
+  -> Submit Credentials : "user taps login"
+```
+
+Each entry sits on its own line under `references:`, indented one level deeper and prefixed with `- `. An entry takes one of two forms:
+
+
+| Form              | Example                                          |
+| ----------------- | ------------------------------------------------ |
+| `[Label](target)` | `- [Login form](src/client/login.tsx:42-88)`     |
+| `target`          | `- https://stripe.com/docs/auth`                 |
+
+
+The label is free-form human text saying why the target is relevant. It is optional — a bare target is a valid entry.
+
+#### Target Kinds
+
+Kinds are inferred, never declared:
+
+- A target with a URI scheme (`https:`, `mailto:`, …) is an external link.
+- Anything else is a file path, optionally suffixed with `:line` or `:startLine-endLine`.
+
+```
+- src/auth/session.ts              # whole file
+- src/auth/session.ts:112          # single line
+- src/auth/session.ts:112-140      # line range
+```
+
+#### Path Resolution
+
+**File targets resolve relative to the project root** — the directory the agent is working in — not relative to the containing `.flow` file. This deliberately differs from `expand` paths ([Section 10.1](#101-external-graph-references)), which are file-relative: referenced code normally lives outside the `.flow` workspace, and anchoring to the project root keeps references stable no matter how deeply the `.flow` files are nested.
+
+#### References in the Preamble
+
+The preamble is a node definition, so it takes `references` on the same terms, with entries indented one level under the key:
+
+```
+---
+name: Login Flow
+description: "Handles credential validation and token generation"
+references:
+  - [Auth service](src/server/auth-service.ts)
+  - https://jwt.io/introduction
+---
+```
+
+#### Semantics for Agents
+
+References are **pointers, not instructions**. They say what a node corresponds to; they never alter control flow, and they are not a substitute for `expand`. An agent:
+
+- Reads them for context before implementing or modifying a node.
+- Preserves existing entries when editing the file.
+- May add or update entries once it has implemented a node, so the diagram keeps pointing at the real code.
+
+Referenced files are not part of the `.flow` graph. A reference to a `.flow` file is an ordinary link, not an expansion.
 
 ---
 
@@ -714,16 +784,23 @@ Logout
 ---
 name: Login Flow
 description: "Handles credential validation and token generation"
+references:
+  - [Auth service](src/server/auth-service.ts)
 ---
 
 Validate Input
   description: "Check email format and password length"
+  references:
+    - [Credential validators](src/shared/validators.ts:18-64)
   -> Authenticate : "input valid"
   -> Return Validation Error : "input invalid"
 
 Authenticate
   description: "Calls auth API with credentials"
   on_error: -> Return Auth Error
+  references:
+    - [POST /auth/login handler](src/server/routes/auth.ts:31-77)
+    - https://jwt.io/introduction
   -> Generate Token : "credentials valid"
   -> Return Auth Error : "credentials invalid"
 
@@ -832,7 +909,8 @@ Reject Order
 file          := preamble newline body
 preamble      := "---" newline fields newline "---"
 fields        := field (newline field)*
-field         := key ": " value | key ": " list
+field         := key ": " value | key ": " list | preamble_reference_block
+preamble_reference_block := "references:" newline (indent "- " reference newline)+
 list          := "[" name ("," name)* "]"
 
 body          := (node | graph_block | comment | blank_line)*
@@ -840,10 +918,15 @@ body          := (node | graph_block | comment | blank_line)*
 node          := name newline (property | edge)*
 name          := <text at column 0, no ": " allowed>
 
-property      := indent key ": " value newline
-edge          := indent ("{" inner_source "}" " ")? "-> " target ("{" inner_target "}")? (" : " quoted_label)? newline (edge_data)?
+property      := indent key ": " value newline | reference_block
+reference_block := indent "references:" newline (indent indent "- " reference newline)+
+reference     := "[" label "](" target ")" | target
+target        := url | path (":" line_range)?
+line_range    := number ("-" number)?
+edge          := indent ("{" inner_source "}" " ")? "-> " target_node ("{" inner_target "}")? (" : " quoted_label)? newline (edge_data)?
 inner_source  := name
 inner_target  := name
+target_node   := name
 edge_data     := indent indent "data:" newline (indent indent indent key ": " type newline)+
 
 graph_block   := "graph: " name newline (node)*
@@ -872,6 +955,7 @@ The format has a minimal set of reserved keywords:
 | `entrypoint`  | Preamble, Node         | Marks node as explicit entry point                             |
 | `context`     | Preamble, Node (graph) | Explicit list of context providers this graph declares         |
 | `inherits`    | Preamble, Node (graph) | Auto-generated context inheritance from parent graphs          |
+| `references`  | Preamble, Node         | Block of links to related source files, documents, and URLs    |
 | `data`        | Edge                   | Schema of data passed on this edge                             |
 | `graph`       | Body                   | Defines a local reusable graph block                           |
 
@@ -899,6 +983,8 @@ The format has a minimal set of reserved keywords:
 | Edge syntax       | -> Target : "label"                                                               | Compact, colon-space forbidden in names          |
 | Subgraph entry targeting | Optional `{Inner}` suffix on the edge target                               | Keeps the edge anchored to the subgraph node while refining the entry point; braces are unused elsewhere, so no new keyword and no collision with the `[](path)` link form |
 | Subgraph exit origination | Optional `{Inner Source}` prefix on the edge | Keeps the edge on the parent graph under the subgraph node while refining the exit point; same brace convention as §5.7, no new keyword. |
+| References        | `references:` block of `- [Label](target)` entries, one per line                  | Reads well at ten entries, not just one; labels and URLs carry commas, so an inline `[a, b]` list would need escaping. Kinds inferred from the target, keeping with implicit-over-explicit |
+| Reference paths   | Relative to the project root, unlike file-relative `expand`                       | Referenced code lives outside the `.flow` workspace; project-relative paths stay stable regardless of `.flow` nesting depth |
 | Comments          | # prefix                                                                          | Universal convention                             |
 | Versioning        | Defined in spec file, not in individual .flow files                               | Single source of truth, no duplication           |
 | Spec location     | Separate file, read once                                                          | No duplication across files                      |

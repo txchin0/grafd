@@ -1,4 +1,4 @@
-# .flow Format Guide (flow/1.1)
+# .flow Format Guide (flow/1.3)
 
 You are reading a `.flow` workspace. This guide defines how to parse, interpret, and edit `.flow` files. Read once, then apply to every `.flow` file in the workspace.
 
@@ -35,6 +35,8 @@ inherits: [A, B]              # auto-generated: context from parent graphs
 on_error: -> Target           # optional: graph-level error handler
 updates: [A]                  # optional: context this graph mutates
 entrypoint: true              # optional: explicit trigger override
+references:                   # optional: links to related code, docs, URLs
+  - [Label](src/file.ts:12-40)
 ---
 
 <node declarations>
@@ -53,6 +55,9 @@ Node Name
   on_error: -> Target Node
   updates: [ContextName]
   entrypoint: true
+  references:                   # optional: links to related code, docs, URLs
+    - [Label](src/file.ts:12-40)
+    - https://example.com/spec
   -> Target Node : "optional label"
   -> Subgraph {Inner Node} : "optional label"  # enter subgraph at Inner Node
   {Inner Source} -> Target Node : "optional label"  # leave subgraph from Inner Source
@@ -81,6 +86,33 @@ When editing a `.flow` file:
 - No `expand` → leaf, you implement freely
 - Has `expand` → follow the referenced graph
 - Purpose inferred from title + structure + description
+
+### References
+
+A node (or a preamble) may carry a `references` block pointing at the material it corresponds to — the code that implements it, a design doc, an external spec:
+
+```
+Show Login
+  description: "Email and password form"
+  references:
+    - [Login form](src/client/login.tsx:42-88)
+    - [Session cookie decision](docs/decisions/0007-session-cookies.md)
+    - https://stripe.com/docs/auth
+  -> Submit Credentials
+```
+
+One entry per line, indented one level under `references:`, prefixed with `- `. Each entry is either `[Label](target)` or a bare `target`; the label is optional free text saying why the target matters.
+
+**Target kinds are inferred:** a URI scheme (`https:`, `mailto:`, …) means an external link; anything else is a file path with an optional `:line` or `:startLine-endLine` suffix.
+
+**File paths resolve against the project root** — the directory you are working in — *not* the containing `.flow` file. This differs from `expand` paths, which are file-relative.
+
+How to treat them:
+
+- **Read** them for context before implementing or changing a node. A reference to existing code tells you where the node already lives.
+- **Preserve** them when editing a file.
+- **Update or add** them once you implement a node, so the diagram keeps pointing at the real code.
+- **Do not** treat them as control flow or as expansion. A reference to a `.flow` file is a plain link, not an `expand`.
 
 ## Edges
 
@@ -229,7 +261,7 @@ Lines starting with `#` are comments. Ignore them when interpreting; preserve th
 
 When you encounter `expand: [Label](path.flow)`:
 1. Read the referenced file.
-2. The file's preamble defines the expanded node — put node-definition fields there (`description`, and the target's own `context` / `inherits`), not on the referencing node.
+2. The file's preamble defines the expanded node — put node-definition fields there (`description`, `references`, and the target's own `context` / `inherits`), not on the referencing node.
 3. Its body contains the child nodes.
 4. Apply all rules recursively.
 
@@ -237,7 +269,7 @@ Paths are relative to the referencing file. The referencing node keeps parent-sc
 
 ## Reserved Keywords
 
-`name`, `description`, `context`, `inherits`, `on_error`, `expand`, `updates`, `entrypoint`, `data`, `graph`, `id`, `pos`
+`name`, `description`, `context`, `inherits`, `on_error`, `expand`, `updates`, `entrypoint`, `references`, `data`, `graph`, `id`, `pos`
 
 All other identifiers are user-defined node names or context names.
 
@@ -252,6 +284,7 @@ All other identifiers are user-defined node names or context names.
 | `entrypoint` | Inferred: no incoming edges = entry point |
 | `context` | Graph declares no new context |
 | `inherits` | Graph inherits nothing (root or isolated) |
+| `references` | No known related code or documents — locate them yourself, and add them once you implement the node |
 | `id` / `pos` | Editor assigns them on next open |
 | Edge label | Sequential connection |
 | Edge `data` | Infer payload from context |
@@ -264,16 +297,20 @@ All other identifiers are user-defined node names or context names.
 ```
 file        := preamble body
 preamble    := "---" NL field+ "---" NL
-field       := key ": " (value | list) NL
+field       := (key ": " (value | list) NL) | reference_block
 list        := "[" name ("," name)* "]"
 
 body        := (node | graph_block | comment | blank)*
 
 node        := name NL (indent property)*
-property    := (key ": " value) | edge
-edge        := ("{" inner_source "}" " ")? "-> " target ("{" inner_target "}")? (" : " quoted_label)? NL (indent data_block)?
+property    := (key ": " value) | reference_block | edge
+reference_block := "references:" NL (indent "- " reference NL)+
+reference   := "[" label "](" target ")" | target
+target      := url | path (":" line ("-" line)?)?
+edge        := ("{" inner_source "}" " ")? "-> " target_node ("{" inner_target "}")? (" : " quoted_label)? NL (indent data_block)?
 inner_source := name
 inner_target := name
+target_node := name
 data_block  := "data:" NL (indent key ": " type NL)+
 
 graph_block := "graph: " name NL (node)*
@@ -284,13 +321,16 @@ indent      := "  "    # 2 spaces, no tabs
 
 `id` and `pos` are ordinary properties syntactically; `pos` takes four comma-separated integers (`x, y, w, h`).
 
+An indented block belongs to the line directly above it: `data:` under an edge, `references:` under a node or preamble field.
+
 ## Writing .flow Files
 
 When you create or edit `.flow` files, follow the editor's canonical style so files round-trip cleanly:
 
 - 2-space indentation, never tabs.
 - One blank line between top-level items (nodes, `graph:` blocks, the preamble).
-- Per-node line order: `id`, `pos`, other properties, then edges.
+- Per-node line order: `id`, `pos`, other single-line properties, the `references:` block, then edges. Block-valued properties come last so the single-line ones stay in one column.
+- An empty `references:` block is omitted entirely — write the key only when it has entries.
 - Quoted values use double quotes. The format has **no escape sequences** — a `"` character can never appear inside a label or quoted value.
 - Node names are unique within their graph and never contain `: ` (colon-space) or curly braces `{` `}`. An optional `-> Subgraph {Inner}` edge target enters the subgraph at that inner node; an optional `{Inner Source} -> Target` prefix leaves the subgraph from that inner node.
 
@@ -313,5 +353,6 @@ For each `.flow` file:
 - If they sketched loosely, make sensible engineering decisions.
 - If they specified precisely, respect the specification.
 - Use `description` fields as primary guidance for tech stack, patterns, and constraints.
+- Follow `references` to existing code and documents before writing anything new, and point them at the real code once you have implemented a node.
 - Respect `context`/`inherits` as available state, `updates` as mutations.
 - Respect `on_error` as the error flow.
