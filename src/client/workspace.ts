@@ -23,6 +23,9 @@ export interface WorkspaceDelegate {
 export interface Workspace {
   readonly kind: WorkspaceKind;
   readonly label: string;
+  // Absolute path that node references resolve against, when the backend can know one.
+  // Only the server workspace can; the others leave references to the clipboard.
+  readonly projectRoot?: string | null;
   start(delegate: WorkspaceDelegate): Promise<string[]>;
   stop(): void;
   readFile(path: string): Promise<string | null>;

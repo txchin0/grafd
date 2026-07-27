@@ -3,7 +3,7 @@ import { defaultPreferences, parsePreferences } from '../src/client/preferences.
 
 describe('parsePreferences', () => {
   it('reads stored values', () => {
-    expect(parsePreferences('{"showCanvasGrid":false}')).toEqual({ showCanvasGrid: false });
+    expect(parsePreferences('{"showCanvasGrid":false}')).toEqual({ ...defaultPreferences(), showCanvasGrid: false });
   });
 
   it('falls back to defaults for missing fields', () => {
@@ -15,7 +15,14 @@ describe('parsePreferences', () => {
   });
 
   it('drops unknown fields', () => {
-    expect(parsePreferences('{"showCanvasGrid":false,"whatever":1}')).toEqual({ showCanvasGrid: false });
+    expect(parsePreferences('{"showCanvasGrid":false,"whatever":1}')).toEqual({ ...defaultPreferences(), showCanvasGrid: false });
+  });
+
+  it('reads a stored editor link scheme and rejects an unknown one', () => {
+    expect(parsePreferences('{"editorLinkScheme":"cursor"}').editorLinkScheme).toBe('cursor');
+    expect(parsePreferences('{"editorLinkScheme":"emacs"}').editorLinkScheme).toBe(
+      defaultPreferences().editorLinkScheme,
+    );
   });
 
   it('falls back to defaults for unparseable, empty, and absent text', () => {

@@ -47,7 +47,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   write/broadcast, chokidar file watcher (own writes are suppressed by content hash).
   Serves `public/` (static shell), `dist/client` at `/js`, `dist/shared` at `/shared`, and
   rough.js at `/vendor/roughjs` (mapped to the bare `roughjs` specifier by the import map
-  in `public/index.html`). Watches `flows/` by default (override via CLI path argument).
+  in `public/index.html`). Watches `flows/` by default (override via CLI path argument), and
+  reports the project root that node references resolve against — the launch directory,
+  overridable with `--project-root=<path>` — over `/api/project-root`.
 - `src/server/flow-files.ts` — path safety (`.flow`-only, root-confined), portable path
   conversion, recursive `.flow` discovery, content hashing.
 - `src/shared/flow-format.ts` — parse/serialize `.flow` text, format helpers. No DOM, no
@@ -75,6 +77,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   that lets nodes inside frames be edited in place (mutations are routed to the .flow file
   that owns them).
 - `src/client/editors.ts` — floating DOM overlays for node and edge editing.
+- `src/client/reference-rows.ts` / `reference-link.ts` — the editable `references:` list shared by
+  the node editor and the graph panel, plus target classification (URL vs project-root-relative
+  path with an optional line range) and the editor deep link it opens.
 - `src/client/modal.ts` — the scrim/panel shell shared by the full-screen dialogs
   (`screenshot.ts`, `preferences-dialog.ts`).
 - `src/client/preferences.ts` / `preferences-dialog.ts` — user-level display options, stored in

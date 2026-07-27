@@ -17,6 +17,7 @@ import {
   sanitizeName,
   uniqueName,
   writeDescriptionForNode,
+  writeReferencesForNode,
   type EdgeDataField,
   type EdgeSpec,
   type FlowDocument,
@@ -24,6 +25,7 @@ import {
   type FlowNode,
   type GraphItem,
   type Rect,
+  type Reference,
 } from '../shared/flow-format.js';
 import type { DisplayGeometry } from './expansion.js';
 
@@ -479,10 +481,11 @@ export function extractGraphBlockToDocument(
 ): FlowDocument {
   const extracted: FlowDocument = {
     leading: [],
-    preamble: { fields: [{ key: 'name', value: graphName }] },
+    preamble: { fields: [{ key: 'name', value: graphName }], references: [] },
     items: [],
   };
   moveDescriptionOfSoleHost(doc, blockName, extracted);
+  moveReferencesOfSoleHost(doc, blockName, extracted);
   relinkExpandsToPath(doc, blockName, linkPath, graphName);
 
   const movedNames = reachableBlockNames(doc, [blockName]);
@@ -557,6 +560,14 @@ function moveDescriptionOfSoleHost(doc: FlowDocument, blockName: string, extract
   const description = getProp(hosts[0], 'description');
   if (description == null) return;
   writeDescriptionForNode(hosts[0], extracted, description);
+}
+
+// References follow description for the same reason: once the block owns a file, its preamble
+// is the node definition, so a lone host's references belong there.
+function moveReferencesOfSoleHost(doc: FlowDocument, blockName: string, extracted: FlowDocument): void {
+  const hosts = allNodes(doc).filter((node) => getProp(node, 'expand') === blockName);
+  if (hosts.length !== 1 || hosts[0].references.length === 0) return;
+  writeReferencesForNode(hosts[0], extracted, hosts[0].references);
 }
 
 export function deleteNodes(
@@ -684,6 +695,22 @@ export function setEdgeData(edge: ModelEdge, fields: EdgeDataField[]): void {
   if (!edgeSupportsData(edge)) return;
   const normalized = normalizeEdgeDataFields(fields);
   edge.spec.data = normalized.length ? normalized : null;
+}
+
+// The format has no escape sequences, so the delimiters of the `[Label](target)` form cannot
+// survive inside either part and are stripped rather than escaped. This does mean a URL
+// containing parentheses loses them.
+export function normalizeReferences(references: Reference[]): Reference[] {
+  return references
+    .map((reference) => ({
+      label: collapseToSingleLine(reference.label ?? '').replace(/[[\]]/g, '') || null,
+      target: collapseToSingleLine(reference.target).replace(/[()]/g, ''),
+    }))
+    .filter((reference) => reference.target !== '');
+}
+
+export function setNodeReferences(node: FlowNode, references: Reference[]): void {
+  node.references = normalizeReferences(references);
 }
 
 export function setEdgeInnerTarget(edge: ModelEdge, name: string | null): void {

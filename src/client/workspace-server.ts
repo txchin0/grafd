@@ -7,6 +7,7 @@ import type { Workspace, WorkspaceDelegate } from './workspace.js';
 // Relative so the probe works when the app is hosted under a subpath (where no Graf server
 // answers and the app falls back to the serverless browser workspace).
 const FILES_ENDPOINT = './api/files';
+const PROJECT_ROOT_ENDPOINT = './api/project-root';
 
 export async function serverIsAvailable(): Promise<boolean> {
   try {
@@ -22,6 +23,8 @@ export async function serverIsAvailable(): Promise<boolean> {
 export class ServerWorkspace implements Workspace {
   readonly kind = 'server';
   readonly label = 'server';
+  // Absolute path node references resolve against; only this backend can know it.
+  projectRoot: string | null = null;
   private delegate: WorkspaceDelegate | null = null;
   private socket: WebSocket | null = null;
   private stopped = false;
@@ -36,8 +39,21 @@ export class ServerWorkspace implements Workspace {
   async start(delegate: WorkspaceDelegate): Promise<string[]> {
     this.delegate = delegate;
     this.connect();
+    void this.loadProjectRoot();
     const response = await fetch(FILES_ENDPOINT);
     return ((await response.json()) as { files: string[] }).files;
+  }
+
+  // Best-effort: an older server without the endpoint just leaves references un-linkable.
+  private async loadProjectRoot(): Promise<void> {
+    try {
+      const response = await fetch(PROJECT_ROOT_ENDPOINT);
+      if (!response.ok) return;
+      const body = (await response.json()) as { root?: unknown };
+      if (typeof body.root === 'string') this.projectRoot = body.root;
+    } catch {
+      this.projectRoot = null;
+    }
   }
 
   stop(): void {

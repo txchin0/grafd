@@ -35,6 +35,8 @@ import {
   resolveLinkPath,
   resolvedExpandPath,
   descriptionForNode,
+  referencesForNode,
+  setPreambleReferences,
   sanitizeName,
   type EdgeSpec,
   type ExpandLink,
@@ -43,6 +45,7 @@ import {
   type FlowNode,
   type GraphItem,
   type Rect,
+  type Reference,
 } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
@@ -51,6 +54,8 @@ import { createContextMenu, type MenuItem } from './context-menu.js';
 import type { Modal } from './modal.js';
 import { createPreferencesDialog } from './preferences-dialog.js';
 import { loadPreferences, type Preferences } from './preferences.js';
+import { createReferenceRows } from './reference-rows.js';
+import type { LinkContext } from './reference-link.js';
 import {
   ExpansionLayer,
   TOGGLE_DURATION_MS,
@@ -119,6 +124,7 @@ const redoStack: WorkspaceSnapshot[] = [];
 const externalCommittedTexts = new Map<string, string>();
 let commitTimer: ReturnType<typeof setTimeout> | undefined;
 
+let currentPreferences: Preferences = loadPreferences();
 let workspace: Workspace | null = null;
 let defaultWorkspaceKind: 'server' | 'browser' = 'browser';
 let manifest: WorkspaceManifest = emptyManifest();
@@ -156,6 +162,8 @@ const elements = {
   graphContext: elementById<HTMLInputElement>('gp-context'),
   graphOnError: elementById<HTMLInputElement>('gp-on-error'),
   graphEntrypoint: elementById<HTMLInputElement>('gp-entrypoint'),
+  graphReferenceRows: elementById<HTMLDivElement>('gp-reference-rows'),
+  graphAddReference: elementById<HTMLButtonElement>('gp-add-reference'),
 };
 
 function scopeItemsNow() {
@@ -568,6 +576,16 @@ function breadcrumbSeparator(): HTMLElement {
   return separator;
 }
 
+const graphReferenceRows = createReferenceRows({
+  rows: elements.graphReferenceRows,
+  addButton: elements.graphAddReference,
+  linkContext,
+  commit: (references) => {
+    if (!state.doc || state.scope) return;
+    mutate(() => setPreambleReferences(state.doc!, FlowDoc.normalizeReferences(references)));
+  },
+});
+
 function renderGraphPanel(): void {
   const scoped = state.scope != null;
   const displayName = scoped
@@ -580,6 +598,10 @@ function renderGraphPanel(): void {
   setUnlessFocused(elements.graphContext, scoped ? '' : parseListValue(getPreambleField(state.doc!, 'context')).join(', '));
   setUnlessFocused(elements.graphOnError, scoped ? '' : (getPreambleField(state.doc!, 'on_error') ?? ''));
   elements.graphEntrypoint.checked = !scoped && getPreambleField(state.doc!, 'entrypoint') === 'true';
+  // A local `graph:` block has no preamble of its own, so preamble-only fields go read-only
+  // while one is in scope.
+  graphReferenceRows.fill(scoped ? [] : (state.doc!.preamble?.references ?? []));
+  graphReferenceRows.setDisabled(scoped);
 
   for (const field of [elements.graphDescription, elements.graphContext, elements.graphOnError, elements.graphEntrypoint]) {
     field.disabled = scoped;
@@ -1071,10 +1093,52 @@ function applyDescriptionEdit(node: FlowNode, text: string): void {
   });
 }
 
+function referencesOf(node: FlowNode): Reference[] {
+  return referencesForNode(node, expandTargetOwner(node)?.doc ?? null);
+}
+
+// Mirrors applyDescriptionEdit: an expanded node's definition lives in the target file's
+// preamble, so that is where its references are written.
+function applyReferencesEdit(node: FlowNode, references: Reference[]): void {
+  const normalized = FlowDoc.normalizeReferences(references);
+  const path = resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path);
+  if (!path) {
+    applyEdit(node, () => FlowDoc.setNodeReferences(node, normalized));
+    return;
+  }
+  const doc = expandTargetDoc(path);
+  if (doc) {
+    writeExpandReferences(node, { doc, path }, normalized);
+    return;
+  }
+  // Prefetch may still be in flight when the user starts typing; finish the load then write
+  // to the preamble so the edit does not land on the referencing node.
+  void expansions.ensureDocument(path).then((loaded) => {
+    if (!node.id || findNode(node.id) !== node) return;
+    if (resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path) !== path) return;
+    if (loaded) writeExpandReferences(node, { doc: loaded, path }, normalized);
+    else applyEdit(node, () => FlowDoc.setNodeReferences(node, normalized));
+  });
+}
+
+function linkContext(): LinkContext {
+  return {
+    projectRoot: workspace?.projectRoot ?? null,
+    editorLinkScheme: currentPreferences.editorLinkScheme,
+  };
+}
+
 function writeExpandDescription(node: FlowNode, target: DocumentOwner, quoted: string | null): void {
   applyToDoc(target, () => setPreambleField(target.doc, 'description', quoted));
   if (getProp(node, 'description') != null) {
     applyEdit(node, () => setProp(node, 'description', null));
+  }
+}
+
+function writeExpandReferences(node: FlowNode, target: DocumentOwner, references: Reference[]): void {
+  applyToDoc(target, () => setPreambleReferences(target.doc, references));
+  if (node.references.length > 0) {
+    applyEdit(node, () => FlowDoc.setNodeReferences(node, []));
   }
 }
 
@@ -1312,6 +1376,9 @@ const editors: Editors = createEditors({
   applyEditNow: (node, mutation) => applyEdit(node, mutation, { commit: 'now' }),
   descriptionOf,
   applyDescriptionEdit,
+  referencesOf,
+  applyReferencesEdit,
+  linkContext,
   ensureExpandTarget,
   ensureInnerTargets,
   ensureInnerSources,
@@ -1333,6 +1400,7 @@ function screenshotFileStem(): string {
 const screenshot = createScreenshotDialog({ view, fileStem: screenshotFileStem });
 
 function applyPreferences(preferences: Preferences): void {
+  currentPreferences = preferences;
   view.gridIsVisible = preferences.showCanvasGrid;
   view.requestRender();
 }

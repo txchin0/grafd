@@ -1,13 +1,22 @@
 ---
 name: Login Flow
 description: "Handles credential validation and token generation"
+references:
+  - [Auth service](src/server/auth-service.ts)
+  - https://jwt.io/introduction
 ---
 
 Validate Input
   id: 5e7a9c1b-3d5f-4e7a-9c1b-3d5f7a9c1e3b
   pos: 80, 232, 200, 88
   description: "Check email format and password length"
+  references:
+    - [Credential validators](src/shared/validators.ts:18-64)
+    - docs/decisions/0007-session-cookies.md
   -> Authenticate : "input valid"
+    data:
+      email: string
+      password: string
   -> Return Validation Error : "input invalid"
 
 Authenticate

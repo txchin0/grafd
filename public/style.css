@@ -444,7 +444,9 @@ html, body {
 
 .data-row { display: flex; align-items: center; gap: 4px; }
 .data-row input { flex: 1 1 0; min-width: 0; }
-.data-row .row-remove {
+
+.row-remove,
+.row-open {
   background: transparent;
   border: none;
   color: var(--muted);
@@ -454,7 +456,19 @@ html, body {
   line-height: 1;
   padding: 2px 4px;
 }
-.data-row .row-remove:hover { color: var(--danger); }
+.row-remove:hover { color: var(--danger); }
+.row-open:hover { color: var(--accent); }
+
+#ne-references,
+#gp-references { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+#ne-reference-rows,
+#gp-reference-rows { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+
+/* The overlay is too narrow for label and target side by side, so the target line carries
+   the row actions and the label sits above it. */
+.reference-row { display: flex; flex-direction: column; gap: 4px; }
+.reference-target { display: flex; align-items: center; gap: 4px; }
+.reference-target input { flex: 1 1 0; min-width: 0; }
 
 #graph-panel {
   left: 14px;

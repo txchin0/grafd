@@ -3,7 +3,9 @@
 // properties — `id` (a UUID) and `pos: x, y, w, h` (its canvas rectangle).
 //
 // Serialization is canonical: 2-space indentation, one blank line between top-level items,
-// and per-node ordering of id, pos, authored properties, then edges. Comments are preserved
+// and per-node ordering of id, pos, authored properties, the references block, then edges.
+// Block-valued properties (an edge's `data:`, a node's `references:`) are indented one level
+// under the line that owns them. Comments are preserved
 // at the position they appeared between nodes; blank lines carry no meaning and are
 // normalized. The format has no escape sequences, so double quotes are not allowed inside
 // labels and quoted values (see quoteValue).
@@ -25,6 +27,11 @@ export interface EdgeDataField {
   type: string;
 }
 
+export interface Reference {
+  label: string | null;
+  target: string;
+}
+
 export interface EdgeSpec {
   target: string;
   innerSource: string | null;
@@ -38,6 +45,7 @@ export interface FlowNode {
   id: string | null;
   pos: Rect | null;
   props: KeyValue[];
+  references: Reference[];
   edges: EdgeSpec[];
 }
 
@@ -61,6 +69,7 @@ export type FlowItem = CommentItem | NodeItem | GraphItem;
 
 export interface Preamble {
   fields: KeyValue[];
+  references: Reference[];
 }
 
 export interface FlowDocument {
@@ -77,7 +86,12 @@ export interface ExpandLink {
 const PROPERTY_LINE = /^([A-Za-z_][\w-]*):\s?(.*)$/;
 const EDGE_LINE = /^(?:\{([^}]*)\}\s+)?->\s+([^{]+?)(?:\s*\{([^}]*)\})?(?:\s+:\s+"(.*)")?$/;
 const GRAPH_HEADER = /^graph:\s+(.+)$/;
-const EXTERNAL_EXPAND_LINK = /^\[(.*)\]\((.*)\)$/;
+const MARKDOWN_LINK = /^\[(.*)\]\((.*)\)$/;
+const REFERENCE_ENTRY = /^-\s+(.*)$/;
+
+// An indented block belongs to the line directly above it: `data:` under an edge, `- entry`
+// lines under a `references:` key. The parser tracks which one is open as it walks a node.
+type OpenBlock = 'edge-data' | 'references' | null;
 
 export function parseFlow(text: string): FlowDocument {
   const lines = text.split(/\r?\n/);
@@ -91,7 +105,7 @@ export function parseFlow(text: string): FlowDocument {
 
   if (lines[index]?.trim() === '---') {
     const preamble = parsePreamble(lines, index + 1);
-    doc.preamble = { fields: preamble.fields };
+    doc.preamble = { fields: preamble.fields, references: preamble.references };
     index = preamble.next;
   }
 
@@ -104,20 +118,44 @@ function skipBlankLines(lines: string[], index: number): number {
   return index;
 }
 
-function parsePreamble(lines: string[], start: number): { fields: KeyValue[]; next: number } {
+function parsePreamble(
+  lines: string[],
+  start: number,
+): { fields: KeyValue[]; references: Reference[]; next: number } {
   const fields: KeyValue[] = [];
+  const references: Reference[] = [];
+  let referenceBlockIsOpen = false;
   let index = start;
+
   while (index < lines.length && lines[index].trim() !== '---') {
-    const match = lines[index].trim().match(PROPERTY_LINE);
-    if (match) fields.push({ key: match[1], value: match[2].trim() });
+    const trimmed = lines[index].trim();
+    const entry = trimmed.match(REFERENCE_ENTRY);
+    if (referenceBlockIsOpen && entry) {
+      pushReference(references, entry[1]);
+      index += 1;
+      continue;
+    }
+    const match = trimmed.match(PROPERTY_LINE);
+    if (match) {
+      const value = match[2].trim();
+      referenceBlockIsOpen = match[1] === 'references';
+      if (referenceBlockIsOpen) pushReference(references, value);
+      else fields.push({ key: match[1], value });
+    }
     index += 1;
   }
-  return { fields, next: index + 1 };
+  return { fields, references, next: index + 1 };
+}
+
+function pushReference(references: Reference[], entryText: string): void {
+  const reference = parseReference(entryText);
+  if (reference) references.push(reference);
 }
 
 function parseItems(lines: string[], start: number, baseIndent: number): { items: FlowItem[]; next: number } {
   const items: FlowItem[] = [];
   let currentNode: FlowNode | null = null;
+  let openBlock: OpenBlock = null;
   let index = start;
 
   while (index < lines.length) {
@@ -145,10 +183,12 @@ function parseItems(lines: string[], start: number, baseIndent: number): { items
         const graphBody = parseItems(lines, index + 1, baseIndent + 2);
         items.push({ kind: 'graph', name: graphMatch[1].trim(), items: graphBody.items });
         currentNode = null;
+        openBlock = null;
         index = graphBody.next;
         continue;
       }
       currentNode = emptyNode(trimmed);
+      openBlock = null;
       items.push({ kind: 'node', node: currentNode });
       index += 1;
       continue;
@@ -160,12 +200,14 @@ function parseItems(lines: string[], start: number, baseIndent: number): { items
     }
 
     if (indent >= 4) {
-      attachEdgeData(currentNode, trimmed);
+      if (openBlock === 'references') attachReference(currentNode, trimmed);
+      else if (openBlock === 'edge-data') attachEdgeData(currentNode, trimmed);
     } else if (isEdgeLine(trimmed)) {
       currentNode.edges.push(parseEdgeExpression(trimmed));
+      openBlock = 'edge-data';
     } else {
       const match = trimmed.match(PROPERTY_LINE);
-      if (match) assignNodeProperty(currentNode, match[1], match[2].trim());
+      if (match) openBlock = assignNodeProperty(currentNode, match[1], match[2].trim());
     }
     index += 1;
   }
@@ -178,17 +220,42 @@ function stripCommentMarker(line: string): string {
 }
 
 export function emptyNode(name: string): FlowNode {
-  return { name, id: null, pos: null, props: [], edges: [] };
+  return { name, id: null, pos: null, props: [], references: [], edges: [] };
 }
 
-function assignNodeProperty(node: FlowNode, key: string, value: string): void {
+// Returns the block this property opens, so the caller knows where the lines indented
+// beneath it belong. `references:` normally carries no value, but a hand-written one-line
+// form is kept rather than dropped.
+function assignNodeProperty(node: FlowNode, key: string, value: string): OpenBlock {
   if (key === 'id') {
     node.id = value;
   } else if (key === 'pos') {
     node.pos = parsePos(value);
+  } else if (key === 'references') {
+    pushReference(node.references, value);
+    return 'references';
   } else {
     node.props.push({ key, value });
   }
+  return null;
+}
+
+function attachReference(node: FlowNode, trimmed: string): void {
+  const entry = trimmed.match(REFERENCE_ENTRY);
+  if (entry) pushReference(node.references, entry[1]);
+}
+
+export function parseReference(entryText: string): Reference | null {
+  const text = entryText.trim();
+  if (text === '') return null;
+  const link = text.match(MARKDOWN_LINK);
+  if (!link) return { label: null, target: text };
+  const target = link[2].trim();
+  return target === '' ? null : { label: link[1].trim() || null, target };
+}
+
+export function formatReference(reference: Reference): string {
+  return reference.label ? `[${reference.label}](${reference.target})` : reference.target;
 }
 
 function attachEdgeData(node: FlowNode, trimmed: string): void {
@@ -252,7 +319,8 @@ export function serializeFlow(doc: FlowDocument): string {
   }
   if (doc.preamble) {
     const fieldLines = doc.preamble.fields.map((field) => `${field.key}: ${field.value}`);
-    blocks.push(['---', ...fieldLines, '---'].join('\n'));
+    const referenceLines = referenceBlockLines(doc.preamble.references, '');
+    blocks.push(['---', ...fieldLines, ...referenceLines, '---'].join('\n'));
   }
   for (const item of doc.items) blocks.push(serializeItem(item, ''));
   return blocks.join('\n\n') + '\n';
@@ -267,12 +335,23 @@ function serializeItem(item: FlowItem, indent: string): string {
   return serializeNode(item.node, indent);
 }
 
+// Block-valued properties trail the single-line ones so those stay in one readable column,
+// and an empty block is omitted entirely (SAVE-GUIDE "Writing .flow Files").
+function referenceBlockLines(references: Reference[], indent: string): string[] {
+  if (references.length === 0) return [];
+  return [
+    `${indent}references:`,
+    ...references.map((reference) => `${indent}  - ${formatReference(reference)}`),
+  ];
+}
+
 function serializeNode(node: FlowNode, indent: string): string {
   const lines = [`${indent}${node.name}`];
   const propIndent = indent + '  ';
   if (node.id) lines.push(`${propIndent}id: ${node.id}`);
   if (node.pos) lines.push(`${propIndent}pos: ${formatPos(node.pos)}`);
   for (const prop of node.props) lines.push(`${propIndent}${prop.key}: ${prop.value}`);
+  lines.push(...referenceBlockLines(node.references, propIndent));
   for (const edge of node.edges) {
     lines.push(`${propIndent}${serializeEdgeExpression(edge)}`);
     if (edge.data?.length) {
@@ -302,7 +381,7 @@ export function getPreambleField(doc: FlowDocument, key: string): string | null 
 }
 
 export function setPreambleField(doc: FlowDocument, key: string, value: string | null): void {
-  if (!doc.preamble) doc.preamble = { fields: [] };
+  if (!doc.preamble) doc.preamble = { fields: [], references: [] };
   const fields = doc.preamble.fields;
   if (value == null || value === '') {
     doc.preamble.fields = fields.filter((field) => field.key !== key);
@@ -340,7 +419,7 @@ export function formatListValue(entries: string[]): string {
 }
 
 export function parseExpandLink(value: string | null | undefined): ExpandLink | null {
-  const match = value?.trim().match(EXTERNAL_EXPAND_LINK);
+  const match = value?.trim().match(MARKDOWN_LINK);
   if (!match) return null;
   return { label: match[1], path: match[2] };
 }
@@ -391,6 +470,32 @@ export function writeDescriptionForNode(
     return;
   }
   setProp(node, 'description', quotedValue);
+}
+
+export function setPreambleReferences(doc: FlowDocument, references: Reference[]): void {
+  if (!doc.preamble) doc.preamble = { fields: [], references: [] };
+  doc.preamble.references = references;
+}
+
+// References follow description across an `expand` link: the target file's preamble is the
+// node definition, so that is where a referencing node's references live (SAVE-GUIDE
+// "Cross-File Resolution").
+export function referencesForNode(node: FlowNode, expandDoc: FlowDocument | null): Reference[] {
+  const fromPreamble = expandDoc?.preamble?.references ?? [];
+  return fromPreamble.length > 0 ? fromPreamble : node.references;
+}
+
+export function writeReferencesForNode(
+  node: FlowNode,
+  expandDoc: FlowDocument | null,
+  references: Reference[],
+): void {
+  if (expandDoc) {
+    setPreambleReferences(expandDoc, references);
+    node.references = [];
+    return;
+  }
+  node.references = references;
 }
 
 // Node names may not contain ": " or curly braces (spec §3.2); braces mark an inner

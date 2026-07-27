@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  emptyNode,
   getPreambleField,
   getProp,
   parseFlow,
@@ -32,6 +33,7 @@ import {
   scopeItems,
   setEdgeData,
   setEdgeLabel,
+  setNodeReferences,
   type ModelEdge,
 } from '../src/client/flow-doc.js';
 
@@ -193,6 +195,42 @@ C
     expect(getProp(copyA, 'on_error')).toBe('-> B 2');
     // Originals are untouched.
     expect(a.edges.map((edge) => edge.target)).toEqual(['B', 'C']);
+  });
+
+  it('carries references onto the copy without sharing them', () => {
+    const doc = docFrom(`Login
+  ${PLACED(0, 0)}
+  references:
+    - src/login.tsx:12
+`);
+    const [login] = allNodes(doc);
+    const [copy] = duplicateNodes(doc.items, [login], { x: 24, y: 24 });
+    expect(copy.references).toEqual([{ label: null, target: 'src/login.tsx:12' }]);
+    copy.references[0].target = 'other.ts';
+    expect(login.references[0].target).toBe('src/login.tsx:12');
+  });
+});
+
+describe('setNodeReferences', () => {
+  it('drops entries with no target and collapses whitespace', () => {
+    const node = emptyNode('Node');
+    setNodeReferences(node, [
+      { label: '  Login\n  form ', target: ' src/login.tsx:42 ' },
+      { label: 'empty', target: '  ' },
+    ]);
+    expect(node.references).toEqual([{ label: 'Login form', target: 'src/login.tsx:42' }]);
+  });
+
+  it('strips the delimiters the format cannot escape', () => {
+    const node = emptyNode('Node');
+    setNodeReferences(node, [{ label: '[odd] label', target: 'https://x.test/a_(b)' }]);
+    expect(node.references).toEqual([{ label: 'odd label', target: 'https://x.test/a_b' }]);
+  });
+
+  it('treats a blank label as absent', () => {
+    const node = emptyNode('Node');
+    setNodeReferences(node, [{ label: '   ', target: 'src/a.ts' }]);
+    expect(node.references).toEqual([{ label: null, target: 'src/a.ts' }]);
   });
 });
 
@@ -899,6 +937,44 @@ graph: Shared
     const extracted = extractGraphBlockToDocument(doc, 'Shared', 'shared.flow');
     expect(getPreambleField(extracted, 'description')).toBeNull();
     expect(getProp(allNodes(doc).find((node) => node.name === 'One')!, 'description')).toBe('"first"');
+  });
+
+  it('moves a sole host references block into the new preamble', () => {
+    const doc = docFrom(`Host
+  ${PLACED(0, 0)}
+  expand: Payment Steps
+  references:
+    - [Charge](src/payments/charge.ts:20)
+
+graph: Payment Steps
+  Charge Card
+    ${PLACED(0, 0)}
+`);
+    const extracted = extractGraphBlockToDocument(doc, 'Payment Steps', 'payment-steps.flow');
+    expect(extracted.preamble?.references).toEqual([{ label: 'Charge', target: 'src/payments/charge.ts:20' }]);
+    expect(allNodes(doc).find((node) => node.name === 'Host')!.references).toEqual([]);
+  });
+
+  it('leaves per-host references alone when the block has several hosts', () => {
+    const doc = docFrom(`One
+  ${PLACED(0, 0)}
+  expand: Shared
+  references:
+    - src/one.ts
+
+Two
+  ${PLACED(300, 0)}
+  expand: Shared
+
+graph: Shared
+  Step
+    ${PLACED(0, 0)}
+`);
+    const extracted = extractGraphBlockToDocument(doc, 'Shared', 'shared.flow');
+    expect(extracted.preamble?.references).toEqual([]);
+    expect(allNodes(doc).find((node) => node.name === 'One')!.references).toEqual([
+      { label: null, target: 'src/one.ts' },
+    ]);
   });
 
   it('keeps an inner refinement pointing into the relinked host', () => {

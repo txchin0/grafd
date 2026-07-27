@@ -18,6 +18,10 @@ import {
   resolvedExpandPath,
   descriptionForNode,
   writeDescriptionForNode,
+  parseReference,
+  formatReference,
+  referencesForNode,
+  writeReferencesForNode,
   sanitizeName,
   collapseToSingleLine,
   uniqueName,
@@ -150,6 +154,117 @@ describe('serializeFlow', () => {
   it('rounds pos to integers', () => {
     const doc = parseFlow('Node\n  pos: 1.4, 2.6, 200.2, 88.5\n');
     expect(serializeFlow(doc)).toBe('Node\n  pos: 1, 3, 200, 89\n');
+  });
+});
+
+const REFERENCED_DOCUMENT = `---
+name: Login Flow
+references:
+  - [Auth service](src/server/auth-service.ts)
+  - https://jwt.io/introduction
+---
+
+Show Login
+  description: "Email and password form"
+  references:
+    - [Login form](src/client/login.tsx:42-88)
+    - docs/decisions/0007-session-cookies.md
+  -> Submit Credentials : "user taps login"
+    data:
+      email: string
+
+Submit Credentials
+`;
+
+describe('references', () => {
+  const doc = parseFlow(REFERENCED_DOCUMENT);
+  const showLogin = (doc.items[0] as NodeItem).node;
+
+  it('parses labeled and bare entries on a node', () => {
+    expect(showLogin.references).toEqual([
+      { label: 'Login form', target: 'src/client/login.tsx:42-88' },
+      { label: null, target: 'docs/decisions/0007-session-cookies.md' },
+    ]);
+  });
+
+  it('parses a preamble block without leaking it into fields', () => {
+    expect(doc.preamble?.references).toEqual([
+      { label: 'Auth service', target: 'src/server/auth-service.ts' },
+      { label: null, target: 'https://jwt.io/introduction' },
+    ]);
+    expect(doc.preamble?.fields).toEqual([{ key: 'name', value: 'Login Flow' }]);
+  });
+
+  it('keeps references out of the flat property list', () => {
+    expect(showLogin.props).toEqual([{ key: 'description', value: '"Email and password form"' }]);
+  });
+
+  // The two indented blocks are distinguished only by the line above them, so a node
+  // carrying both must not let its references land in the edge's data schema.
+  it('binds each indented block to the line directly above it', () => {
+    expect(showLogin.edges[0].data).toEqual([{ key: 'email', type: 'string' }]);
+    expect(showLogin.references).toHaveLength(2);
+  });
+
+  it('round-trips a canonical document unchanged', () => {
+    expect(serializeFlow(doc)).toBe(REFERENCED_DOCUMENT);
+  });
+
+  it('writes the block after single-line properties and before edges', () => {
+    const node = emptyNode('Node');
+    setProp(node, 'description', '"text"');
+    node.references = [{ label: null, target: 'src/a.ts' }];
+    node.edges = [{ target: 'Next', innerSource: null, innerTarget: null, label: null, data: null }];
+    expect(serializeFlow({ leading: [], preamble: null, items: [{ kind: 'node', node }] })).toBe(
+      'Node\n  description: "text"\n  references:\n    - src/a.ts\n  -> Next\n',
+    );
+  });
+
+  it('omits an empty block entirely', () => {
+    expect(serializeFlow(parseFlow('Node\n  references:\n'))).toBe('Node\n');
+  });
+
+  it('keeps a hand-written one-line entry', () => {
+    const doc = parseFlow('Node\n  references: src/a.ts\n');
+    expect((doc.items[0] as NodeItem).node.references).toEqual([{ label: null, target: 'src/a.ts' }]);
+  });
+
+  it('parses entry text into a reference', () => {
+    expect(parseReference('[Label](src/a.ts:12)')).toEqual({ label: 'Label', target: 'src/a.ts:12' });
+    expect(parseReference('https://example.com')).toEqual({ label: null, target: 'https://example.com' });
+    expect(parseReference('[](src/a.ts)')).toEqual({ label: null, target: 'src/a.ts' });
+    expect(parseReference('   ')).toBeNull();
+    expect(parseReference('[Label]()')).toBeNull();
+  });
+
+  it('formats a reference back to entry text', () => {
+    expect(formatReference({ label: 'Label', target: 'src/a.ts' })).toBe('[Label](src/a.ts)');
+    expect(formatReference({ label: null, target: 'src/a.ts' })).toBe('src/a.ts');
+  });
+});
+
+describe('references across an expand link', () => {
+  it('prefers the expand target preamble over the referencing node', () => {
+    const node = emptyNode('Host');
+    node.references = [{ label: null, target: 'stale.ts' }];
+    const expandDoc = parseFlow('---\nname: Target\nreferences:\n  - src/real.ts\n---\n');
+    expect(referencesForNode(node, expandDoc)).toEqual([{ label: null, target: 'src/real.ts' }]);
+    expect(referencesForNode(node, null)).toEqual([{ label: null, target: 'stale.ts' }]);
+  });
+
+  it('writes to the expand target preamble and clears the node', () => {
+    const node = emptyNode('Host');
+    node.references = [{ label: null, target: 'stale.ts' }];
+    const expandDoc = parseFlow('---\nname: Target\n---\n');
+    writeReferencesForNode(node, expandDoc, [{ label: 'Real', target: 'src/real.ts' }]);
+    expect(expandDoc.preamble?.references).toEqual([{ label: 'Real', target: 'src/real.ts' }]);
+    expect(node.references).toEqual([]);
+  });
+
+  it('writes to the node when there is no expand target', () => {
+    const node = emptyNode('Leaf');
+    writeReferencesForNode(node, null, [{ label: null, target: 'src/a.ts' }]);
+    expect(node.references).toEqual([{ label: null, target: 'src/a.ts' }]);
   });
 });
 

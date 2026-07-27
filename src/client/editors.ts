@@ -14,11 +14,14 @@ import {
   type EdgeSpec,
   type FlowNode,
   type Rect,
+  type Reference,
 } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { ModelEdge } from './flow-doc.js';
 import type { CanvasView } from './canvas-view.js';
 import { createTitleEditor } from './title-editor.js';
+import { createReferenceRows } from './reference-rows.js';
+import type { LinkContext } from './reference-link.js';
 
 export interface EditorContext {
   view: CanvasView;
@@ -27,9 +30,12 @@ export interface EditorContext {
   renameNode(node: FlowNode, requestedName: string): string;
   applyEdit(node: FlowNode, mutation: () => void): void;
   applyEditNow(node: FlowNode, mutation: () => void): void;
-  // External expand targets store description in the target file's preamble.
+  // External expand targets store description and references in the target file's preamble.
   descriptionOf(node: FlowNode): string;
   applyDescriptionEdit(node: FlowNode, text: string): void;
+  referencesOf(node: FlowNode): Reference[];
+  applyReferencesEdit(node: FlowNode, references: Reference[]): void;
+  linkContext(): LinkContext;
   ensureExpandTarget(node: FlowNode): Promise<void>;
   ensureInnerTargets(edge: ModelEdge): Promise<void>;
   ensureInnerSources(edge: ModelEdge): Promise<void>;
@@ -66,6 +72,8 @@ export function createEditors(context: EditorContext): Editors {
     onError: elementById<HTMLInputElement>('ne-on-error'),
     updates: elementById<HTMLInputElement>('ne-updates'),
     entrypoint: elementById<HTMLInputElement>('ne-entrypoint'),
+    referenceRows: elementById<HTMLDivElement>('ne-reference-rows'),
+    addReference: elementById<HTMLButtonElement>('ne-add-reference'),
     openExpand: elementById<HTMLButtonElement>('ne-open-expand'),
     inlineExpand: elementById<HTMLButtonElement>('ne-inline-expand'),
     deleteNode: elementById<HTMLButtonElement>('ne-delete'),
@@ -80,6 +88,17 @@ export function createEditors(context: EditorContext): Editors {
   };
 
   const titleEditor = createTitleEditor(context);
+
+  const referenceRows = createReferenceRows({
+    rows: elements.referenceRows,
+    addButton: elements.addReference,
+    linkContext: () => context.linkContext(),
+    commit: (references) => {
+      const node = editingNode();
+      if (node) context.applyReferencesEdit(node, references);
+    },
+    afterRowAdded: () => reposition(),
+  });
 
   let editingNodeId: string | null = null;
   let editingEdgeSpec: EdgeSpec | null = null;
@@ -102,6 +121,7 @@ export function createEditors(context: EditorContext): Editors {
     titleEditor.close();
     closeEdgeEditor();
     editingNodeId = node.id;
+    elements.referenceRows.replaceChildren();
     fillNodeFields(node);
     elements.nodeEditor.classList.remove('hidden');
     reposition();
@@ -121,6 +141,7 @@ export function createEditors(context: EditorContext): Editors {
     setUnlessFocused(elements.onError, getProp(node, 'on_error') ?? '');
     setUnlessFocused(elements.updates, parseListValue(getProp(node, 'updates')).join(', '));
     elements.entrypoint.checked = getProp(node, 'entrypoint') === 'true';
+    referenceRows.fill(context.referencesOf(node));
     const lacksExpand = !getProp(node, 'expand');
     elements.openExpand.classList.toggle('hidden', lacksExpand);
     elements.inlineExpand.classList.toggle('hidden', lacksExpand);
@@ -274,6 +295,7 @@ export function createEditors(context: EditorContext): Editors {
     if (titleChanged) {
       elements.title.value = context.renameNode(node, elements.title.value);
     }
+    referenceRows.commitPending(context.referencesOf(node));
     if (!expandChanged && !onErrorChanged && !updatesChanged) return;
     context.applyEdit(node, () => {
       if (expandChanged) setProp(node, 'expand', elements.expand.value.trim() || null);

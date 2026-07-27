@@ -57,6 +57,11 @@
         <div id="node-editor" class="floating hidden">
           <input id="ne-title" placeholder="Node title" spellcheck="false" autocomplete="off" />
           <textarea id="ne-description" rows="3" placeholder="Description — guidance for the LLM" spellcheck="false"></textarea>
+          <div id="ne-references">
+            <span class="field-caption">references</span>
+            <div id="ne-reference-rows"></div>
+            <button id="ne-add-reference" type="button" class="quiet-button">+ reference</button>
+          </div>
           <details id="ne-advanced">
             <summary>Advanced</summary>
             <label>expand <input id="ne-expand" placeholder="Graph name or [Label](path.flow)" spellcheck="false" /></label>
@@ -96,6 +101,11 @@
             <label>context <input id="gp-context" placeholder="Auth, Cart" spellcheck="false" /></label>
             <label>on_error <input id="gp-on-error" placeholder='-&gt; Handler' spellcheck="false" /></label>
             <label class="check-row"><input type="checkbox" id="gp-entrypoint" /> entrypoint</label>
+            <div id="gp-references">
+              <span class="field-caption">references</span>
+              <div id="gp-reference-rows"></div>
+              <button id="gp-add-reference" type="button" class="quiet-button">+ reference</button>
+            </div>
           </div>
         </div>
 
@@ -155,6 +165,14 @@
         <h2>Preferences</h2>
         <div id="preferences-options">
           <label class="check-row"><input type="checkbox" id="pref-canvas-grid" /> Show canvas grid</label>
+          <label>Open file references in
+            <select id="pref-editor-link">
+              <option value="vscode">VS Code</option>
+              <option value="vscode-insiders">VS Code Insiders</option>
+              <option value="cursor">Cursor</option>
+              <option value="none">Nothing — copy the path instead</option>
+            </select>
+          </label>
         </div>
         <div class="editor-actions">
           <span class="spacer"></span>

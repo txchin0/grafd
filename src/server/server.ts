@@ -9,6 +9,7 @@ import { contentHash, listFlowFiles, resolveWorkspacePath, toPortablePath } from
 
 const PORT = Number(process.env.PORT ?? 4600);
 const DEFAULT_WORKSPACE = 'flows';
+const PROJECT_ROOT_FLAG = '--project-root=';
 const COMPILED_OUTPUT_SETTLE_MS = 120;
 // This file runs from dist/server, two levels below the repo root. Static assets stay
 // under the repo; the .flow workspace defaults to flows/ and can be overridden with a
@@ -18,6 +19,12 @@ const commandLineArguments = process.argv.slice(2);
 const developmentMode = commandLineArguments.includes('--dev');
 const workspaceArgument = commandLineArguments.find((argument) => !argument.startsWith('--'));
 const workspaceRoot = path.resolve(repoRoot, workspaceArgument ?? DEFAULT_WORKSPACE);
+// Reference targets are relative to the project root — the directory an agent works in,
+// which is where graf was launched from — not to the .flow workspace under it.
+const projectRootArgument = commandLineArguments.find((argument) => argument.startsWith(PROJECT_ROOT_FLAG));
+const projectRoot = projectRootArgument
+  ? path.resolve(projectRootArgument.slice(PROJECT_ROOT_FLAG.length))
+  : process.cwd();
 
 const app = express();
 app.use(express.static(path.join(repoRoot, 'public')));
@@ -27,6 +34,12 @@ app.use('/vendor/roughjs', express.static(path.join(repoRoot, 'node_modules', 'r
 
 app.get('/api/files', async (request, response) => {
   response.json({ files: await listFlowFiles(workspaceRoot) });
+});
+
+// Reports the absolute root so the client can turn a node's file references into editor
+// deep links. It exposes a path only — no file access hangs off it.
+app.get('/api/project-root', (request, response) => {
+  response.json({ root: projectRoot });
 });
 
 app.get('/SAVE-GUIDE.md', (request, response) => {
