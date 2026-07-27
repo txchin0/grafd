@@ -11,6 +11,7 @@
     "serve:site": "npm run build:site && node scripts/serve-site.mjs",
     "watch": "tsc -p tsconfig.build.json --watch",
     "typecheck": "tsc",
+    "lint:flow": "npm run build && node dist/tools/flow-lint.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },

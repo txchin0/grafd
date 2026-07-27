@@ -83,11 +83,14 @@ export interface ExpandLink {
   path: string;
 }
 
-const PROPERTY_LINE = /^([A-Za-z_][\w-]*):\s?(.*)$/;
-const EDGE_LINE = /^(?:\{([^}]*)\}\s+)?->\s+([^{]+?)(?:\s*\{([^}]*)\})?(?:\s+:\s+"(.*)")?$/;
-const GRAPH_HEADER = /^graph:\s+(.+)$/;
-const MARKDOWN_LINK = /^\[(.*)\]\((.*)\)$/;
-const REFERENCE_ENTRY = /^-\s+(.*)$/;
+// The line grammar. Exported because the linter (src/shared/flow-lint.ts) mirrors the
+// parser's line classification to report what this parser silently discards; sharing the
+// patterns is what keeps the two from drifting apart.
+export const PROPERTY_LINE = /^([A-Za-z_][\w-]*):\s?(.*)$/;
+export const EDGE_LINE = /^(?:\{([^}]*)\}\s+)?->\s+([^{]+?)(?:\s*\{([^}]*)\})?(?:\s+:\s+"(.*)")?$/;
+export const GRAPH_HEADER = /^graph:\s+(.+)$/;
+export const MARKDOWN_LINK = /^\[(.*)\]\((.*)\)$/;
+export const REFERENCE_ENTRY = /^-\s+(.*)$/;
 
 // An indented block belongs to the line directly above it: `data:` under an edge, `- entry`
 // lines under a `references:` key. The parser tracks which one is open as it walks a node.
@@ -302,7 +305,7 @@ export function serializeEdgeExpression(edge: EdgeSpec): string {
   return `${source}-> ${edge.target}${inner}${label}`;
 }
 
-function parsePos(value: string): Rect | null {
+export function parsePos(value: string): Rect | null {
   const parts = value.split(',').map((part) => Number(part.trim()));
   if (parts.length !== 4 || parts.some(Number.isNaN)) return null;
   return { x: parts[0], y: parts[1], w: parts[2], h: parts[3] };
@@ -496,6 +499,13 @@ export function writeReferencesForNode(
     return;
   }
   node.references = references;
+}
+
+const ILLEGAL_IN_NAME = /:(\s|$)|[{}]/;
+
+/** Whether a name can be a node name at all (spec §3.2), which sanitizeName enforces. */
+export function isLegalNodeName(name: string): boolean {
+  return name !== '' && !ILLEGAL_IN_NAME.test(name);
 }
 
 // Node names may not contain ": " or curly braces (spec §3.2); braces mark an inner

@@ -24,6 +24,19 @@ The codebase is TypeScript, compiled by `tsc` alone — no bundler. `npm run bui
 checks everything including tests without emitting, and `npm test` runs the Vitest unit
 tests in `tests/`.
 
+## Linting .flow files
+
+`npm run lint:flow` builds, then lints every `.flow` file in `flows/` (pass one or more
+workspace directories to lint elsewhere; `--strict` also fails on warnings, `--format=json`
+emits machine-readable output). **Run it after editing any `.flow` file.**
+
+The parser is deliberately tolerant — it never reports an error and silently discards any
+line it does not recognize. Since the editor round-trips every file it opens (parse →
+serialize → write), a malformed file loses content permanently on the next save; an
+unterminated preamble, for instance, discards the entire body. The linter exists to catch
+that before it happens: `error` means content is dropped or misread, `warning` means the
+file parses but probably does not say what was meant.
+
 ## Deviation from FLOW-SPEC.md
 
 There is **no `.flow.meta` file**. Layout lives inside the `.flow` file itself via two
@@ -64,6 +77,12 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   file tree (rendering and delete interaction live in main.ts).
 - `src/shared/manifest.ts` — `graf.manifest.json` types, tolerant parsing, startup-flow
   choice.
+- `src/shared/flow-scan.ts` — the linter's positioned re-walk of the line grammar: mirrors
+  `parseFlow`'s branch structure but keeps line numbers and records every line the parser
+  would drop. `flow-diagnostics.ts` (severities), `flow-lint-syntax.ts` (structure),
+  `flow-lint-semantics.ts` (name resolution, behind an `ExpansionLookup` seam),
+  `flow-lint.ts` (single file) and `flow-lint-workspace.ts` (cross-file: expand links,
+  cycles, reachability) build on it; `src/tools/flow-lint.ts` is the CLI.
 - `scripts/build-site.mjs` — assembles the static `site/` build (`npm run build:site`).
 - `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building

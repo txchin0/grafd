@@ -7,26 +7,13 @@
 // fall back to copying the target, which is why openUrlForReference returns null rather than
 // throwing when it cannot build a link.
 
+import { parseReferenceTarget, type ReferenceTarget } from '../shared/reference-target.js';
+
+export { parseReferenceTarget, type ReferenceTarget };
+
 export type EditorLinkScheme = 'vscode' | 'vscode-insiders' | 'cursor' | 'none';
 
 export const EDITOR_LINK_SCHEMES: EditorLinkScheme[] = ['vscode', 'vscode-insiders', 'cursor', 'none'];
-
-export type ReferenceTarget =
-  | { kind: 'url'; url: string }
-  | { kind: 'file'; path: string; line: number | null };
-
-// A scheme needs two or more characters so a Windows drive letter ("C:/src") is read as a
-// path rather than as a URL scheme.
-const URL_SCHEME = /^[a-z][a-z\d+.-]+:/i;
-const TRAILING_LINE_RANGE = /^(.*?):(\d+)(?:-\d+)?$/;
-
-export function parseReferenceTarget(target: string): ReferenceTarget {
-  const text = target.trim();
-  if (URL_SCHEME.test(text)) return { kind: 'url', url: text };
-  const withLine = text.match(TRAILING_LINE_RANGE);
-  if (withLine) return { kind: 'file', path: withLine[1], line: Number(withLine[2]) };
-  return { kind: 'file', path: text, line: null };
-}
 
 export interface LinkContext {
   projectRoot: string | null;
