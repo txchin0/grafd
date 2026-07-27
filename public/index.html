@@ -86,6 +86,8 @@
           </div>
         </div>
 
+        <input id="title-editor" class="hidden" spellcheck="false" autocomplete="off" />
+
         <div id="graph-panel" class="floating collapsed">
           <button id="gp-toggle" type="button">graph info</button>
           <div id="gp-body">
@@ -105,6 +107,7 @@
             <tr><td>Click a node</td><td>edit title &amp; description</td></tr>
             <tr><td>Drag a node / its corners</td><td>move / resize</td></tr>
             <tr><td>Hover a node, drag a port ○</td><td>draw an edge (drop on empty space to spawn a node)</td></tr>
+            <tr><td>Double-click a node's title</td><td>rename it on the node (Enter saves, Esc cancels)</td></tr>
             <tr><td>Double-click an edge</td><td>edit its label</td></tr>
             <tr><td>Double-click empty canvas</td><td>quick-create a node</td></tr>
             <tr><td>Click ⤢ badge</td><td>open a node's subgraph (breadcrumb navigates back)</td></tr>

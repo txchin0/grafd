@@ -18,6 +18,7 @@ import {
 import * as FlowDoc from './flow-doc.js';
 import type { ModelEdge } from './flow-doc.js';
 import type { CanvasView } from './canvas-view.js';
+import { createTitleEditor } from './title-editor.js';
 
 export interface EditorContext {
   view: CanvasView;
@@ -42,6 +43,7 @@ export interface EditorContext {
 export interface Editors {
   openNodeEditor(node: FlowNode, options?: { focusTitle?: boolean }): void;
   openEdgeEditor(edge: ModelEdge): void;
+  openTitleEditor(node: FlowNode): void;
   closeAll(): void;
   reposition(): void;
   refreshFromDoc(): void;
@@ -77,6 +79,8 @@ export function createEditors(context: EditorContext): Editors {
     deleteEdge: elementById<HTMLButtonElement>('ee-delete'),
   };
 
+  const titleEditor = createTitleEditor(context);
+
   let editingNodeId: string | null = null;
   let editingEdgeSpec: EdgeSpec | null = null;
 
@@ -88,7 +92,14 @@ export function createEditors(context: EditorContext): Editors {
     return editingEdgeSpec ? context.findEdge(editingEdgeSpec) : null;
   }
 
+  function openTitleEditor(node: FlowNode): void {
+    closeNodeEditor();
+    closeEdgeEditor();
+    titleEditor.open(node);
+  }
+
   function openNodeEditor(node: FlowNode, { focusTitle = false }: { focusTitle?: boolean } = {}): void {
+    titleEditor.close();
     closeEdgeEditor();
     editingNodeId = node.id;
     fillNodeFields(node);
@@ -120,6 +131,7 @@ export function createEditors(context: EditorContext): Editors {
   }
 
   function openEdgeEditor(edge: ModelEdge): void {
+    titleEditor.close();
     closeNodeEditor();
     editingEdgeSpec = edge.spec;
     elements.edgeLabel.value = edge.spec.label ?? '';
@@ -281,11 +293,13 @@ export function createEditors(context: EditorContext): Editors {
   }
 
   function closeAll(): void {
+    titleEditor.close();
     closeNodeEditor();
     closeEdgeEditor();
   }
 
   function reposition(): void {
+    titleEditor.reposition();
     const node = editingNode();
     if (node) positionBesideRect(elements.nodeEditor, context.view.worldRectToScreen(context.view.rect(node)));
     const edge = editingEdge();
@@ -311,6 +325,7 @@ export function createEditors(context: EditorContext): Editors {
   }
 
   function refreshFromDoc(): void {
+    titleEditor.refreshFromDoc();
     const node = editingNode();
     if (editingNodeId && !node) {
       closeNodeEditor();
@@ -436,5 +451,5 @@ export function createEditors(context: EditorContext): Editors {
     });
   }
 
-  return { openNodeEditor, openEdgeEditor, closeAll, reposition, refreshFromDoc, editingNode };
+  return { openNodeEditor, openEdgeEditor, openTitleEditor, closeAll, reposition, refreshFromDoc, editingNode };
 }

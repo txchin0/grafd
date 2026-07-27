@@ -122,6 +122,7 @@ export interface CanvasActions {
     },
   ): void;
   editEdge(edge: ModelEdge): void;
+  editNodeTitle(node: FlowNode): void;
   openExpand(node: FlowNode): void;
   toggleExpand(node: FlowNode): void;
   materializeGhost(ghost: GhostNode): void;
@@ -130,12 +131,27 @@ export interface CanvasActions {
   afterRender?(): void;
 }
 
+interface NodeTextLayout {
+  titleLines: string[];
+  descriptionLines: string[];
+  maxWidth: number;
+  firstLineMiddleY: number;
+}
+
+export interface TitlePlacement {
+  rect: Rect;
+  fontPx: number;
+  align: 'center' | 'left';
+  color: string;
+  screenScale: number;
+}
+
 export type ContextTarget =
   | { kind: 'node'; node: FlowNode }
   | { kind: 'edge'; edge: ModelEdge }
   | { kind: 'canvas'; world: Point };
 
-const HAND_FONT = '"Segoe Print", "Comic Sans MS", cursive';
+export const HAND_FONT = '"Segoe Print", "Comic Sans MS", cursive';
 
 const COLORS = {
   grid: 'rgba(232, 226, 213, 0.07)',
@@ -177,6 +193,25 @@ const BADGE_SYMBOLS: Record<BadgeKind, string> = { open: '⤢', inline: '⊞', c
 const DIVE_IN_MS = 650;
 const BACK_OUT_MS = 560;
 export const SNAPSHOT_PADDING = 48;
+
+const NODE_TEXT_SIDE_PADDING = 13;
+const TITLE_FONT_PX = 15;
+const TITLE_LINE_HEIGHT = 20;
+const TITLE_MAX_LINES = 2;
+const DESCRIPTION_FONT_PX = 12.5;
+const DESCRIPTION_LINE_HEIGHT = 16;
+const DESCRIPTION_MAX_LINES = 4;
+const TITLE_DESCRIPTION_GAP = 6;
+// Both text runs are drawn on a middle baseline, so the first description line sits a
+// little tighter under the title than the block-height gap suggests.
+const DESCRIPTION_FIRST_LINE_NUDGE = 4;
+const FRAME_TITLE_FONT_PX = 13;
+const FRAME_TITLE_LINE_HEIGHT = 18;
+const FRAME_TITLE_LEFT = 12;
+const FRAME_TITLE_MIDDLE_Y = 16;
+// Keeps the frame's title clear of the expand/collapse badges in the header strip.
+const FRAME_TITLE_RIGHT_INSET = 64;
+const FRAME_TITLE_HIT_PADDING = 6;
 
 // A surface the scene can be drawn onto. The live canvas is one; an export renders the same
 // scene onto a detached canvas at an arbitrary resolution by swapping the target for the
@@ -344,6 +379,7 @@ export class CanvasView {
   selectedEdge: ModelEdge | null = null;
   expansionLayer: ExpansionLayer | null = null;
   gridIsVisible = true;
+  titleEditingNodeId: string | null = null;
 
   private hoverNode: FlowNode | null = null;
   private hoverPoint: Point | null = null;
@@ -905,7 +941,7 @@ export class CanvasView {
       if (gesture.moved) {
         this.actions.moveCommitted(gesture.nodes);
       } else {
-        this.dispatchNodePress(gesture, world);
+        this.dispatchNodePress(gesture, world, event.detail);
       }
     } else if (gesture.type === 'resize') {
       this.actions.moveCommitted([gesture.node]);
@@ -1004,7 +1040,9 @@ export class CanvasView {
     return false;
   }
 
-  private dispatchNodePress(gesture: Extract<Gesture, { type: 'move' }>, world: Point): void {
+  // The second press of a double-click must not reopen the node editor panel that the
+  // inline title editor is about to replace.
+  private dispatchNodePress(gesture: Extract<Gesture, { type: 'move' }>, world: Point, clickCount: number): void {
     const badge = this.hitBadge(world);
     const pressedBadge = gesture.pressedBadge;
     if (badge && pressedBadge && badge.node === pressedBadge.node && badge.kind === pressedBadge.kind) {
@@ -1012,7 +1050,7 @@ export class CanvasView {
       else this.actions.toggleExpand(badge.node);
       return;
     }
-    this.actions.nodeClicked(gesture.pressedNode);
+    if (clickCount < 2) this.actions.nodeClicked(gesture.pressedNode);
   }
 
   private snapCreateRect(rect: Rect): Rect {
@@ -1034,6 +1072,12 @@ export class CanvasView {
       this.selectedEdge = edge;
       this.actions.editEdge(edge);
       this.requestRender();
+      return;
+    }
+    const titledNode = this.hitNodeTitle(world);
+    if (titledNode) {
+      this.select(titledNode);
+      this.actions.editNodeTitle(titledNode);
       return;
     }
     if (this.hitNode(world) || this.hitGhost(world)) return;
@@ -1081,6 +1125,16 @@ export class CanvasView {
       if (rectContains(this.rectOf(model, node), world)) return node;
     }
     return null;
+  }
+
+  // Narrows a node hit to the node's title text, so double-clicking the description or the
+  // empty part of a node keeps its existing meaning. Ghosts are a separate list and so are
+  // never titled.
+  private hitNodeTitle(world: Point): FlowNode | null {
+    const node = this.hitNode(world);
+    if (!node) return null;
+    const placement = this.titlePlacementOf(node);
+    return placement && rectContains(placement.rect, world) ? node : null;
   }
 
   private hitGhost(world: Point): GhostNode | null {
@@ -1590,11 +1644,13 @@ export class CanvasView {
       fillStyle: 'solid',
     });
 
-    ctx.font = `600 13px ${HAND_FONT}`;
-    ctx.fillStyle = COLORS.expandStroke;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(node.name, frame.x + 12, frame.y + 16, frame.w - 64);
+    if (!this.titleIsHidden(node)) {
+      ctx.font = `600 ${FRAME_TITLE_FONT_PX}px ${HAND_FONT}`;
+      ctx.fillStyle = COLORS.expandStroke;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(node.name, frame.x + FRAME_TITLE_LEFT, frame.y + FRAME_TITLE_MIDDLE_Y, frame.w - FRAME_TITLE_RIGHT_INSET);
+    }
 
     if (expansion.alpha > 0.02) {
       ctx.save();
@@ -1620,40 +1676,115 @@ export class CanvasView {
     ctx.fillText('empty subgraph', 160, 90);
   }
 
+  // Wrapping and vertical placement of a node's title and description block. Shared by the
+  // painter and by titlePlacementOf so the editable title band cannot drift from the drawn
+  // text. Leaves ctx.font set to the description font.
+  private layOutNodeText(model: FlowModel, node: FlowNode, rect: Rect): NodeTextLayout {
+    const { ctx } = this;
+    const maxWidth = rect.w - 2 * NODE_TEXT_SIDE_PADDING;
+
+    ctx.font = `600 ${TITLE_FONT_PX}px ${HAND_FONT}`;
+    const titleLines = this.wrapText(node.name, maxWidth, TITLE_MAX_LINES);
+    const description = this.descriptionText(model, node);
+    ctx.font = `${DESCRIPTION_FONT_PX}px ${HAND_FONT}`;
+    const descriptionLineBudget = Math.max(
+      0,
+      Math.floor((rect.h - TITLE_LINE_HEIGHT - titleLines.length * TITLE_LINE_HEIGHT) / DESCRIPTION_LINE_HEIGHT),
+    );
+    const descriptionLines = description
+      ? this.wrapText(description, maxWidth, Math.min(DESCRIPTION_MAX_LINES, descriptionLineBudget))
+      : [];
+
+    const blockHeight = titleLines.length * TITLE_LINE_HEIGHT
+      + (descriptionLines.length ? TITLE_DESCRIPTION_GAP + descriptionLines.length * DESCRIPTION_LINE_HEIGHT : 0);
+
+    return {
+      titleLines,
+      descriptionLines,
+      maxWidth,
+      firstLineMiddleY: rect.y + rect.h / 2 - blockHeight / 2 + TITLE_LINE_HEIGHT / 2,
+    };
+  }
+
   private drawNodeText(model: FlowModel, node: FlowNode, rect: Rect): void {
     const { ctx } = this;
-    const { x, y, w, h } = rect;
-    const maxWidth = w - 26;
+    const layout = this.layOutNodeText(model, node, rect);
+    const centerX = rect.x + rect.w / 2;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    ctx.font = `600 15px ${HAND_FONT}`;
-    const titleLines = this.wrapText(node.name, maxWidth, 2);
-    const description = this.descriptionText(model, node);
-    ctx.font = `12.5px ${HAND_FONT}`;
-    const descriptionLineBudget = Math.max(0, Math.floor((h - 20 - titleLines.length * 20) / 16));
-    const descriptionLines = description
-      ? this.wrapText(description, maxWidth, Math.min(4, descriptionLineBudget))
-      : [];
-
-    const blockHeight = titleLines.length * 20 + (descriptionLines.length ? 6 + descriptionLines.length * 16 : 0);
-    let lineY = y + h / 2 - blockHeight / 2 + 10;
-
-    ctx.font = `600 15px ${HAND_FONT}`;
-    ctx.fillStyle = COLORS.ink;
-    for (const line of titleLines) {
-      ctx.fillText(line, x + w / 2, lineY, maxWidth);
-      lineY += 20;
+    let lineY = layout.firstLineMiddleY;
+    if (!this.titleIsHidden(node)) {
+      ctx.font = `600 ${TITLE_FONT_PX}px ${HAND_FONT}`;
+      ctx.fillStyle = COLORS.ink;
+      for (const line of layout.titleLines) {
+        ctx.fillText(line, centerX, lineY, layout.maxWidth);
+        lineY += TITLE_LINE_HEIGHT;
+      }
+    } else {
+      lineY += layout.titleLines.length * TITLE_LINE_HEIGHT;
     }
-    if (descriptionLines.length) {
-      lineY += 4;
-      ctx.font = `12.5px ${HAND_FONT}`;
+
+    if (layout.descriptionLines.length) {
+      lineY += DESCRIPTION_FIRST_LINE_NUDGE;
+      ctx.font = `${DESCRIPTION_FONT_PX}px ${HAND_FONT}`;
       ctx.fillStyle = COLORS.muted;
-      for (const line of descriptionLines) {
-        ctx.fillText(line, x + w / 2, lineY, maxWidth);
-        lineY += 16;
+      for (const line of layout.descriptionLines) {
+        ctx.fillText(line, centerX, lineY, layout.maxWidth);
+        lineY += DESCRIPTION_LINE_HEIGHT;
       }
     }
+  }
+
+  // World-space rect and typography of a node's title as drawn, or null when the node is
+  // not currently visible. Unfolded frames title their host differently from a plain node,
+  // so callers get the variant's font, alignment and colour alongside the band.
+  titlePlacementOf(node: FlowNode): TitlePlacement | null {
+    const locus = this.expansionLayer?.locusOf(node) ?? null;
+    if (this.expansionLayer && !locus) return null;
+    const model = locus?.model ?? this.model;
+    const expansion = model.display?.expansions.get(node);
+    const localRect = this.rectOf(model, node);
+    const band = expansion
+      ? this.frameTitleBand(node, expansion.frame)
+      : this.titleBandOf(localRect, this.layOutNodeText(model, node, localRect));
+
+    return {
+      rect: locus ? transformRect(band, locus.transform) : band,
+      fontPx: expansion ? FRAME_TITLE_FONT_PX : TITLE_FONT_PX,
+      align: expansion ? 'left' : 'center',
+      color: expansion ? COLORS.expandStroke : COLORS.ink,
+      screenScale: this.view.scale * (this.expansionLayer?.scaleOf(node) ?? 1),
+    };
+  }
+
+  private titleBandOf(rect: Rect, layout: NodeTextLayout): Rect {
+    return {
+      x: rect.x + NODE_TEXT_SIDE_PADDING,
+      y: layout.firstLineMiddleY - TITLE_LINE_HEIGHT / 2,
+      w: layout.maxWidth,
+      h: Math.max(1, layout.titleLines.length) * TITLE_LINE_HEIGHT,
+    };
+  }
+
+  private frameTitleBand(node: FlowNode, frame: Rect): Rect {
+    const { ctx } = this;
+    ctx.font = `600 ${FRAME_TITLE_FONT_PX}px ${HAND_FONT}`;
+    const available = frame.w - FRAME_TITLE_RIGHT_INSET;
+    const width = Math.min(available, ctx.measureText(node.name).width) + 2 * FRAME_TITLE_HIT_PADDING;
+    return {
+      x: frame.x + FRAME_TITLE_LEFT - FRAME_TITLE_HIT_PADDING,
+      y: frame.y + FRAME_TITLE_MIDDLE_Y - FRAME_TITLE_LINE_HEIGHT / 2,
+      w: width,
+      h: FRAME_TITLE_LINE_HEIGHT,
+    };
+  }
+
+  // The inline title editor paints the name itself; drawing it again underneath would
+  // show through the overlay's background. Exports render through a swapped target
+  // and must always include the title.
+  private titleIsHidden(node: FlowNode): boolean {
+    return this.target === this.liveTarget && node.id != null && node.id === this.titleEditingNodeId;
   }
 
   private descriptionText(model: FlowModel, node: FlowNode): string | null {

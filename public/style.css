@@ -352,6 +352,19 @@ html, body {
   z-index: 10;
 }
 
+/* Sits on the canvas in place of the node's drawn title, so it carries no panel chrome and
+   takes its font, size, colour and alignment from the canvas at the current zoom. The
+   background is the opaque twin of the canvas node fill. */
+#title-editor {
+  position: absolute;
+  z-index: 11;
+  background: #242830;
+  border: none;
+  padding: 0 4px;
+  outline: none;
+  line-height: 1;
+}
+
 #node-editor { width: 264px; display: flex; flex-direction: column; gap: 8px; }
 
 #node-editor input[type="text"],

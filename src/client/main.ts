@@ -1275,6 +1275,7 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   moveCommitted: (nodes) => commitMovesFor(nodes ?? []),
   completeEdge,
   editEdge: (edge) => editors.openEdgeEditor(edge),
+  editNodeTitle: (node) => editors.openTitleEditor(node),
   openExpand,
   toggleExpand: toggleInlineExpansion,
   materializeGhost: (ghost) => {
