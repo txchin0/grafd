@@ -155,6 +155,50 @@ export function containingItems(doc: FlowDocument, node: FlowNode): FlowItem[] {
   return doc.items;
 }
 
+export interface ItemGroup {
+  items: FlowItem[];
+  nodes: FlowNode[];
+}
+
+export interface OwnedNodes<Owner> {
+  owner: Owner;
+  itemGroups: ItemGroup[];
+}
+
+// A selection can span documents (nodes inside an unfolded frame belong to another .flow file)
+// and, within one document, several `graph:` blocks. Mutations are per item list, but writes
+// are per document, so callers need both levels: this splits a flat node list into one entry
+// per owning document, each carrying its nodes bucketed by the item list that holds them.
+// Insertion order is preserved at both levels, so results follow the order nodes were given in.
+//
+// `byItems` is shared for the whole call, not per document — safe because each FlowDocument
+// owns distinct item-list arrays. If callers ever share item lists across documents, scope a
+// fresh map when creating each OwnedNodes entry instead.
+export function groupNodesByOwner<Owner extends { doc: FlowDocument }>(
+  nodes: FlowNode[],
+  ownerOf: (node: FlowNode) => Owner,
+): OwnedNodes<Owner>[] {
+  const byDocument = new Map<FlowDocument, OwnedNodes<Owner>>();
+  const byItems = new Map<FlowItem[], ItemGroup>();
+  for (const node of nodes) {
+    const owner = ownerOf(node);
+    let owned = byDocument.get(owner.doc);
+    if (!owned) {
+      owned = { owner, itemGroups: [] };
+      byDocument.set(owner.doc, owned);
+    }
+    const items = containingItems(owner.doc, node);
+    let group = byItems.get(items);
+    if (!group) {
+      group = { items, nodes: [] };
+      byItems.set(items, group);
+      owned.itemGroups.push(group);
+    }
+    group.nodes.push(node);
+  }
+  return [...byDocument.values()];
+}
+
 export function containingGraphBlockName(doc: FlowDocument, node: FlowNode): string | null {
   for (const item of doc.items) {
     if (item.kind === 'graph' && item.items.some((inner) => inner.kind === 'node' && inner.node === node)) {

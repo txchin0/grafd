@@ -6,6 +6,7 @@ import {
   parseFlow,
   parseEdgeExpression,
   serializeFlow,
+  type FlowNode,
   type GraphItem,
 } from '../src/shared/flow-format.js';
 import {
@@ -15,6 +16,7 @@ import {
   assignMissingIds,
   buildModel,
   containingItems,
+  groupNodesByOwner,
   DEFAULT_NODE_SIZE,
   deleteEdge,
   deleteNodes,
@@ -1188,5 +1190,49 @@ graph: Nested
     expect(serializeFlow(extracted)).toBe('---\nname: Planned\n---\n');
     const host = allNodes(doc).find((node) => node.name === 'Host')!;
     expect(getProp(host, 'expand')).toBe('[Planned](planned.flow)');
+  });
+});
+
+describe('groupNodesByOwner', () => {
+  const doc = docFrom(`Top
+  ${PLACED(0, 0)}
+
+Second
+  ${PLACED(300, 0)}
+
+graph: Inner
+  Nested
+    ${PLACED(0, 300)}
+`);
+  const other = docFrom(`Elsewhere
+  ${PLACED(0, 0)}
+`);
+  const [top, second, nested] = allNodes(doc);
+  const [elsewhere] = allNodes(other);
+  const ownerOf = (node: FlowNode) =>
+    allNodes(doc).includes(node) ? { doc, path: 'main.flow' } : { doc: other, path: 'other.flow' };
+
+  it('splits a selection by owning document', () => {
+    const groups = groupNodesByOwner([top, elsewhere], ownerOf);
+    expect(groups.map((group) => group.owner.path)).toEqual(['main.flow', 'other.flow']);
+  });
+
+  it('buckets nodes of one document by the item list that holds them', () => {
+    const [group] = groupNodesByOwner([top, nested, second], ownerOf);
+    expect(group.itemGroups).toHaveLength(2);
+    expect(group.itemGroups[0].items).toBe(doc.items);
+    expect(group.itemGroups[0].nodes).toEqual([top, second]);
+    expect(group.itemGroups[1].items).toBe(containingItems(doc, nested));
+    expect(group.itemGroups[1].nodes).toEqual([nested]);
+  });
+
+  it('preserves the order the nodes were given in, at both levels', () => {
+    const groups = groupNodesByOwner([nested, elsewhere, top], ownerOf);
+    expect(groups.map((group) => group.owner.path)).toEqual(['main.flow', 'other.flow']);
+    expect(groups[0].itemGroups.map((entry) => entry.nodes)).toEqual([[nested], [top]]);
+  });
+
+  it('returns nothing for an empty selection', () => {
+    expect(groupNodesByOwner([], ownerOf)).toEqual([]);
   });
 });

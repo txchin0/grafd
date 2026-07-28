@@ -83,11 +83,35 @@ function broadcast(message: object, { except }: { except?: WebSocket } = {}): vo
   }
 }
 
+// One in-flight file operation per path. The message handler is async, so without this two
+// messages arriving close together — an undo burst, a debounced commit landing on a drag —
+// start two independent writeFile calls on the same path. Each truncates and writes from
+// offset zero on its own descriptor, so a shorter write finishing inside a longer one leaves
+// the longer one's tail past the end of the file: silent corruption that the tolerant .flow
+// parser then reads as extra nodes. Chaining also keeps `lastWrittenHashes` and the broadcast
+// in the order the writes actually land.
+const fileOperations = new Map<string, Promise<void>>();
+
+function queueFileOperation(absolute: string, operation: () => Promise<void>): Promise<void> {
+  const settled = fileOperations.get(absolute) ?? Promise.resolve();
+  // `.then(op, op)` rather than `.finally`: a failed operation must not cancel the ones queued
+  // behind it, which are usually the writes that would have corrected it.
+  const next = settled.then(operation, operation);
+  const tracked = next.catch((error) => {
+    console.error('File operation failed', absolute, error);
+  });
+  fileOperations.set(absolute, tracked);
+  void tracked.then(() => {
+    if (fileOperations.get(absolute) === tracked) fileOperations.delete(absolute);
+  });
+  return tracked;
+}
+
 socketServer.on('connection', (socket) => {
   // The client reloads on any reconnect while this is set, which covers the compile that
   // restarts the server before its own reload broadcast can go out.
   socket.send(JSON.stringify({ type: 'hello', reloadOnReconnect: developmentMode }));
-  socket.on('message', async (raw) => {
+  socket.on('message', (raw) => {
     let message: Partial<ClientMessage>;
     try {
       message = JSON.parse(raw.toString());
@@ -96,17 +120,24 @@ socketServer.on('connection', (socket) => {
     }
     const absolute = resolveWorkspacePath(workspaceRoot, message.path);
     if (!absolute) return;
+    const portablePath = message.path!;
     if (message.type === 'write' && typeof (message as Partial<WriteMessage>).text === 'string') {
       const text = (message as WriteMessage).text;
-      lastWrittenHashes.set(absolute, contentHash(text));
-      await mkdir(path.dirname(absolute), { recursive: true });
-      await writeFile(absolute, text, 'utf8');
-      broadcast({ type: 'file', path: message.path, text }, { except: socket });
+      void queueFileOperation(absolute, async () => {
+        // Recorded here rather than on receipt so the watcher's echo suppression follows the
+        // order the writes land in, not the order they were queued.
+        lastWrittenHashes.set(absolute, contentHash(text));
+        await mkdir(path.dirname(absolute), { recursive: true });
+        await writeFile(absolute, text, 'utf8');
+        broadcast({ type: 'file', path: portablePath, text }, { except: socket });
+      });
     } else if (message.type === 'delete') {
-      lastWrittenHashes.delete(absolute);
-      await rm(absolute, { force: true });
-      await removeEmptyParentDirectories(path.dirname(absolute));
-      await broadcastFileList();
+      void queueFileOperation(absolute, async () => {
+        lastWrittenHashes.delete(absolute);
+        await rm(absolute, { force: true });
+        await removeEmptyParentDirectories(path.dirname(absolute));
+        await broadcastFileList();
+      });
     }
   });
 });

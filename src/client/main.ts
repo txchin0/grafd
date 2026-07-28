@@ -22,15 +22,11 @@
 import {
   parseFlow,
   serializeFlow,
-  getPreambleField,
   setPreambleField,
   getProp,
   setProp,
   quoteValue,
-  unquote,
   collapseToSingleLine,
-  parseListValue,
-  formatListValue,
   parseExpandLink,
   resolveLinkPath,
   resolvedExpandPath,
@@ -43,7 +39,6 @@ import {
   type FlowDocument,
   type FlowItem,
   type FlowNode,
-  type GraphItem,
   type Rect,
   type Reference,
 } from '../shared/flow-format.js';
@@ -54,7 +49,6 @@ import { createContextMenu, type MenuItem } from './context-menu.js';
 import type { Modal } from './modal.js';
 import { createPreferencesDialog } from './preferences-dialog.js';
 import { loadPreferences, type Preferences } from './preferences.js';
-import { createReferenceRows } from './reference-rows.js';
 import type { LinkContext } from './reference-link.js';
 import { applyTheme } from './theme.js';
 import {
@@ -69,15 +63,8 @@ import {
   type TrailEntry,
 } from './dive-navigation.js';
 import { createEditors, type Editors } from './editors.js';
-import {
-  MANIFEST_FILE_NAME,
-  chooseStartupFlow,
-  defaultEntrypoint,
-  emptyManifest,
-  parseManifest,
-  serializeManifest,
-  type WorkspaceManifest,
-} from '../shared/manifest.js';
+import { EditSession, type CommitTiming } from './edit-session.js';
+import { MANIFEST_FILE_NAME } from '../shared/manifest.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
 import { ServerWorkspace, serverIsAvailable } from './workspace-server.js';
 import { BrowserWorkspace } from './workspace-browser.js';
@@ -85,54 +72,39 @@ import { FolderWorkspace, folderPickingIsSupported, pickWorkspaceFolder } from '
 import { exportWorkspaceAsZip } from './export.js';
 import { safeFileStem } from './download.js';
 import { createScreenshotDialog } from './screenshot.js';
-import { buildFileTree, type TreeFile, type TreeFolder } from './file-tree.js';
-
-interface AppState {
-  files: string[];
-  path: string | null;
-  text: string;
-  doc: FlowDocument | null;
-  scope: string | null;
-  model: FlowModel | null;
-}
+import { createSidebarFiles } from './sidebar-files.js';
+import { createGraphPanel } from './graph-panel.js';
+import { createClipboard } from './clipboard.js';
+import { createWorkspaceUiState } from './workspace-ui-state.js';
+import type { OpenFlow } from './open-flow.js';
+import {
+  copyFlowPath,
+  extractedFlowPath,
+  findExistingFile,
+  folderOf,
+  nextUntitledFlowName,
+  normalizeFlowPath,
+} from './flow-paths.js';
 
 // TrailEntry and DiveTarget live in dive-navigation.ts.
 
-type CommitTiming = 'debounce' | 'now';
-
-const COMMIT_DEBOUNCE_MS = 300;
-const UNDO_LIMIT = 100;
-
-const state: AppState = {
-  files: [],
-  path: null,
-  text: '',
-  doc: null,
-  scope: null,
-  model: null,
-};
+let openFlow: OpenFlow | null = null;
+let workspaceFiles: string[] = [];
 
 const navigation = { trail: [] as TrailEntry[], inProgress: false };
 
-// Undo history spans every document reachable from the open file, not just the open file
-// itself: an edit inside an expanded frame lands in that frame's (possibly external) .flow
-// document, so each history entry snapshots the text of every document an action can touch.
-type WorkspaceSnapshot = { path: string; text: string }[];
-const undoStack: WorkspaceSnapshot[] = [];
-const redoStack: WorkspaceSnapshot[] = [];
-// Last text committed to each loaded external (frame) document. The open document's own
-// baseline is `state.text`; these are the baselines for everything an edit could reach.
-const externalCommittedTexts = new Map<string, string>();
-let commitTimer: ReturnType<typeof setTimeout> | undefined;
+// Every document an edit can reach — the open file and any external file unfolded inside a
+// frame — is tracked by one session, which owns their committed texts, their debounced
+// writes, and the undo history spanning all of them (edit-session.ts).
+const session = new EditSession({
+  writeFile: sendWrite,
+  adoptDocument: (path, doc) => expansions.adoptDocument(path, doc),
+});
 
 let currentPreferences: Preferences = loadPreferences();
 applyTheme(currentPreferences.theme);
 let workspace: Workspace | null = null;
 let defaultWorkspaceKind: 'server' | 'browser' = 'browser';
-let manifest: WorkspaceManifest = emptyManifest();
-let manifestSaveTimer: ReturnType<typeof setTimeout> | undefined;
-
-const MANIFEST_SAVE_DEBOUNCE_MS = 800;
 
 function elementById<T extends HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -168,122 +140,150 @@ const elements = {
   graphAddReference: elementById<HTMLButtonElement>('gp-add-reference'),
 };
 
-function scopeItemsNow() {
-  return FlowDoc.scopeItems(state.doc!, state.scope);
+// graf.manifest.json — the workspace entrypoint plus the camera, open frames and active flow
+// this browser last left behind. Sampled from the live view at save time.
+const uiState = createWorkspaceUiState({
+  writeFile: sendWrite,
+  activePath: () => openFlow?.path ?? null,
+  camera: () => view.view,
+  openExpansionIds: () => expansions.openVisibleNodeIds(),
+});
+
+const contextMenu = createContextMenu();
+
+// Copy/cut/paste/duplicate. Built here rather than beside the canvas because everything it
+// needs — the selection, the owning document of a node, the routed mutation — is reached
+// through callbacks, so nothing it depends on has to exist yet.
+const clipboard = createClipboard({
+  openFlow: () => openFlow,
+  selection: () => [...view.selection],
+  select: (nodes) => view.setSelection(nodes),
+  ownerOf,
+  documentAt: (path) => {
+    const doc = expansions.documentAt(path);
+    return doc ? { doc, path } : null;
+  },
+  // Every clipboard mutation is a structural edit, so none of them wait on the typing debounce.
+  applyToDoc: (owner, mutation) => applyToDoc(owner, mutation, { commit: 'now' }),
+  deleteSelection: () => deleteSelection(),
+});
+
+
+// The header panel reads whatever flow it is handed and routes its edits back through `mutate`.
+const graphPanel = createGraphPanel({
+  elements: {
+    panel: elements.graphPanel,
+    toggle: elements.graphToggle,
+    name: elements.graphName,
+    description: elements.graphDescription,
+    context: elements.graphContext,
+    onError: elements.graphOnError,
+    entrypoint: elements.graphEntrypoint,
+    referenceRows: elements.graphReferenceRows,
+    addReference: elements.graphAddReference,
+  },
+  openFlow: () => openFlow,
+  edit: mutate,
+  linkContext,
+  hostRenamed: rippleInnerRefsAcrossWorkspace,
+});
+
+// The sidebar renders the workspace's paths and reports what the user picked; the actions it
+// names live here. Constructed with `elements` rather than alongside the canvas, since its only
+// collaborator is the context menu and that has no dependencies of its own.
+const sidebarFiles = createSidebarFiles({
+  fileList: elements.fileList,
+  newFileButton: elements.newFileButton,
+  newFileInput: elements.newFileInput,
+  newFileError: elements.newFileError,
+  contextMenu,
+  files: () => workspaceFiles,
+  activePath: () => openFlow?.path ?? null,
+  openFile: (path) => openFlowFromSidebar(path),
+  deleteFile: deleteFlowFile,
+  duplicateFile: (path) => void duplicateFlowFile(path),
+  createFile: createFlowFile,
+});
+
+function modelFor(flow: Omit<OpenFlow, 'model'>): FlowModel {
+  const model = FlowDoc.buildModel(flow.doc, flow.scope);
+  model.sourcePath = flow.path;
+  return model;
 }
 
 function refresh(): void {
-  if (!state.doc) return;
-  state.model = FlowDoc.buildModel(state.doc, state.scope);
-  state.model.sourcePath = state.path;
+  if (!openFlow) return;
+  openFlow.model = modelFor(openFlow);
   expansions.invalidateSubModels();
-  view.setModel(state.model);
-  renderBreadcrumb();
-  renderGraphPanel();
+  view.setModel(openFlow.model);
+  renderBreadcrumb(openFlow);
+  graphPanel.render(openFlow);
   editors.refreshFromDoc();
 }
 
-function mutate(mutation: () => void, { commit = 'debounce' }: { commit?: CommitTiming } = {}): void {
-  if (!state.doc) return;
-  mutation();
-  refresh();
-  if (commit === 'now') commitNow();
-  else scheduleCommit();
+function mutate(mutation: () => void, options?: { commit?: CommitTiming }): void {
+  if (!openFlow) return;
+  applyToDoc({ doc: openFlow.doc, path: openFlow.path }, mutation, options);
 }
 
-function scheduleCommit(): void {
-  clearTimeout(commitTimer);
-  commitTimer = setTimeout(commitNow, COMMIT_DEBOUNCE_MS);
+function undo(): void {
+  adoptRestoredDocuments(session.undo());
 }
 
-function commitNow(): void {
-  clearTimeout(commitTimer);
-  if (!state.doc || !state.path) return;
-  FlowDoc.ensureLayoutEverywhere(state.doc);
-  const newText = serializeFlow(state.doc);
-  if (newText === state.text) return;
-  pushHistory(workspaceSnapshot());
-  state.text = newText;
-  sendWrite(state.path, newText);
+function redo(): void {
+  adoptRestoredDocuments(session.redo());
 }
 
-// Baseline text of every currently-tracked document (the open file plus loaded frames).
-function workspaceSnapshot(): WorkspaceSnapshot {
-  const snapshot: WorkspaceSnapshot = [];
-  if (state.path) snapshot.push({ path: state.path, text: state.text });
-  for (const [path, text] of externalCommittedTexts) snapshot.push({ path, text });
-  return snapshot;
-}
-
-function pushHistory(snapshot: WorkspaceSnapshot): void {
-  undoStack.push(snapshot);
-  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
-  redoStack.length = 0;
-}
-
-// Restore each document in a snapshot that differs from its current baseline: the open file
-// through the same parse/refresh path as a normal load, external frames through the
-// expansion cache. Both re-write to disk so other tools see the reverted state.
-function restoreSnapshot(snapshot: WorkspaceSnapshot): void {
-  discardPendingRipples();
-  for (const { path, text } of snapshot) {
-    if (path === state.path) {
-      if (text === state.text) continue;
-      state.text = text;
-      state.doc = parseFlow(text);
-      FlowDoc.assignMissingIds(state.doc);
-      expansions.adoptDocument(path, state.doc);
-      if (state.scope && !FlowDoc.graphBlockNames(state.doc).includes(state.scope)) state.scope = null;
-      sendWrite(path, text);
-    } else {
-      if (externalCommittedTexts.get(path) === text) continue;
-      externalCommittedTexts.set(path, text);
-      expansions.adoptExternalText(path, text);
-      sendWrite(path, text);
-    }
-  }
+// A restore replaces the document object at every path it touches, so the app's own handle on
+// the open one has to be re-read rather than kept.
+function adoptRestoredDocuments(changedPaths: string[]): void {
+  const restoredOpenDocument = openFlow && changedPaths.includes(openFlow.path)
+    ? session.documentAt(openFlow.path)
+    : null;
+  if (restoredOpenDocument) adoptOpenDocument(restoredOpenDocument);
   expansions.invalidateSubModels();
   refresh();
 }
 
-function undo(): void {
-  flushPendingCommits();
-  if (undoStack.length === 0) return;
-  redoStack.push(workspaceSnapshot());
-  restoreSnapshot(undoStack.pop()!);
+// Open a flow, building its model so the four parts are never momentarily out of step.
+function setOpenFlow(path: string, doc: FlowDocument, scope: string | null): void {
+  openFlow = { path, doc, scope, model: modelFor({ path, doc, scope }) };
 }
 
-function redo(): void {
-  flushPendingCommits();
-  if (redoStack.length === 0) return;
-  undoStack.push(workspaceSnapshot());
-  restoreSnapshot(redoStack.pop()!);
+// Swap in a reparse of the open file, from an undo or a watcher push.
+function adoptOpenDocument(doc: FlowDocument): void {
+  if (!openFlow) return;
+  setOpenFlow(openFlow.path, doc, openFlow.scope);
+  dropScopeIfMissing();
+}
+
+// A `graph:` block can leave the open document under the canvas — an undo past its creation, a
+// watcher push, an extraction into its own file — stranding a scope that names it. Callers
+// refresh straight after, which rebuilds the model against the corrected scope.
+function dropScopeIfMissing(): void {
+  if (!openFlow?.scope) return;
+  if (FlowDoc.graphBlockNames(openFlow.doc).includes(openFlow.scope)) return;
+  openFlow.scope = null;
 }
 
 const workspaceDelegate: WorkspaceDelegate = {
   filesChanged(files) {
-    state.files = files;
+    workspaceFiles = files;
     renderFileList();
-    if (state.path && !files.includes(state.path)) void closeIfFileGone(state.path);
+    if (openFlow && !files.includes(openFlow.path)) void closeIfFileGone(openFlow.path);
   },
   fileChanged(path, text) {
     // Manifest changes from other clients are UI state, not content — adopting them
     // mid-session would fight the local camera and selection.
     if (path === MANIFEST_FILE_NAME) return;
-    if (!state.files.includes(path)) {
-      state.files.push(path);
-      state.files.sort();
+    if (!workspaceFiles.includes(path)) {
+      workspaceFiles.push(path);
+      workspaceFiles.sort();
       renderFileList();
     }
-    // Open path: one parse via adoptExternalText, which re-seeds the expansion cache with
-    // the same object as state.doc. Handling the cache first would create a divergent copy.
-    if (path === state.path) {
-      if (text !== state.text) adoptExternalText(text);
-    } else if (expansions.watchesPath(path)) {
-      discardPendingRipples();
-      externalCommittedTexts.set(path, text);
-      expansions.adoptExternalText(path, text);
-    }
+    if (path !== openFlow?.path && !expansions.watchesPath(path)) return;
+    if (session.committedTextAt(path) === text) return;
+    adoptWatchedText(path, text);
   },
   connectionChanged(connected) {
     elements.connectionDot.classList.toggle('connected', connected);
@@ -294,41 +294,32 @@ function sendWrite(path: string, text: string): void {
   workspace?.writeFile(path, text);
 }
 
-function recordUiState(): void {
-  manifest.ui.activeFlow = state.path;
-  if (state.path) {
-    const { x, y, scale } = view.view;
-    manifest.ui.cameras[state.path] = { x, y, scale };
-    manifest.ui.expansions[state.path] = expansions.openVisibleNodeIds();
-  }
-}
-
 function scheduleManifestSave(): void {
-  clearTimeout(manifestSaveTimer);
-  manifestSaveTimer = setTimeout(saveManifestNow, MANIFEST_SAVE_DEBOUNCE_MS);
+  if (workspace) uiState.scheduleSave();
 }
 
-function saveManifestNow(): void {
-  clearTimeout(manifestSaveTimer);
-  manifestSaveTimer = undefined;
-  if (!workspace) return;
-  recordUiState();
-  sendWrite(MANIFEST_FILE_NAME, serializeManifest(manifest));
+// A watcher push replaces a document wholesale. Routing it through the session cancels any
+// commit still pending for that path, which would otherwise fire holding the pre-push object
+// and serialize it back over the content that just arrived.
+function adoptWatchedText(path: string, text: string): void {
+  const doc = session.adoptText(path, text);
+  if (path === openFlow?.path) {
+    adoptOpenDocument(doc);
+    refresh();
+    return;
+  }
+  expansions.invalidateSubModels();
+  view.requestRender();
+  editors.refreshFromDoc();
 }
 
-function adoptExternalText(text: string): void {
-  discardPendingRipples();
-  state.text = text;
-  state.doc = parseFlow(text);
-  FlowDoc.assignMissingIds(state.doc);
-  expansions.adoptDocument(state.path!, state.doc);
-  if (state.scope && !FlowDoc.graphBlockNames(state.doc).includes(state.scope)) state.scope = null;
-  refresh();
-}
-
+// `restoreSavedView` covers everything the manifest remembers about how this flow was last
+// looked at — which frames were unfolded and where the camera sat. A dive turns it off: the
+// destination is reached by an animation that places the camera itself, and restoring a
+// remembered one mid-flight would fight it.
 async function openFile(
   path: string,
-  { presetText = null, fit = true }: { presetText?: string | null; fit?: boolean } = {},
+  { presetText = null, restoreSavedView = true }: { presetText?: string | null; restoreSavedView?: boolean } = {},
 ): Promise<boolean> {
   let text = presetText;
   if (text == null) {
@@ -341,27 +332,21 @@ async function openFile(
       return false;
     }
   }
-  state.path = path;
-  state.text = text;
-  state.doc = parseFlow(text);
-  FlowDoc.assignMissingIds(state.doc);
-  expansions.adoptDocument(path, state.doc);
-  state.scope = null;
-  undoStack.length = 0;
-  redoStack.length = 0;
-  externalCommittedTexts.clear();
+  // Flush before switching so a commit still debouncing against the outgoing file lands in it
+  // rather than being evaluated later against whatever is open by then; reset then drops the
+  // outgoing documents and their history, which no longer describe anything reachable.
+  session.flush();
+  session.reset();
+  setOpenFlow(path, session.adoptText(path, text), null);
   editors.closeAll();
   view.clearSelection();
   elements.emptyState.classList.add('hidden');
   location.hash = path;
-  if (fit) {
-    const savedExpansions = manifest.ui.expansions[path];
-    if (savedExpansions) expansions.restoreOpen(savedExpansions);
-  }
+  const saved = uiState.savedViewOf(path);
+  if (restoreSavedView && saved.openExpansions) expansions.restoreOpen(saved.openExpansions);
   refresh();
-  if (fit) {
-    const savedCamera = manifest.ui.cameras[path];
-    if (savedCamera) view.setViewNow(savedCamera);
+  if (restoreSavedView) {
+    if (saved.camera) view.setViewNow(saved.camera);
     else view.fitToContent();
   }
   renderFileList();
@@ -370,33 +355,31 @@ async function openFile(
 }
 
 function dropFromFileList(path: string): void {
-  const index = state.files.indexOf(path);
+  const index = workspaceFiles.indexOf(path);
   if (index === -1) return;
-  state.files.splice(index, 1);
+  workspaceFiles.splice(index, 1);
   renderFileList();
 }
 
 function deleteFlowFile(path: string): void {
   workspace?.deleteFile(path);
+  // Untrack before anything else: a commit still pending against this path would re-create the
+  // file moments after it was deleted.
+  session.forget(path);
   dropFromFileList(path);
-  delete manifest.ui.cameras[path];
-  delete manifest.ui.expansions[path];
-  if (manifest.ui.activeFlow === path) manifest.ui.activeFlow = null;
-  if (manifest.entrypoint === path) manifest.entrypoint = defaultEntrypoint(state.files);
-  scheduleManifestSave();
-  if (state.path === path) closeCurrentFlow();
+  uiState.forgetFlow(path, workspaceFiles);
+  if (openFlow?.path === path) closeCurrentFlow();
 }
 
 function closeCurrentFlow(): void {
   navigation.trail.length = 0;
   editors.closeAll();
   view.clearSelection();
-  state.path = null;
-  state.text = '';
-  state.doc = null;
-  state.scope = null;
-  state.model = null;
-  const next = chooseStartupFlow(manifest, state.files);
+  // Deliberately not flushed: the flow is closing because it was deleted or vanished, and a
+  // pending commit would write it straight back.
+  session.reset();
+  openFlow = null;
+  const next = uiState.startupFlow(workspaceFiles);
   if (next) void openFile(next);
   else showEmptyWorkspace();
 }
@@ -406,153 +389,26 @@ function closeCurrentFlow(): void {
 // landed on disk), so confirm the file is really gone by reading it before closing.
 async function closeIfFileGone(path: string): Promise<void> {
   const text = (await workspace?.readFile(path)) ?? null;
-  if (text != null || state.path !== path) return;
+  if (text != null || openFlow?.path !== path) return;
   closeCurrentFlow();
 }
 
 function setScope(scopeName: string | null, { fit = true }: { fit?: boolean } = {}): void {
-  state.scope = scopeName;
+  if (!openFlow) return;
+  openFlow.scope = scopeName;
   editors.closeAll();
   view.clearSelection();
   refresh();
   if (fit) view.fitToContent();
 }
 
-const collapsedFolders = new Set<string>();
-
-function renderFileList(): void {
-  const rows: HTMLElement[] = [];
-  appendFolderRows(buildFileTree(state.files), 0, rows);
-  elements.fileList.replaceChildren(...rows);
-}
-
-function appendFolderRows(folder: TreeFolder, depth: number, rows: HTMLElement[]): void {
-  for (const child of folder.folders) {
-    rows.push(folderRow(child, depth));
-    if (!collapsedFolders.has(child.path)) appendFolderRows(child, depth + 1, rows);
-  }
-  for (const file of folder.files) rows.push(fileRow(file, depth));
-}
-
-function applyTreeIndent(row: HTMLElement, depth: number): void {
-  row.style.paddingLeft = `${10 + depth * 14}px`;
-}
-
-function folderRow(folder: TreeFolder, depth: number): HTMLElement {
-  const row = document.createElement('li');
-  row.className = 'folder-row';
-  row.title = folder.path;
-  applyTreeIndent(row, depth);
-  const caret = document.createElement('span');
-  caret.className = 'folder-caret';
-  caret.textContent = collapsedFolders.has(folder.path) ? '▸' : '▾';
-  const name = document.createElement('span');
-  name.className = 'file-name';
-  name.textContent = folder.name;
-  row.append(caret, name);
-  row.addEventListener('click', () => {
-    if (collapsedFolders.has(folder.path)) collapsedFolders.delete(folder.path);
-    else collapsedFolders.add(folder.path);
-    renderFileList();
-  });
-  row.addEventListener('contextmenu', (event) => {
-    event.preventDefault();
-    contextMenu.open([
-      { label: 'New flow here', onSelect: () => showNewFileInput(`${folder.path}/`) },
-    ], { x: event.clientX, y: event.clientY });
-  });
-  return row;
-}
-
-function fileRow(file: TreeFile, depth: number): HTMLElement {
-  const row = document.createElement('li');
-  row.className = 'file-row';
-  row.title = file.path;
-  row.classList.toggle('active', file.path === state.path);
-  applyTreeIndent(row, depth);
-  const name = document.createElement('span');
-  name.className = 'file-name';
-  name.textContent = file.name;
-  row.append(name, deleteButtonFor(file.path));
-  row.addEventListener('click', () => {
-    navigation.trail.length = 0;
-    openFile(file.path);
-  });
-  row.addEventListener('contextmenu', (event) => {
-    event.preventDefault();
-    const at = { x: event.clientX, y: event.clientY };
-    contextMenu.open(fileMenuItems(file, at), at);
-  });
-  return row;
-}
-
-function folderOf(path: string): string {
-  const slash = path.lastIndexOf('/');
-  return slash === -1 ? '' : path.slice(0, slash);
-}
-
-function fileMenuItems(file: TreeFile, at: { x: number; y: number }): MenuItem[] {
-  const folder = folderOf(file.path);
-  return [
-    { label: 'Open', onSelect: () => { navigation.trail.length = 0; openFile(file.path); } },
-    { label: 'New flow here', onSelect: () => showNewFileInput(folder ? `${folder}/` : undefined) },
-    { label: 'Duplicate', onSelect: () => void duplicateFlowFile(file.path) },
-    { separator: true },
-    { label: 'Delete', danger: true, onSelect: () => confirmDeleteFlowFile(file, at) },
-  ];
-}
-
-// Same two-step confirmation as the sidebar ✕ button: dialog boxes are suppressed in several
-// embedded hosts, so the menu reopens with an explicit confirm instead of deleting on first click.
-function confirmDeleteFlowFile(file: TreeFile, at: { x: number; y: number }): void {
-  contextMenu.open([
-    { label: `Delete ${file.name}?`, danger: true, onSelect: () => deleteFlowFile(file.path) },
-    { label: 'Cancel', onSelect: () => {} },
-  ], at);
-}
-
-function uniqueFlowFilePath(path: string): string {
-  const base = path.replace(/\.flow$/, '');
-  let candidate = `${base} copy.flow`;
-  let counter = 2;
-  while (state.files.includes(candidate)) {
-    candidate = `${base} copy ${counter}.flow`;
-    counter += 1;
-  }
-  return candidate;
-}
-
 async function duplicateFlowFile(path: string): Promise<void> {
-  const text = path === state.path ? state.text : await workspace?.readFile(path);
+  const text = session.committedTextAt(path) ?? (await workspace?.readFile(path));
   if (text == null) return;
-  registerCreatedFlowFile(uniqueFlowFilePath(path), text);
+  registerCreatedFlowFile(copyFlowPath(workspaceFiles, path), text);
 }
 
-// Deleting takes two clicks on the same button — an inline confirmation, because dialog
-// boxes (confirm/prompt) are suppressed in several embedded browser hosts.
-function deleteButtonFor(path: string): HTMLButtonElement {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'file-delete';
-  button.textContent = '✕';
-  button.title = `Delete ${path}`;
-  button.addEventListener('click', (event) => {
-    event.stopPropagation();
-    if (!button.classList.contains('armed')) {
-      button.classList.add('armed');
-      button.textContent = 'sure?';
-      return;
-    }
-    deleteFlowFile(path);
-  });
-  button.addEventListener('mouseleave', () => {
-    button.classList.remove('armed');
-    button.textContent = '✕';
-  });
-  return button;
-}
-
-function renderBreadcrumb(): void {
+function renderBreadcrumb(flow: OpenFlow | null): void {
   const crumbs: HTMLElement[] = [];
   navigation.trail.forEach((entry, index) => {
     const crumb = document.createElement('span');
@@ -564,7 +420,7 @@ function renderBreadcrumb(): void {
   });
   const current = document.createElement('span');
   current.className = 'crumb current';
-  current.textContent = state.scope ? `${state.path} › ${state.scope}` : (state.path ?? '');
+  current.textContent = flow ? (flow.scope ? `${flow.path} › ${flow.scope}` : flow.path) : '';
   crumbs.push(current);
   elements.breadcrumb.replaceChildren(...crumbs);
 }
@@ -581,42 +437,6 @@ function breadcrumbSeparator(): HTMLElement {
   return separator;
 }
 
-const graphReferenceRows = createReferenceRows({
-  rows: elements.graphReferenceRows,
-  addButton: elements.graphAddReference,
-  linkContext,
-  commit: (references) => {
-    if (!state.doc || state.scope) return;
-    mutate(() => setPreambleReferences(state.doc!, FlowDoc.normalizeReferences(references)));
-  },
-});
-
-function renderGraphPanel(): void {
-  const scoped = state.scope != null;
-  const displayName = scoped
-    ? state.scope!
-    : unquote(getPreambleField(state.doc!, 'name') ?? '') || state.path || 'graph';
-  elements.graphToggle.textContent = `☰ ${displayName}`;
-
-  setUnlessFocused(elements.graphName, displayName);
-  setUnlessFocused(elements.graphDescription, scoped ? '' : unquote(getPreambleField(state.doc!, 'description') ?? ''));
-  setUnlessFocused(elements.graphContext, scoped ? '' : parseListValue(getPreambleField(state.doc!, 'context')).join(', '));
-  setUnlessFocused(elements.graphOnError, scoped ? '' : (getPreambleField(state.doc!, 'on_error') ?? ''));
-  elements.graphEntrypoint.checked = !scoped && getPreambleField(state.doc!, 'entrypoint') === 'true';
-  // A local `graph:` block has no preamble of its own, so preamble-only fields go read-only
-  // while one is in scope.
-  graphReferenceRows.fill(scoped ? [] : (state.doc!.preamble?.references ?? []));
-  graphReferenceRows.setDisabled(scoped);
-
-  for (const field of [elements.graphDescription, elements.graphContext, elements.graphOnError, elements.graphEntrypoint]) {
-    field.disabled = scoped;
-  }
-}
-
-function setUnlessFocused(field: HTMLInputElement | HTMLTextAreaElement, value: string): void {
-  if (document.activeElement !== field) field.value = value;
-}
-
 function centeredDefaultRect(worldPoint: Point): Rect {
   const { w, h } = FlowDoc.DEFAULT_NODE_SIZE;
   return { x: Math.round(worldPoint.x - w / 2), y: Math.round(worldPoint.y - h / 2), w, h };
@@ -628,9 +448,15 @@ function centeredDefaultRect(worldPoint: Point): Rect {
 // documents rather than the frame geometry, which is rebuilt a frame behind every re-parse
 // (undo, redo, a watcher update) and would write into a document already replaced.
 function creationTargetFor(frameHost: FlowNode | null): { owner: DocumentOwner; scope: string | null } | null {
-  if (!frameHost) return { owner: { doc: state.doc!, path: state.path! }, scope: state.scope };
+  if (!openFlow) return null;
+  if (!frameHost) return { owner: { doc: openFlow.doc, path: openFlow.path }, scope: openFlow.scope };
   const host = liveNode(frameHost);
   const expandValue = getProp(host, 'expand');
+  // Both misses mean the frame on screen no longer describes anything writable: its host lost
+  // its `expand`, or the file that `expand` names is not loaded. Neither should be reachable —
+  // a frame is only drawn once its subgraph resolved — but the canvas hands back geometry from
+  // the frame it last drew, which a re-parse can invalidate. Creating nothing is the safe
+  // answer; creating into a guess would put the node in the wrong file.
   if (!expandValue) return null;
   const hostOwner = ownerOf(host);
   const path = resolvedExpandPath(expandValue, hostOwner.path);
@@ -720,31 +546,11 @@ function extractableBlockNameFor(node: FlowNode): string | null {
   return expandValue;
 }
 
-function kebabFileName(blockName: string): string {
-  const slug = blockName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  return `${slug || 'subgraph'}.flow`;
-}
-
-// The extracted file lands beside the file that owns the node, so `expand` links inside the
-// moved nodes keep resolving and the parent's new link is a bare file name.
-function extractedFlowPathFor(ownerPath: string, graphName: string): string {
-  const folder = folderOf(ownerPath);
-  const name = kebabFileName(graphName);
-  let candidate = folder ? `${folder}/${name}` : name;
-  let counter = 2;
-  while (findExistingFile(candidate)) {
-    const numbered = name.replace(/\.flow$/, `-${counter}.flow`);
-    candidate = folder ? `${folder}/${numbered}` : numbered;
-    counter += 1;
-  }
-  return candidate;
-}
-
 function registerCreatedFlowFile(path: string, text: string): void {
   sendWrite(path, text);
-  if (!state.files.includes(path)) {
-    state.files.push(path);
-    state.files.sort();
+  if (!workspaceFiles.includes(path)) {
+    workspaceFiles.push(path);
+    workspaceFiles.sort();
   }
   renderFileList();
 }
@@ -763,7 +569,7 @@ function extractSubgraphIntoFile(node: FlowNode): void {
   editors.closeAll();
   const owner = ownerOf(node);
   const graphName = graphNameForExtraction(node, blockName, owner.doc);
-  const path = extractedFlowPathFor(owner.path, graphName);
+  const path = extractedFlowPath(workspaceFiles, owner.path, graphName);
   const linkPath = path.split('/').pop()!;
 
   let extracted: FlowDocument | null = null;
@@ -775,42 +581,41 @@ function extractSubgraphIntoFile(node: FlowNode): void {
   FlowDoc.ensureLayoutEverywhere(extracted);
   const text = serializeFlow(extracted);
   registerCreatedFlowFile(path, text);
-  externalCommittedTexts.set(path, text);
-  expansions.adoptExternalText(path, text);
-  if (owner.path === state.path && state.scope && !FlowDoc.graphBlockNames(state.doc!).includes(state.scope)) {
-    state.scope = null;
-  }
+  session.adoptText(path, text);
+  // Extraction moves the block out of the owning document, so a scope naming it is now stale.
+  if (owner.path === openFlow?.path) dropScopeIfMissing();
   refresh();
 }
 
 function deleteNodesAction(nodes: FlowNode[]): void {
-  const groups = new Map<FlowDocument, { owner: DocumentOwner; nodes: FlowNode[] }>();
-  for (const node of nodes) {
-    const owner = ownerOf(node);
-    if (!groups.has(owner.doc)) groups.set(owner.doc, { owner, nodes: [] });
-    groups.get(owner.doc)!.nodes.push(node);
-  }
-  for (const { owner, nodes: docNodes } of groups.values()) {
-    const clears: { identity: FlowDoc.ExpandIdentity; name: string }[] = [];
-    for (const node of docNodes) {
-      const identity = FlowDoc.expandIdentityForNode(owner.doc, owner.path, node);
-      if (identity) clears.push({ identity, name: node.name });
-    }
+  for (const { owner, itemGroups } of FlowDoc.groupNodesByOwner(nodes, ownerOf)) {
+    // Captured before the delete, while the nodes are still resolvable in their document.
+    const clears = expansionIdentitiesOf(owner, itemGroups);
     applyToDoc(owner, () => {
-      const byItems = new Map<ReturnType<typeof FlowDoc.containingItems>, FlowNode[]>();
-      for (const node of docNodes) {
-        const items = FlowDoc.containingItems(owner.doc, node);
-        if (!byItems.has(items)) byItems.set(items, []);
-        byItems.get(items)!.push(node);
-      }
-      for (const [items, list] of byItems) {
-        FlowDoc.deleteNodes(items, list, owner.doc, { path: owner.path });
+      for (const { items, nodes: group } of itemGroups) {
+        FlowDoc.deleteNodes(items, group, owner.doc, { path: owner.path });
       }
     }, { commit: 'now' });
     for (const { identity, name } of clears) {
       void retargetInnersAcrossWorkspace(identity, name, null, owner.doc);
     }
   }
+}
+
+// The expansions the given nodes host, paired with the names those expansions are reached by —
+// what a rename or delete has to ripple through `{Inner}` refinements elsewhere.
+function expansionIdentitiesOf(
+  owner: DocumentOwner,
+  itemGroups: FlowDoc.ItemGroup[],
+): { identity: FlowDoc.ExpandIdentity; name: string }[] {
+  const identities: { identity: FlowDoc.ExpandIdentity; name: string }[] = [];
+  for (const { nodes } of itemGroups) {
+    for (const node of nodes) {
+      const identity = FlowDoc.expandIdentityForNode(owner.doc, owner.path, node);
+      if (identity) identities.push({ identity, name: node.name });
+    }
+  }
+  return identities;
 }
 
 function deleteSelection(): void {
@@ -825,111 +630,6 @@ function deleteSelection(): void {
   }
 }
 
-// Session-local clipboard: detached node copies plus the path/scope they came from, so paste
-// can route back into an inline-expanded .flow (or graph block) the same way duplicate does.
-// Cloning up front means later edits to (or deletion of) the originals never disturb paste.
-const DUPLICATE_STEP = 24;
-
-interface ClipboardGroup {
-  path: string;
-  scope: string | null;
-  nodes: FlowNode[];
-}
-
-let clipboard: ClipboardGroup[] = [];
-
-function copySelection(): void {
-  if (view.selection.size === 0) return;
-  const groups = new Map<string, { path: string; scope: string | null; nodes: FlowNode[] }>();
-  for (const node of view.selection) {
-    const owner = ownerOf(node);
-    const scope = FlowDoc.containingGraphBlockName(owner.doc, node);
-    const key = `${owner.path}\0${scope ?? ''}`;
-    let group = groups.get(key);
-    if (!group) {
-      group = { path: owner.path, scope, nodes: [] };
-      groups.set(key, group);
-    }
-    group.nodes.push(node);
-  }
-  clipboard = [...groups.values()].map((group) => ({
-    path: group.path,
-    scope: group.scope,
-    nodes: FlowDoc.cloneNodesDetached(group.nodes),
-  }));
-}
-
-function cutSelection(): void {
-  if (view.selection.size === 0) return;
-  copySelection();
-  deleteSelection();
-}
-
-function clipboardHasNodes(): boolean {
-  return clipboard.some((group) => group.nodes.length > 0);
-}
-
-// Duplicate/paste route through the same owner→items grouping as deleteNodesAction, so nodes
-// selected inside an inline-expanded frame land in the .flow file that actually owns them.
-function duplicateNodesAction(nodes: FlowNode[], offset: Point): FlowNode[] {
-  const copies: FlowNode[] = [];
-  const groups = new Map<FlowDocument, { owner: DocumentOwner; nodes: FlowNode[] }>();
-  for (const node of nodes) {
-    const owner = ownerOf(node);
-    if (!groups.has(owner.doc)) groups.set(owner.doc, { owner, nodes: [] });
-    groups.get(owner.doc)!.nodes.push(node);
-  }
-  for (const { owner, nodes: docNodes } of groups.values()) {
-    applyToDoc(owner, () => {
-      const byItems = new Map<ReturnType<typeof FlowDoc.containingItems>, FlowNode[]>();
-      for (const node of docNodes) {
-        const items = FlowDoc.containingItems(owner.doc, node);
-        if (!byItems.has(items)) byItems.set(items, []);
-        byItems.get(items)!.push(node);
-      }
-      for (const [items, list] of byItems) {
-        copies.push(...FlowDoc.duplicateNodes(items, list, offset));
-      }
-    }, { commit: 'now' });
-  }
-  return copies;
-}
-
-function duplicateSelection(): void {
-  const nodes = [...view.selection];
-  if (nodes.length === 0) return;
-  const copies = duplicateNodesAction(nodes, { x: DUPLICATE_STEP, y: DUPLICATE_STEP });
-  if (copies.length > 0) view.setSelection(copies);
-}
-
-function pasteOffsetToward(world: Point | undefined): Point {
-  const anchor = clipboard.flatMap((group) => group.nodes).find((node) => node.pos)?.pos;
-  if (!world || !anchor) return { x: DUPLICATE_STEP, y: DUPLICATE_STEP };
-  return { x: Math.round(world.x - anchor.x), y: Math.round(world.y - anchor.y) };
-}
-
-function ownerForClipboardPath(path: string): DocumentOwner | null {
-  if (state.doc && state.path === path) return { doc: state.doc, path };
-  const doc = expansions.documentAt(path);
-  return doc ? { doc, path } : null;
-}
-
-function pasteClipboard(world?: Point): void {
-  if (!state.doc || !clipboardHasNodes()) return;
-  const offset = pasteOffsetToward(world);
-  const pasted: FlowNode[] = [];
-  for (const group of clipboard) {
-    const resolved = ownerForClipboardPath(group.path);
-    const owner = resolved ?? { doc: state.doc, path: state.path! };
-    const scope = resolved ? group.scope : state.scope;
-    const items = FlowDoc.scopeItems(owner.doc, scope);
-    applyToDoc(owner, () => {
-      pasted.push(...FlowDoc.duplicateNodes(items, group.nodes, offset));
-    }, { commit: 'now' });
-  }
-  if (pasted.length > 0) view.setSelection(pasted);
-}
-
 // Opening a subgraph plays a seamless dive-in: the outgoing scene is held on screen while
 // the destination loads, then both scenes render together — the subgraph riding inside the
 // node's rectangle as the camera zooms through it, crossfading as it grows (see
@@ -939,17 +639,17 @@ function pasteClipboard(world?: Point): void {
 // straight on its subgraph and synthesizes a crumb for every level it skipped, so the trail
 // reads as if the user had opened each level in turn.
 async function openExpand(node: FlowNode): Promise<void> {
-  if (!getProp(node, 'expand') || navigation.inProgress) return;
+  if (!getProp(node, 'expand') || navigation.inProgress || !openFlow) return;
   navigation.inProgress = true;
   try {
     editors.closeAll();
-    expansions.layout(state.model!, performance.now());
-    expansions.collectLoci(state.model!);
-    const dive = divePathTo(diveNavigationContext(), node);
+    expansions.layout(openFlow.model, performance.now());
+    expansions.collectLoci(openFlow.model);
+    const dive = divePathTo(diveNavigationContext(openFlow), node);
     if (!dive) return;
     const anchor = expansions.diveAnchor(node);
     const nodeRect = anchor ? { ...anchor.frame } : { ...view.rect(node) };
-    view.beginSceneHold(state.model!, view.view);
+    view.beginSceneHold(openFlow.model, view.view);
 
     if (!(await enterDiveTarget(dive.destination))) {
       view.releaseSceneHold();
@@ -958,18 +658,18 @@ async function openExpand(node: FlowNode): Promise<void> {
     }
 
     navigation.trail.push(...dive.entries);
-    renderBreadcrumb();
+    renderBreadcrumb(openFlow);
     await view.zoomDiveIn({ nodeRect, inlineAnchor: anchor?.transform ?? null });
   } finally {
     navigation.inProgress = false;
   }
 }
 
-function diveNavigationContext(model = state.model!) {
+function diveNavigationContext(flow: OpenFlow, model: FlowModel = flow.model) {
   return {
-    path: state.path!,
-    scope: state.scope,
-    doc: state.doc,
+    path: flow.path,
+    scope: flow.scope,
+    doc: flow.doc,
     model,
     liveView: view.view,
     fitViewForModel: (flowModel: FlowModel) => view.fitViewForModel(flowModel),
@@ -980,23 +680,26 @@ function diveNavigationContext(model = state.model!) {
 }
 
 async function enterDiveTarget(target: DiveTarget): Promise<boolean> {
-  if (target.path !== state.path && !(await openDiveDocument(target))) return false;
-  if (target.scope && !FlowDoc.graphBlockNames(state.doc!).includes(target.scope)) {
-    mutate(() => state.doc!.items.push({ kind: 'graph', name: target.scope!, items: [] }), { commit: 'now' });
+  if (target.path !== openFlow?.path && !(await openDiveDocument(target))) return false;
+  // Re-read across the await: opening the destination replaces the open flow wholesale.
+  const flow = openFlow;
+  if (!flow) return false;
+  if (target.scope && !FlowDoc.graphBlockNames(flow.doc).includes(target.scope)) {
+    mutate(() => flow.doc.items.push({ kind: 'graph', name: target.scope!, items: [] }), { commit: 'now' });
   }
-  if (state.scope !== target.scope) setScope(target.scope, { fit: false });
+  if (flow.scope !== target.scope) setScope(target.scope, { fit: false });
   return true;
 }
 
 async function openDiveDocument(target: DiveTarget): Promise<boolean> {
-  if (state.files.includes(target.path)) return openFile(target.path, { fit: false });
+  if (workspaceFiles.includes(target.path)) return openFile(target.path, { restoreSavedView: false });
   if (!target.link) return false;
   const graphName = sanitizeName(target.link.label) || target.path.split('/').pop()!.replace(/\.flow$/, '');
   const text = `---\nname: ${graphName}\n---\n`;
   sendWrite(target.path, text);
-  state.files.push(target.path);
-  state.files.sort();
-  return openFile(target.path, { presetText: text, fit: false });
+  workspaceFiles.push(target.path);
+  workspaceFiles.sort();
+  return openFile(target.path, { presetText: text, restoreSavedView: false });
 }
 
 // Stepping back reverses the dive: the graph on screen shrinks back into the node it came
@@ -1004,34 +707,37 @@ async function openDiveDocument(target: DiveTarget): Promise<boolean> {
 // crumb was left at. Jumping several crumbs at once plays the same motion once, through the
 // composed placement of every level it spans.
 async function navigateBackTo(index: number): Promise<void> {
-  if (navigation.inProgress || index >= navigation.trail.length) return;
+  if (navigation.inProgress || index >= navigation.trail.length || !openFlow) return;
   navigation.inProgress = true;
   try {
     editors.closeAll();
     const entry = navigation.trail[index];
     const dropped = navigation.trail.slice(index);
-    const leavingModel = state.model!;
+    const leavingModel = openFlow.model;
     navigation.trail.length = index;
-    view.beginSceneHold(state.model!, view.view);
-    if (entry.path !== state.path) {
-      const opened = await openFile(entry.path, { fit: false });
+    view.beginSceneHold(openFlow.model, view.view);
+    if (entry.path !== openFlow.path) {
+      const opened = await openFile(entry.path, { restoreSavedView: false });
       if (!opened) {
         view.releaseSceneHold();
-        renderBreadcrumb();
+        renderBreadcrumb(openFlow);
         return;
       }
     }
-    if (state.scope !== entry.scope) setScope(entry.scope, { fit: false });
-    renderBreadcrumb();
-    const enteredNode = FlowDoc.findNodeById(state.doc!, entry.nodeId);
+    // Re-read across the await: opening the crumb's file replaces the open flow wholesale.
+    const flow = openFlow;
+    if (!flow) return;
+    if (flow.scope !== entry.scope) setScope(entry.scope, { fit: false });
+    renderBreadcrumb(flow);
+    const enteredNode = FlowDoc.findNodeById(flow.doc, entry.nodeId);
     if (!enteredNode?.pos) {
       view.releaseSceneHold();
       view.setViewNow(entry.view);
       return;
     }
-    expansions.layout(state.model!, performance.now());
-    expansions.collectLoci(state.model!);
-    const anchor = backOutAnchorFor(diveNavigationContext(), dropped, leavingModel);
+    expansions.layout(flow.model, performance.now());
+    expansions.collectLoci(flow.model);
+    const anchor = backOutAnchorFor(diveNavigationContext(flow), dropped, leavingModel);
     const nodeRect = anchor ? anchor.rect : { ...view.rect(enteredNode) };
     await view.zoomBackOut({ nodeRect, targetView: entry.view, inlineAnchor: anchor?.transform ?? null });
   } finally {
@@ -1048,50 +754,32 @@ function toggleInlineExpansion(node: FlowNode): void {
 // --- Editing routed by document ----------------------------------------------------------
 //
 // Nodes inside an unfolded frame may belong to another .flow file. Every mutation is routed
-// to the document that owns the node: the current file goes through the normal
-// mutate/undo/commit pipeline, external documents are serialized and written straight to
-// their own path (no undo — the file watcher keeps other views in sync).
+// to the document that owns the node and committed through the session, which debounces and
+// undoes edits to the open file and to frame documents alike. The only thing the open file
+// gets that a frame document does not is a model rebuild — a frame's geometry is derived on
+// the next render instead.
 
-const pendingExternalCommits = new Map<string, { timer: ReturnType<typeof setTimeout>; doc: FlowDocument }>();
-
+// Every node the canvas or an editor can hand back came from the open document or from a frame
+// document the expansion layer owns — there is no third source, and no node at all when nothing
+// is open, so a miss here is a broken invariant rather than a case to fall back from.
 function ownerOf(node: FlowNode): DocumentOwner {
-  if (FlowDoc.allNodes(state.doc!).includes(node)) return { doc: state.doc!, path: state.path! };
-  return expansions.ownerOf(node) ?? { doc: state.doc!, path: state.path! };
-}
-
-function commitExternalNow(doc: FlowDocument, path: string): void {
-  clearTimeout(pendingExternalCommits.get(path)?.timer);
-  pendingExternalCommits.delete(path);
-  FlowDoc.ensureLayoutEverywhere(doc);
-  const newText = serializeFlow(doc);
-  if (newText === externalCommittedTexts.get(path)) return;
-  pushHistory(workspaceSnapshot());
-  externalCommittedTexts.set(path, newText);
-  sendWrite(path, newText);
+  if (!openFlow) throw new Error('ownerOf: no flow is open');
+  if (FlowDoc.allNodes(openFlow.doc).includes(node)) return { doc: openFlow.doc, path: openFlow.path };
+  return expansions.ownerOf(node) ?? { doc: openFlow.doc, path: openFlow.path };
 }
 
 function applyToDoc(owner: DocumentOwner, mutation: () => void, { commit = 'debounce' }: { commit?: CommitTiming } = {}): void {
-  if (owner.doc === state.doc) {
-    mutate(mutation, { commit });
-    return;
-  }
-  // Record the frame document's pre-edit text once, so the first edit to it can be undone
-  // even though it was loaded lazily by the expansion layer rather than opened.
-  if (!externalCommittedTexts.has(owner.path)) {
-    externalCommittedTexts.set(owner.path, serializeFlow(owner.doc));
-  }
+  // A frame document was loaded lazily by the expansion layer rather than opened, so its
+  // pre-edit text is recorded here — the baseline the first undo of this edit restores.
+  session.trackWithBaseline(owner.path, owner.doc);
   mutation();
-  expansions.invalidateSubModels();
-  view.requestRender();
-  if (commit === 'now') {
-    commitExternalNow(owner.doc, owner.path);
+  if (owner.doc === openFlow?.doc) {
+    refresh();
   } else {
-    clearTimeout(pendingExternalCommits.get(owner.path)?.timer);
-    pendingExternalCommits.set(owner.path, {
-      doc: owner.doc,
-      timer: setTimeout(() => commitExternalNow(owner.doc, owner.path), COMMIT_DEBOUNCE_MS),
-    });
+    expansions.invalidateSubModels();
+    view.requestRender();
   }
+  session.commitAfter(owner.path, commit);
 }
 
 function applyEdit(node: FlowNode, mutation: () => void, options?: { commit?: CommitTiming }): void {
@@ -1099,7 +787,7 @@ function applyEdit(node: FlowNode, mutation: () => void, options?: { commit?: Co
 }
 
 function expandTargetDoc(path: string): FlowDocument | null {
-  if (state.doc && path === state.path) return state.doc;
+  if (openFlow && path === openFlow.path) return openFlow.doc;
   return expansions.documentAt(path);
 }
 
@@ -1116,51 +804,57 @@ function descriptionOf(node: FlowNode): string {
 
 function applyDescriptionEdit(node: FlowNode, text: string): void {
   const quoted = text ? quoteValue(text) : null;
+  writeToNodeOrExpandTarget(node, {
+    onNode: () => applyEdit(node, () => setProp(node, 'description', quoted)),
+    onExpandTarget: (target) => writeExpandDescription(node, target, quoted),
+  });
+}
+
+// An expanded node's definition lives in the target file's preamble (spec §3.1), so a field
+// edited on such a node is written there rather than on the node itself. Which of the two
+// applies is a property of the node, not of the field — description and references resolve it
+// identically, down to the case where the prefetch of the target is still in flight.
+interface ExpandFieldWriters {
+  onNode(): void;
+  onExpandTarget(target: DocumentOwner): void;
+}
+
+function writeToNodeOrExpandTarget(node: FlowNode, writers: ExpandFieldWriters): void {
   const path = resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path);
   if (!path) {
-    applyEdit(node, () => setProp(node, 'description', quoted));
+    writers.onNode();
     return;
   }
   const doc = expandTargetDoc(path);
   if (doc) {
-    writeExpandDescription(node, { doc, path }, quoted);
+    writers.onExpandTarget({ doc, path });
     return;
   }
   // Prefetch may still be in flight when the user starts typing; finish the load then write
   // to the preamble so the keystroke does not land on the referencing node.
   void expansions.ensureDocument(path).then((loaded) => {
-    if (!node.id || findNode(node.id) !== node) return;
-    if (resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path) !== path) return;
-    if (loaded) writeExpandDescription(node, { doc: loaded, path }, quoted);
-    else applyEdit(node, () => setProp(node, 'description', quoted));
+    if (!stillExpandsTo(node, path)) return;
+    if (loaded) writers.onExpandTarget({ doc: loaded, path });
+    else writers.onNode();
   });
+}
+
+// The node can be re-parsed, deleted, repointed, or its whole flow closed while the fetch is in
+// flight; a write resolved against the old state would land somewhere the user did not edit.
+function stillExpandsTo(node: FlowNode, path: string): boolean {
+  if (!openFlow || !node.id || findNode(node.id) !== node) return false;
+  return resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path) === path;
 }
 
 function referencesOf(node: FlowNode): Reference[] {
   return referencesForNode(node, expandTargetOwner(node)?.doc ?? null);
 }
 
-// Mirrors applyDescriptionEdit: an expanded node's definition lives in the target file's
-// preamble, so that is where its references are written.
 function applyReferencesEdit(node: FlowNode, references: Reference[]): void {
   const normalized = FlowDoc.normalizeReferences(references);
-  const path = resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path);
-  if (!path) {
-    applyEdit(node, () => FlowDoc.setNodeReferences(node, normalized));
-    return;
-  }
-  const doc = expandTargetDoc(path);
-  if (doc) {
-    writeExpandReferences(node, { doc, path }, normalized);
-    return;
-  }
-  // Prefetch may still be in flight when the user starts typing; finish the load then write
-  // to the preamble so the edit does not land on the referencing node.
-  void expansions.ensureDocument(path).then((loaded) => {
-    if (!node.id || findNode(node.id) !== node) return;
-    if (resolvedExpandPath(getProp(node, 'expand'), ownerOf(node).path) !== path) return;
-    if (loaded) writeExpandReferences(node, { doc: loaded, path }, normalized);
-    else applyEdit(node, () => FlowDoc.setNodeReferences(node, normalized));
+  writeToNodeOrExpandTarget(node, {
+    onNode: () => applyEdit(node, () => FlowDoc.setNodeReferences(node, normalized)),
+    onExpandTarget: (target) => writeExpandReferences(node, target, normalized),
   });
 }
 
@@ -1192,18 +886,19 @@ async function ensureExpandTarget(node: FlowNode): Promise<void> {
 }
 
 function findNode(nodeId: string): FlowNode | null {
-  return FlowDoc.findNodeById(state.doc!, nodeId) ?? expansions.findNodeById(nodeId);
+  const inOpenFlow = openFlow ? FlowDoc.findNodeById(openFlow.doc, nodeId) : null;
+  return inOpenFlow ?? expansions.findNodeById(nodeId);
 }
 
 function findEdge(spec: EdgeSpec): ModelEdge | null {
-  return state.model?.edges.find((edge) => edge.spec === spec) ?? expansions.findEdgeBySpec(spec);
+  return openFlow?.model.edges.find((edge) => edge.spec === spec) ?? expansions.findEdgeBySpec(spec);
 }
 
 function knownDocuments(): DocumentOwner[] {
   const docs: DocumentOwner[] = [];
-  if (state.doc && state.path) docs.push({ doc: state.doc, path: state.path });
+  if (openFlow) docs.push({ doc: openFlow.doc, path: openFlow.path });
   for (const entry of expansions.loadedDocuments()) {
-    if (entry.doc !== state.doc) docs.push(entry);
+    if (entry.doc !== openFlow?.doc) docs.push(entry);
   }
   return docs;
 }
@@ -1213,21 +908,10 @@ function knownDocuments(): DocumentOwner[] {
 // has to reach past the documents the expansion layer happens to have loaded. Loads are cached
 // by the expansion layer, so this costs one pass per session.
 async function loadEveryWorkspaceDocument(): Promise<void> {
-  const unloaded = state.files.filter(
-    (path) => path !== state.path && path.endsWith('.flow') && !expansions.watchesPath(path),
+  const unloaded = workspaceFiles.filter(
+    (path) => path !== openFlow?.path && path.endsWith('.flow') && !expansions.watchesPath(path),
   );
   await Promise.all(unloaded.map((path) => expansions.ensureDocument(path)));
-}
-
-// A ripple that has to load the workspace resumes in a later turn, by which time an undo or a
-// watcher push may have re-parsed the documents into fresh objects. The rename it is carrying
-// then describes a state that no longer exists, and applying it would rewrite names the restore
-// just put back. Every wholesale document replacement bumps this counter; a ripple that finds
-// it moved abandons the rest of its work.
-let documentGeneration = 0;
-
-function discardPendingRipples(): void {
-  documentGeneration += 1;
 }
 
 async function retargetInnersAcrossWorkspace(
@@ -1237,11 +921,15 @@ async function retargetInnersAcrossWorkspace(
   alreadyUpdated: FlowDocument,
 ): Promise<void> {
   if (!identity) return;
-  const generation = documentGeneration;
+  // A ripple that has to load the workspace resumes in a later turn, by which time an undo or
+  // a watcher push may have re-parsed the documents into fresh objects. The rename it carries
+  // then describes a state that no longer exists, and applying it would rewrite names the
+  // restore just put back.
+  const generation = session.documentGeneration;
   // A local `graph:` block is only referenceable from its own file, so its inner names cannot
   // be spelled anywhere else and the workspace-wide load would be wasted.
   if (identity.kind === 'external-path') await loadEveryWorkspaceDocument();
-  if (generation !== documentGeneration) return;
+  if (generation !== session.documentGeneration) return;
   for (const entry of knownDocuments()) {
     if (entry.doc === alreadyUpdated) continue;
     if (!FlowDoc.hasInnerRefs([entry], identity, oldName)) continue;
@@ -1289,8 +977,8 @@ function applyExpandEditAction(node: FlowNode, requestedValue: string): string {
       FlowDoc.ensureScopeItems(owner.doc, requested);
     }
   }, { commit: 'now' });
-  if (soleBlock && owner.doc === state.doc && state.scope === oldBlockName) {
-    state.scope = soleBlock.name;
+  if (soleBlock && openFlow && owner.doc === openFlow.doc && openFlow.scope === oldBlockName) {
+    openFlow.scope = soleBlock.name;
     refresh();
   }
   if (node.name !== oldNodeName) rippleInnerRefsAcrossWorkspace(node, oldNodeName);
@@ -1314,61 +1002,56 @@ function renameNodeAction(node: FlowNode, requestedName: string): string {
   return finalName;
 }
 
-function innerTargetOptions(edge: ModelEdge): string[] {
-  if (edge.kind !== 'flow') return [];
+// A `{Inner}` refinement names an entry inside an expansion, but which expansion depends on the
+// end of the edge it refines: the §5.7 target refinement resolves against the edge target's
+// expansion, the §5.8 source refinement against the source node's own.
+type RefinedEnd = 'target' | 'source';
+
+function refinedExpansionOf(
+  edge: ModelEdge,
+  end: RefinedEnd,
+): { owner: DocumentOwner; expandValue: string } | null {
+  if (edge.kind !== 'flow') return null;
   const owner = ownerOf(edge.from);
-  const targetNode = FlowDoc.nodesIn(FlowDoc.containingItems(owner.doc, edge.from))
-    .find((node) => node.name === edge.spec.target);
-  const expandValue = targetNode ? getProp(targetNode, 'expand') : null;
-  if (!expandValue) return [];
+  const refined = end === 'source'
+    ? edge.from
+    : FlowDoc.nodesIn(FlowDoc.containingItems(owner.doc, edge.from))
+      .find((node) => node.name === edge.spec.target);
+  const expandValue = refined ? getProp(refined, 'expand') : null;
+  return expandValue ? { owner, expandValue } : null;
+}
+
+function innerOptions(edge: ModelEdge, end: RefinedEnd): string[] {
+  const refined = refinedExpansionOf(edge, end);
+  if (!refined) return [];
   return FlowDoc.expandEntryNames(
-    expandValue,
-    owner.doc,
-    owner.path,
-    (path) => expandTargetDoc(path),
+    refined.expandValue,
+    refined.owner.doc,
+    refined.owner.path,
+    expandTargetDoc,
   ) ?? [];
 }
 
-async function ensureInnerTargets(edge: ModelEdge): Promise<void> {
-  if (edge.kind !== 'flow') return;
-  const owner = ownerOf(edge.from);
-  const targetNode = FlowDoc.nodesIn(FlowDoc.containingItems(owner.doc, edge.from))
-    .find((node) => node.name === edge.spec.target);
-  const path = resolvedExpandPath(targetNode ? getProp(targetNode, 'expand') : null, owner.path);
-  if (path) await expansions.ensureDocument(path);
-}
-
-// The §5.8 source refinement resolves against the owning node's own expansion, unlike the
-// §5.7 target refinement which resolves against the edge target's expansion.
-function innerSourceOptions(edge: ModelEdge): string[] {
-  if (edge.kind !== 'flow') return [];
-  const owner = ownerOf(edge.from);
-  const expandValue = getProp(edge.from, 'expand');
-  if (!expandValue) return [];
-  return FlowDoc.expandEntryNames(
-    expandValue,
-    owner.doc,
-    owner.path,
-    (path) => expandTargetDoc(path),
-  ) ?? [];
-}
-
-async function ensureInnerSources(edge: ModelEdge): Promise<void> {
-  if (edge.kind !== 'flow') return;
-  const owner = ownerOf(edge.from);
-  const path = resolvedExpandPath(getProp(edge.from, 'expand'), owner.path);
+async function ensureInnerDocument(edge: ModelEdge, end: RefinedEnd): Promise<void> {
+  const refined = refinedExpansionOf(edge, end);
+  if (!refined) return;
+  const path = resolvedExpandPath(refined.expandValue, refined.owner.path);
   if (path) await expansions.ensureDocument(path);
 }
 
 function commitMovesFor(nodes: FlowNode[]): void {
-  const externalOwners = new Map<string, DocumentOwner>();
+  const paths = new Set<string>();
+  if (openFlow) paths.add(openFlow.path);
   for (const node of nodes) {
     const owner = ownerOf(node);
-    if (owner.doc !== state.doc) externalOwners.set(owner.path, owner);
+    // A drag mutates `pos` in place and only reports the move once it is over, so a frame
+    // document first touched by one has no pre-move text to diff against. Registering it
+    // without a baseline keeps the move from being mistaken for a no-op and dropped.
+    session.trackWithoutBaseline(owner.path, owner.doc);
+    paths.add(owner.path);
   }
   refresh();
-  commitNow();
-  for (const owner of externalOwners.values()) commitExternalNow(owner.doc, owner.path);
+  for (const path of paths) session.commit(path);
 }
 
 // An edge dragged from inside a frame onto empty canvas. Released inside the same frame it
@@ -1408,7 +1091,9 @@ function completeEdge(
     emptyDrop?: EmptyEdgeDrop;
   },
 ): void {
-  if (!state.doc || extra?.droppedOnSource) return;
+  if (!openFlow || extra?.droppedOnSource) return;
+  const flow = openFlow;
+  const scopeItems = () => FlowDoc.scopeItems(flow.doc, flow.scope);
 
   // §5.8: dragging out of a frame onto a sibling of its host declares an `{Inner Source}`
   // edge on the host — the edge lives in the parent graph, not inside the subgraph.
@@ -1442,10 +1127,10 @@ function completeEdge(
     if (targetNode) {
       targetName = targetNode.name;
     } else if (extra?.ghostTarget) {
-      createdNode = FlowDoc.addNode(scopeItemsNow(), extra.ghostTarget.pos, extra.ghostTarget.name);
+      createdNode = FlowDoc.addNode(scopeItems(), extra.ghostTarget.pos, extra.ghostTarget.name);
       targetName = createdNode.name;
     } else {
-      createdNode = FlowDoc.addNode(scopeItemsNow(), centeredDefaultRect(worldPoint));
+      createdNode = FlowDoc.addNode(scopeItems(), centeredDefaultRect(worldPoint));
       targetName = createdNode.name;
     }
     createdSpec = FlowDoc.addEdge(fromNode, targetName, null, extra?.innerName ?? null);
@@ -1456,7 +1141,7 @@ function completeEdge(
     editors.openNodeEditor(createdNode, { focusTitle: true });
     return;
   }
-  const createdEdge = state.model!.edges.find((edge) => edge.spec === createdSpec);
+  const createdEdge = flow.model.edges.find((edge) => edge.spec === createdSpec);
   if (createdEdge) {
     view.selectedEdge = createdEdge;
     editors.openEdgeEditor(createdEdge);
@@ -1465,10 +1150,10 @@ function completeEdge(
 
 const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   createNode: (rect, frameHost) => {
-    if (state.doc) createNodeAndEdit(rect, frameHost);
+    if (openFlow) createNodeAndEdit(rect, frameHost);
   },
   quickCreateNode: (point, frameHost) => {
-    if (state.doc) createNodeAndEdit(centeredDefaultRect(point), frameHost);
+    if (openFlow) createNodeAndEdit(centeredDefaultRect(point), frameHost);
   },
   nodeClicked: (node) => editors.openNodeEditor(node),
   canvasClicked: () => editors.closeAll(),
@@ -1479,12 +1164,12 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   openExpand,
   toggleExpand: toggleInlineExpansion,
   materializeGhost: (ghost) => {
-    if (state.doc) createNodeAndEdit(ghost.pos, null, ghost.name);
+    if (openFlow) createNodeAndEdit(ghost.pos, null, ghost.name);
   },
   contextMenu: openCanvasContextMenu,
   viewChanged: () => {
     editors.reposition();
-    if (state.path) scheduleManifestSave();
+    if (openFlow) scheduleManifestSave();
   },
   afterRender: () => {
     editors.reposition();
@@ -1516,20 +1201,19 @@ const editors: Editors = createEditors({
   applyReferencesEdit,
   linkContext,
   ensureExpandTarget,
-  ensureInnerTargets,
-  ensureInnerSources,
+  ensureInnerTargets: (edge) => ensureInnerDocument(edge, 'target'),
+  ensureInnerSources: (edge) => ensureInnerDocument(edge, 'source'),
   openExpand,
   toggleExpand: toggleInlineExpansion,
   deleteNodes: deleteNodesAction,
-  innerTargetOptions,
-  innerSourceOptions,
+  innerTargetOptions: (edge) => innerOptions(edge, 'target'),
+  innerSourceOptions: (edge) => innerOptions(edge, 'source'),
 });
 
-const contextMenu = createContextMenu();
-
 function screenshotFileStem(): string {
-  const baseName = (state.path ?? 'graf').split('/').pop()!.replace(/\.flow$/, '');
-  const scoped = state.scope ? `${baseName}-${state.scope}` : baseName;
+  if (!openFlow) return 'graf';
+  const baseName = openFlow.path.split('/').pop()!.replace(/\.flow$/, '');
+  const scoped = openFlow.scope ? `${baseName}-${openFlow.scope}` : baseName;
   return safeFileStem(scoped) || 'graf';
 }
 
@@ -1552,7 +1236,7 @@ function openModal(): Modal | null {
 }
 
 function openCanvasContextMenu(target: ContextTarget, screenPoint: Point): void {
-  if (!state.doc) return;
+  if (!openFlow) return;
   const items =
     target.kind === 'node' ? nodeMenuItems(target.node)
     : target.kind === 'edge' ? edgeMenuItems(target.edge)
@@ -1564,7 +1248,7 @@ function nodeMenuItems(node: FlowNode): MenuItem[] {
   const selectionCount = view.selection.size;
   const items: MenuItem[] = [];
   if (selectionCount <= 1) items.push({ label: 'Edit', onSelect: () => editors.openNodeEditor(node) });
-  items.push({ label: selectionCount > 1 ? `Duplicate ${selectionCount} nodes` : 'Duplicate', onSelect: duplicateSelection });
+  items.push({ label: selectionCount > 1 ? `Duplicate ${selectionCount} nodes` : 'Duplicate', onSelect: clipboard.duplicateSelection });
   if (selectionCount > 1) {
     items.push({
       label: `Convert ${selectionCount} nodes to subgraph`,
@@ -1572,8 +1256,8 @@ function nodeMenuItems(node: FlowNode): MenuItem[] {
       onSelect: convertSelectionToSubgraph,
     });
   }
-  items.push({ label: 'Copy', onSelect: copySelection });
-  items.push({ label: 'Cut', onSelect: cutSelection });
+  items.push({ label: 'Copy', onSelect: clipboard.copy });
+  items.push({ label: 'Cut', onSelect: clipboard.cut });
   if (getProp(node, 'expand')) {
     items.push({ label: 'Open ⤢', onSelect: () => void openExpand(node) });
     items.push({
@@ -1611,61 +1295,11 @@ function canvasMenuItems(world: Point): MenuItem[] {
       label: 'Add node here',
       onSelect: () => createNodeAndEdit(centeredDefaultRect(creation.point), creation.frameHost),
     },
-    { label: 'Paste', disabled: !clipboardHasNodes(), onSelect: () => pasteClipboard(world) },
+    { label: 'Paste', disabled: !clipboard.hasNodes(), onSelect: () => clipboard.paste(world) },
     { separator: true },
     { label: 'Fit to content', onSelect: () => view.fitToContent() },
     { label: 'Reset zoom', onSelect: () => view.setZoom(1) },
   ];
-}
-
-function wireGraphPanel(): void {
-  elements.graphToggle.addEventListener('click', () => {
-    elements.graphPanel.classList.toggle('collapsed');
-  });
-
-  elements.graphName.addEventListener('change', () => {
-    if (!state.doc) return;
-    if (state.scope) {
-      const graphItem = state.doc.items.find(
-        (item): item is GraphItem => item.kind === 'graph' && item.name === state.scope,
-      );
-      if (!graphItem) return;
-      const mirroredHost = FlowDoc.mirroredHostOfGraphBlock(state.doc, graphItem);
-      const hostOldName = mirroredHost?.name ?? null;
-      mutate(() => {
-        state.scope = FlowDoc.renameGraphBlock(state.doc!, graphItem, elements.graphName.value, {
-          path: state.path,
-        });
-      }, { commit: 'now' });
-      if (mirroredHost && hostOldName && mirroredHost.name !== hostOldName) {
-        rippleInnerRefsAcrossWorkspace(mirroredHost, hostOldName);
-      }
-    } else {
-      mutate(() => setPreambleField(state.doc!, 'name', collapseToSingleLine(elements.graphName.value)));
-    }
-  });
-
-  elements.graphDescription.addEventListener('input', () => {
-    if (!state.doc || state.scope) return;
-    const text = collapseToSingleLine(elements.graphDescription.value);
-    mutate(() => setPreambleField(state.doc!, 'description', text ? quoteValue(text) : null));
-  });
-
-  elements.graphContext.addEventListener('change', () => {
-    if (!state.doc || state.scope) return;
-    const entries = elements.graphContext.value.split(',').map((entry) => entry.trim()).filter(Boolean);
-    mutate(() => setPreambleField(state.doc!, 'context', entries.length ? formatListValue(entries) : null));
-  });
-
-  elements.graphOnError.addEventListener('change', () => {
-    if (!state.doc || state.scope) return;
-    mutate(() => setPreambleField(state.doc!, 'on_error', elements.graphOnError.value.trim() || null));
-  });
-
-  elements.graphEntrypoint.addEventListener('change', () => {
-    if (!state.doc || state.scope) return;
-    mutate(() => setPreambleField(state.doc!, 'entrypoint', elements.graphEntrypoint.checked ? 'true' : null));
-  });
 }
 
 function setTool(tool: Tool): void {
@@ -1683,98 +1317,30 @@ function wireViewControls(): void {
   elements.zoomFit.addEventListener('click', () => view.fitToContent());
 }
 
-// An inline input instead of window.prompt: prompt dialogs are suppressed in several
-// embedded browser hosts, which made the button appear dead. A folder prefix (e.g. "auth/")
-// seeds "New flow here" so the file lands inside the right-clicked folder.
-function showNewFileInput(prefill?: string): void {
-  const value = prefill ?? nextUntitledFlowName();
-  clearNewFileError();
-  elements.newFileButton.classList.add('hidden');
-  elements.newFileInput.classList.remove('hidden');
-  elements.newFileInput.value = value;
-  elements.newFileInput.focus();
-  if (value.endsWith('/')) elements.newFileInput.setSelectionRange(value.length, value.length);
-  else elements.newFileInput.select();
-}
-
-function wireNewFileForm(): void {
-  const hideInput = () => {
-    elements.newFileInput.classList.add('hidden');
-    elements.newFileButton.classList.remove('hidden');
-    clearNewFileError();
-  };
-  elements.newFileButton.addEventListener('click', () => showNewFileInput());
-  elements.newFileInput.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      if (createFlowFile(elements.newFileInput.value)) hideInput();
-    } else if (event.key === 'Escape') {
-      hideInput();
-    } else {
-      clearNewFileError();
-    }
-    event.stopPropagation();
-  });
-  // A rejected name keeps the input open and focused, so blur must not hide it.
-  elements.newFileInput.addEventListener('blur', () => {
-    if (!hasNewFileError()) hideInput();
-  });
-}
-
-function normalizeFlowPath(rawName: string): string {
-  const name = rawName.trim().replace(/\\/g, '/');
-  if (!name) return '';
-  return name.endsWith('.flow') ? name : `${name}.flow`;
-}
-
-// File systems Graf writes to are often case-insensitive, so a name differing only in
-// case would still clobber the existing file.
-function findExistingFile(name: string): string | undefined {
-  const lowered = name.toLowerCase();
-  return state.files.find((file) => file.toLowerCase() === lowered);
-}
-
-function nextUntitledFlowName(): string {
-  for (let index = state.files.length + 1; ; index += 1) {
-    const candidate = `untitled-${index}.flow`;
-    if (!findExistingFile(candidate)) return candidate;
-  }
-}
-
-function hasNewFileError(): boolean {
-  return !elements.newFileError.classList.contains('hidden');
-}
-
-function clearNewFileError(): void {
-  elements.newFileError.classList.add('hidden');
-  elements.newFileError.textContent = '';
-  elements.newFileInput.classList.remove('invalid');
-}
-
-function showNewFileError(message: string): void {
-  elements.newFileError.textContent = message;
-  elements.newFileError.classList.remove('hidden');
-  elements.newFileInput.classList.add('invalid');
-  elements.newFileInput.focus();
-  elements.newFileInput.select();
-}
-
-function createFlowFile(rawName: string): boolean {
-  const name = normalizeFlowPath(rawName);
-  if (!name) return false;
-  const existing = findExistingFile(name);
-  if (existing) {
-    showNewFileError(`${existing} already exists — pick another name.`);
-    return false;
-  }
-  const graphName = name.split('/').pop()!.replace(/\.flow$/, '');
+// Returns null once the flow exists and is open, otherwise why it could not be created — the
+// sidebar shows that beneath its name box.
+function createFlowFile(path: string): string | null {
+  const existing = findExistingFile(workspaceFiles, path);
+  if (existing) return `${existing} already exists — pick another name.`;
+  const graphName = path.split('/').pop()!.replace(/\.flow$/, '');
   const text = `---\nname: ${graphName}\n---\n`;
-  sendWrite(name, text);
-  state.files.push(name);
-  state.files.sort();
-  if (!manifest.entrypoint) manifest.entrypoint = name;
+  sendWrite(path, text);
+  workspaceFiles.push(path);
+  workspaceFiles.sort();
+  uiState.adoptEntrypointIfUnset(path);
+  openFlowFromSidebar(path, text);
+  return null;
+}
+
+// Picking a file from the sidebar snaps to it and clears the dive trail — the crumbs describe
+// a path through the flow that was open, which the new one has nothing to do with.
+function openFlowFromSidebar(path: string, presetText: string | null = null): void {
   navigation.trail.length = 0;
-  openFile(name, { presetText: text });
-  return true;
+  void openFile(path, { presetText });
+}
+
+function renderFileList(): void {
+  sidebarFiles.render();
 }
 
 function wireHelp(): void {
@@ -1815,17 +1381,17 @@ function wireKeyboard(): void {
     } else if (ctrl && event.key.toLowerCase() === 'c') {
       if (view.selection.size === 0) return;
       event.preventDefault();
-      copySelection();
+      clipboard.copy();
     } else if (ctrl && event.key.toLowerCase() === 'x') {
       if (view.selection.size === 0) return;
       event.preventDefault();
-      cutSelection();
+      clipboard.cut();
     } else if (ctrl && event.key.toLowerCase() === 'v') {
       event.preventDefault();
-      pasteClipboard();
+      clipboard.paste();
     } else if (ctrl && event.key.toLowerCase() === 'd') {
       event.preventDefault();
-      duplicateSelection();
+      clipboard.duplicateSelection();
     } else if (event.key === 'Delete' || event.key === 'Backspace') {
       deleteSelection();
     } else if (ctrl && event.key === '0') {
@@ -1858,54 +1424,38 @@ function createDefaultWorkspace(): Workspace {
   return defaultWorkspaceKind === 'server' ? new ServerWorkspace() : new BrowserWorkspace();
 }
 
-function flushPendingCommits(): void {
-  commitNow();
-  for (const [path, pending] of [...pendingExternalCommits]) commitExternalNow(pending.doc, path);
-}
-
 function resetSessionState(): void {
   editors.closeAll();
   view.clearSelection();
   expansions.reset();
   navigation.trail.length = 0;
-  undoStack.length = 0;
-  redoStack.length = 0;
-  externalCommittedTexts.clear();
-  clearTimeout(commitTimer);
-  for (const pending of pendingExternalCommits.values()) clearTimeout(pending.timer);
-  pendingExternalCommits.clear();
-  state.files = [];
-  state.path = null;
-  state.text = '';
-  state.doc = null;
-  state.scope = null;
-  state.model = null;
-  manifest = emptyManifest();
+  session.reset();
+  workspaceFiles = [];
+  openFlow = null;
 }
 
 async function switchWorkspace(next: Workspace, { preferHash = false } = {}): Promise<void> {
   if (workspace) {
-    flushPendingCommits();
-    saveManifestNow();
+    session.flush();
+    uiState.saveNow();
     workspace.stop();
   }
   workspace = null;
   resetSessionState();
   workspace = next;
   try {
-    state.files = await next.start(workspaceDelegate);
+    workspaceFiles = await next.start(workspaceDelegate);
   } catch (error) {
     console.error('Failed to open workspace', error);
-    state.files = [];
+    workspaceFiles = [];
   }
-  manifest = parseManifest(await next.readFile(MANIFEST_FILE_NAME)) ?? emptyManifest();
-  if (!manifest.entrypoint) manifest.entrypoint = defaultEntrypoint(state.files);
+  uiState.adopt(await next.readFile(MANIFEST_FILE_NAME), workspaceFiles);
   renderFileList();
   renderWorkspaceBar();
 
   const hashPath = decodeURIComponent(location.hash.slice(1));
   const startupPath =
-    preferHash && hashPath && state.files.includes(hashPath) ? hashPath : chooseStartupFlow(manifest, state.files);
+    preferHash && hashPath && workspaceFiles.includes(hashPath) ? hashPath : uiState.startupFlow(workspaceFiles);
   if (startupPath) {
     await openFile(startupPath);
   } else {
@@ -1922,7 +1472,7 @@ function showEmptyWorkspace(): void {
     workspace?.kind === 'browser'
       ? 'Create your first flow with “+ New flow” — it is saved in this browser. Or open a local folder of .flow files.'
       : 'Create a new flow with “+ New flow”, or select one from the sidebar.';
-  renderBreadcrumb();
+  renderBreadcrumb(null);
   renderFileList();
   view.setModel(FlowDoc.buildModel(parseFlow('---\nname: empty\n---\n'), null));
 }
@@ -1941,20 +1491,32 @@ function renderWorkspaceBar(): void {
 
 async function exportWorkspace(): Promise<void> {
   if (!workspace) return;
-  flushPendingCommits();
-  recordUiState();
-  if (!manifest.entrypoint) manifest.entrypoint = defaultEntrypoint(state.files);
+  session.flush();
   try {
     await exportWorkspaceAsZip({
-      files: [...state.files],
-      readFile: (path) => (path === state.path ? Promise.resolve(state.text) : workspace!.readFile(path)),
-      manifest,
+      files: [...workspaceFiles],
+      // Tracked documents are exported from their committed text: the flush above has just
+      // brought it up to date, and it needs no round-trip through the workspace backend.
+      readFile: (path) => {
+        const committed = session.committedTextAt(path);
+        return committed != null ? Promise.resolve(committed) : workspace!.readFile(path);
+      },
+      manifest: uiState.forExport(workspaceFiles),
       workspaceLabel: workspace.kind === 'folder' ? workspace.label : 'graf-workspace',
     });
   } catch (error) {
     console.error('Export failed', error);
-    alert('Export failed — see the browser console for details.');
+    reportWorkspaceError('Export failed — see the browser console.');
   }
+}
+
+// Failures are reported through the workspace menu the action was started from. `alert` would
+// be the obvious choice, but dialog boxes are suppressed in several embedded browser hosts —
+// the same reason the new-file input and the delete confirmation are inline.
+function reportWorkspaceError(message: string): void {
+  contextMenu.toggleFromButton(elements.workspaceMenuButton, [
+    { label: `⚠ ${message}`, danger: true, onSelect: () => {} },
+  ]);
 }
 
 async function openWorkspaceFolder(): Promise<void> {
@@ -1970,7 +1532,7 @@ function workspaceMenuItems(): MenuItem[] {
     items.push({ label: '📂 Open folder…', onSelect: () => void openWorkspaceFolder() });
   }
   items.push({ label: '⇩ Export .zip', onSelect: () => void exportWorkspace() });
-  items.push({ label: '🖼 Export image…', disabled: !state.doc, onSelect: () => screenshot.open() });
+  items.push({ label: '🖼 Export image…', disabled: !openFlow, onSelect: () => screenshot.open() });
   items.push({ separator: true });
   items.push({ label: '⚙ Preferences…', onSelect: () => preferencesDialog.open() });
   return items;
@@ -1983,9 +1545,7 @@ function wireWorkspaceControls(): void {
 }
 
 async function boot(): Promise<void> {
-  wireGraphPanel();
   wireViewControls();
-  wireNewFileForm();
   wireHelp();
   wireKeyboard();
   wireWorkspaceControls();
