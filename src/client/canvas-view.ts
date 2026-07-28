@@ -15,7 +15,14 @@ import {
   type FlowNode,
   type Rect,
 } from '../shared/flow-format.js';
-import type { EdgeGeometry, FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
+import type { FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
+import {
+  createEdgeGeometry,
+  distanceToEdgePath,
+  edgeEnd,
+  edgePathApproach,
+  edgePathMidpoint,
+} from './edge-path.js';
 // A live object refilled in place on every theme change, never reassigned.
 import { canvasPalette } from './theme.js';
 import {
@@ -183,8 +190,9 @@ const CREATE_MIN_SCREEN_HEIGHT = 10;
 const SNAP = 8;
 const PORT_RADIUS = 5;
 const PORT_HIT_RADIUS = 14;
-const EDGE_HIT_DISTANCE = 8;
-const EDGE_LABEL_BOW_BIAS = 0.85;
+// Wider than the drawn stroke because rough.js jitters the ink a few pixels off the ideal curve.
+const EDGE_HIT_DISTANCE = 10;
+const ARROWHEAD_TANGENT_BACKOFF = 12;
 const EDGE_DATA_LINE_HEIGHT = 13;
 const EDGE_DATA_GAP = 2;
 const BADGE_HIT_RADIUS = 12;
@@ -303,17 +311,6 @@ function unionRect(a: Rect, b: Rect): Rect {
   };
 }
 
-// Labels sit near the curve's midpoint, biased toward its control point so they follow the bow.
-function edgeLabelAnchor(geometry: EdgeGeometry): Point {
-  if (geometry.selfLoop) return { x: geometry.mid.x, y: geometry.mid.y };
-  const chordMidX = (geometry.a.x + geometry.b.x) / 2;
-  const chordMidY = (geometry.a.y + geometry.b.y) / 2;
-  return {
-    x: chordMidX + (geometry.mid.x - chordMidX) * EDGE_LABEL_BOW_BIAS,
-    y: chordMidY + (geometry.mid.y - chordMidY) * EDGE_LABEL_BOW_BIAS,
-  };
-}
-
 function normalizedRect(pointA: Point, pointB: Point): Rect {
   return {
     x: Math.min(pointA.x, pointB.x),
@@ -336,17 +333,6 @@ function rectBorderPointToward(rect: Rect, towardPoint: Point): Point {
   const scaleY = dy === 0 ? Infinity : (rect.h / 2) / Math.abs(dy);
   const t = Math.min(scaleX, scaleY);
   return { x: center.x + dx * t, y: center.y + dy * t };
-}
-
-function distanceToSegment(point: Point, a: Point, b: Point): number {
-  const abX = b.x - a.x;
-  const abY = b.y - a.y;
-  const lengthSquared = abX * abX + abY * abY;
-  const t = lengthSquared === 0
-    ? 0
-    : Math.max(0, Math.min(1, ((point.x - a.x) * abX + (point.y - a.y) * abY) / lengthSquared));
-  const closest = { x: a.x + abX * t, y: a.y + abY * t };
-  return Math.hypot(point.x - closest.x, point.y - closest.y);
 }
 
 export class CanvasView {
@@ -520,7 +506,8 @@ export class CanvasView {
   }
 
   edgeAnchor(edge: ModelEdge): Point {
-    const mid = edge.geometry?.mid ?? rectCenter(this.rect(edge.from));
+    const geometry = edge.geometry;
+    const mid = geometry ? edgePathMidpoint(geometry.path) : rectCenter(this.rect(edge.from));
     const locus = this.expansionLayer?.locusOf(edge.from);
     if (!locus) return mid;
     return transformPoint(mid, locus.transform);
@@ -1326,7 +1313,7 @@ export class CanvasView {
       const geometry = edge.geometry;
       if (!geometry) continue;
       if (geometry.labelRect && rectContains(geometry.labelRect, world)) return edge;
-      if (distanceToSegment(world, geometry.a, geometry.b) <= hitDistance) return edge;
+      if (distanceToEdgePath(world, geometry.path) <= hitDistance) return edge;
     }
     return null;
   }
@@ -1521,7 +1508,7 @@ export class CanvasView {
         x: (a.x + b.x) / 2 + normal.x * bowMagnitude,
         y: (a.y + b.y) / 2 + normal.y * bowMagnitude,
       };
-      edge.geometry = { a, b, mid, labelRect: null };
+      edge.geometry = createEdgeGeometry([a, mid, b]);
     }
   }
 
@@ -1550,7 +1537,7 @@ export class CanvasView {
     const a = { x: x + w - 30, y };
     const b = { x: x + w, y: y + 24 };
     const mid = { x: x + w + 42, y: y - 40 };
-    return { a, b, mid, labelRect: null, selfLoop: true };
+    return createEdgeGeometry([a, mid, b]);
   }
 
   private edgeColor(edge: ModelEdge): string {
@@ -1572,18 +1559,19 @@ export class CanvasView {
     };
     if (edge.kind === 'error') options.strokeLineDash = [7, 5];
 
-    this.rough.curve(
-      [[geometry.a.x, geometry.a.y], [geometry.mid.x, geometry.mid.y], [geometry.b.x, geometry.b.y]],
-      options,
+    this.rough.curve(geometry.through.map((point) => [point.x, point.y] as [number, number]), options);
+    this.drawArrowhead(
+      edgePathApproach(geometry.path, ARROWHEAD_TANGENT_BACKOFF),
+      edgeEnd(geometry),
+      color,
     );
-    this.drawArrowhead(geometry.mid, geometry.b, color);
   }
 
   private drawEdgeLabel(edge: ModelEdge): void {
     const geometry = edge.geometry;
     if (!geometry) return;
     const labelText = edge.spec.label ?? (edge.kind === 'error' ? 'on error' : null);
-    const anchor = edgeLabelAnchor(geometry);
+    const anchor = edgePathMidpoint(geometry.path);
     const fields = edge.spec.data ?? [];
 
     const labelRect = labelText

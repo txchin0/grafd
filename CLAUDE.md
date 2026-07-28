@@ -95,6 +95,13 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
 - `src/client/canvas-view.ts` — rough.js rendering plus all pointer interaction (pan, zoom,
   tool modes, drag-create, move, resize, port-drag edge creation, marquee select) and
   camera animations for subgraph navigation.
+- `src/client/edge-path.ts` — the shape of a drawn edge. `EdgeGeometry` carries the points the
+  spline passes through plus that spline flattened to a polyline, and every consumer (hit
+  testing, label anchor, edit-popup anchor, arrowhead tangent) measures against the polyline
+  rather than re-deriving the curve. The flattening mirrors rough.js's cardinal spline exactly,
+  so its constants belong to rough.js and must not be tuned on their own; the oracle test in
+  `tests/canvas-view-edge-hit.test.ts` fails if the two ever drift. Routing an edge through more
+  waypoints needs no change here beyond passing a longer point list.
 - `src/client/expansion.ts` — session-local inline subgraph expansion: which nodes are
   unfolded, open/close animation, external .flow fetching, frame geometry, the warp
   displacement of surrounding nodes (view-only; never written to disk), and the loci map

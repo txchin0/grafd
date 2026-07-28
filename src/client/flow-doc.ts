@@ -28,6 +28,7 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import type { DisplayGeometry } from './expansion.js';
+import type { EdgeGeometry } from './edge-path.js';
 
 export interface Point {
   x: number;
@@ -42,13 +43,7 @@ export interface GhostNode {
 
 export type EdgeKind = 'flow' | 'error';
 
-export interface EdgeGeometry {
-  a: Point;
-  b: Point;
-  mid: Point;
-  labelRect: Rect | null;
-  selfLoop?: boolean;
-}
+export type { EdgeGeometry };
 
 /** Identity of a subgraph expansion that `{Inner}` names resolve against (spec §5.7). */
 export type ExpandIdentity =
