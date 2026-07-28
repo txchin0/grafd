@@ -47,9 +47,14 @@ html, body {
   overflow: hidden;
 }
 
+/* Mobile browsers resolve 100vh against the viewport with the address bar and tab strip
+   retracted, so on a tablet the app is laid out taller than the area actually on screen and
+   its bottom edge — which `overflow: hidden` on body makes unscrollable — is cut off. The
+   dynamic unit tracks the visible area as that chrome shows and hides. */
 #app {
   display: flex;
   height: 100vh;
+  height: 100dvh;
 }
 
 #sidebar {
