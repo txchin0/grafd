@@ -182,7 +182,7 @@ const CREATE_MIN_SCREEN_WIDTH = 14;
 const CREATE_MIN_SCREEN_HEIGHT = 10;
 const SNAP = 8;
 const PORT_RADIUS = 5;
-const PORT_HIT_RADIUS = 11;
+const PORT_HIT_RADIUS = 14;
 const EDGE_HIT_DISTANCE = 8;
 const EDGE_LABEL_BOW_BIAS = 0.85;
 const EDGE_DATA_LINE_HEIGHT = 13;
@@ -879,7 +879,7 @@ export class CanvasView {
 
     if (!this.gesture) {
       const previousHover = this.hoverNode;
-      this.hoverNode = this.hitNode(world);
+      this.hoverNode = this.hoverNodeAt(world);
       if (previousHover !== this.hoverNode) this.requestRender();
       this.updateCursor(world);
       return;
@@ -1217,16 +1217,31 @@ export class CanvasView {
     ];
   }
 
+  private portOfNodeNear(node: FlowNode, world: Point): Point | null {
+    const hitRadius = PORT_HIT_RADIUS / this.view.scale;
+    for (const port of this.portPositions(node)) {
+      if (Math.hypot(world.x - port.x, world.y - port.y) <= hitRadius) return port;
+    }
+    return null;
+  }
+
   private hitPort(world: Point): { node: FlowNode; port: Point } | null {
     const candidates = new Set([...this.selection]);
     if (this.hoverNode) candidates.add(this.hoverNode);
-    const hitRadius = PORT_HIT_RADIUS / this.view.scale;
     for (const node of candidates) {
-      for (const port of this.portPositions(node)) {
-        if (Math.hypot(world.x - port.x, world.y - port.y) <= hitRadius) return { node, port };
-      }
+      const port = this.portOfNodeNear(node, world);
+      if (port) return { node, port };
     }
     return null;
+  }
+
+  // Ports straddle the node's border, so aiming at one takes the cursor outside the node's
+  // rectangle. Hover has to outlive that crossing or the port disappears as it is reached for.
+  private hoverNodeAt(world: Point): FlowNode | null {
+    const hit = this.hitNode(world);
+    if (hit) return hit;
+    const held = this.hoverNode;
+    return held && this.portOfNodeNear(held, world) ? held : null;
   }
 
   private hitResizeHandle(world: Point): { node: FlowNode; corner: ResizeCorner } | null {
