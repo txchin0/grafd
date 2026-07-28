@@ -27,6 +27,7 @@ import {
   extractSubgraph,
   findNodeById,
   graphBlockNames,
+  hostsOfExpansion,
   nodesIn,
   renameGraphBlock,
   renameNode,
@@ -299,6 +300,128 @@ graph: Sub
     const finalName = renameGraphBlock(doc, graphItem, 'Detail');
     expect(finalName).toBe('Detail');
     expect(getProp(allNodes(doc)[0], 'expand')).toBe('Detail');
+  });
+});
+
+describe('mirrored host and graph block names', () => {
+  const MIRRORED = `Payment
+  expand: Payment
+
+graph: Payment
+  Charge Card
+`;
+
+  it('renames the block along with its only host', () => {
+    const doc = docFrom(MIRRORED);
+    const host = allNodes(doc).find((node) => node.name === 'Payment')!;
+    expect(renameNode(doc.items, host, 'Take Payment', doc)).toBe('Take Payment');
+    expect(graphBlockNames(doc)).toEqual(['Take Payment']);
+    expect(getProp(host, 'expand')).toBe('Take Payment');
+  });
+
+  it('renames the only host along with the block', () => {
+    const doc = docFrom(MIRRORED);
+    const host = allNodes(doc).find((node) => node.name === 'Payment')!;
+    const graphItem = doc.items.find((item): item is GraphItem => item.kind === 'graph')!;
+    expect(renameGraphBlock(doc, graphItem, 'Take Payment')).toBe('Take Payment');
+    expect(host.name).toBe('Take Payment');
+    expect(getProp(host, 'expand')).toBe('Take Payment');
+  });
+
+  it('leaves a block whose name the user has diverged alone', () => {
+    const doc = docFrom(`Payment
+  expand: Payment Steps
+
+graph: Payment Steps
+  Charge Card
+`);
+    const host = allNodes(doc).find((node) => node.name === 'Payment')!;
+    renameNode(doc.items, host, 'Take Payment', doc);
+    expect(graphBlockNames(doc)).toEqual(['Payment Steps']);
+    expect(getProp(host, 'expand')).toBe('Payment Steps');
+  });
+
+  it('leaves a block several nodes share alone', () => {
+    const doc = docFrom(`Validate
+  expand: Validate
+
+Revalidate
+  expand: Validate
+
+graph: Validate
+  Check Fields
+`);
+    const host = allNodes(doc).find((node) => node.name === 'Validate')!;
+    renameNode(doc.items, host, 'Validate Input', doc);
+    expect(graphBlockNames(doc)).toEqual(['Validate']);
+    expect(getProp(host, 'expand')).toBe('Validate');
+  });
+
+  it('drops the mirror rather than fight a block name that is already taken', () => {
+    const doc = docFrom(`Payment
+  expand: Payment
+
+Other
+  expand: Refund
+
+graph: Payment
+  Charge Card
+
+graph: Refund
+  Reverse Charge
+`);
+    const host = allNodes(doc).find((node) => node.name === 'Payment')!;
+    renameNode(doc.items, host, 'Refund', doc);
+    expect(host.name).toBe('Refund');
+    expect(graphBlockNames(doc)).toEqual(['Refund 2', 'Refund']);
+    expect(getProp(host, 'expand')).toBe('Refund 2');
+  });
+
+  it('carries the host rename into inner refinements naming it', () => {
+    const doc = docFrom(`Checkout
+  expand: Checkout
+  {Charge Card} -> Done : "charged"
+
+Done
+
+graph: Checkout
+  Charge Card
+`);
+    const graphItem = doc.items.find((item): item is GraphItem => item.kind === 'graph')!;
+    const inner = nodesIn(graphItem.items)[0];
+    renameNode(graphItem.items, inner, 'Bill Card', doc);
+    const host = allNodes(doc).find((node) => node.name === 'Checkout')!;
+    expect(host.edges[0].innerSource).toBe('Bill Card');
+  });
+});
+
+describe('hostsOfExpansion', () => {
+  it('finds every node that unfolds a local block', () => {
+    const doc = docFrom(`A
+  expand: Shared
+
+B
+  expand: Shared
+
+C
+  expand: [Elsewhere](other.flow)
+
+graph: Shared
+  Inner
+`);
+    const hosts = hostsOfExpansion([{ doc, path: null }], { kind: 'graph-block', name: 'Shared' });
+    expect(hosts.map((node) => node.name)).toEqual(['A', 'B']);
+  });
+
+  it('resolves external hosts through the containing file path', () => {
+    const doc = docFrom(`A
+  expand: [Elsewhere](sub/other.flow)
+`);
+    const hosts = hostsOfExpansion(
+      [{ doc, path: 'auth/main.flow' }],
+      { kind: 'external-path', path: 'auth/sub/other.flow' },
+    );
+    expect(hosts.map((node) => node.name)).toEqual(['A']);
   });
 });
 

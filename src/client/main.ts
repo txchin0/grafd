@@ -225,6 +225,7 @@ function pushHistory(snapshot: WorkspaceSnapshot): void {
 // through the same parse/refresh path as a normal load, external frames through the
 // expansion cache. Both re-write to disk so other tools see the reverted state.
 function restoreSnapshot(snapshot: WorkspaceSnapshot): void {
+  discardPendingRipples();
   for (const { path, text } of snapshot) {
     if (path === state.path) {
       if (text === state.text) continue;
@@ -279,6 +280,7 @@ const workspaceDelegate: WorkspaceDelegate = {
     if (path === state.path) {
       if (text !== state.text) adoptExternalText(text);
     } else if (expansions.watchesPath(path)) {
+      discardPendingRipples();
       externalCommittedTexts.set(path, text);
       expansions.adoptExternalText(path, text);
     }
@@ -315,6 +317,7 @@ function saveManifestNow(): void {
 }
 
 function adoptExternalText(text: string): void {
+  discardPendingRipples();
   state.text = text;
   state.doc = parseFlow(text);
   FlowDoc.assignMissingIds(state.doc);
@@ -702,7 +705,7 @@ function convertSelectionToSubgraph(): void {
     }
   }, { commit: 'now' });
   for (const { identity, name } of retargets) {
-    retargetInnersAcrossWorkspace(identity, name, host!.name, owner.doc);
+    void retargetInnersAcrossWorkspace(identity, name, host!.name, owner.doc);
   }
   expansions.collapseFrom(host!);
   view.setSelection([host!]);
@@ -750,7 +753,7 @@ function registerCreatedFlowFile(path: string, text: string): void {
 // the one the canvas shows. A block shared by several nodes has no single owner to name it
 // after and keeps the block's own name.
 function graphNameForExtraction(node: FlowNode, blockName: string, doc: FlowDocument): string {
-  const hosts = FlowDoc.allNodes(doc).filter((other) => getProp(other, 'expand') === blockName);
+  const hosts = FlowDoc.hostsOfExpansion([{ doc, path: null }], { kind: 'graph-block', name: blockName });
   return hosts.length === 1 ? node.name : blockName;
 }
 
@@ -805,7 +808,7 @@ function deleteNodesAction(nodes: FlowNode[]): void {
       }
     }, { commit: 'now' });
     for (const { identity, name } of clears) {
-      retargetInnersAcrossWorkspace(identity, name, null, owner.doc);
+      void retargetInnersAcrossWorkspace(identity, name, null, owner.doc);
     }
   }
 }
@@ -1205,13 +1208,40 @@ function knownDocuments(): DocumentOwner[] {
   return docs;
 }
 
-function retargetInnersAcrossWorkspace(
+// Every .flow file in the workspace, parsed. `{Inner}` refinements that name a node inside an
+// external file can sit in a file nobody has opened this session, so a rename of such a node
+// has to reach past the documents the expansion layer happens to have loaded. Loads are cached
+// by the expansion layer, so this costs one pass per session.
+async function loadEveryWorkspaceDocument(): Promise<void> {
+  const unloaded = state.files.filter(
+    (path) => path !== state.path && path.endsWith('.flow') && !expansions.watchesPath(path),
+  );
+  await Promise.all(unloaded.map((path) => expansions.ensureDocument(path)));
+}
+
+// A ripple that has to load the workspace resumes in a later turn, by which time an undo or a
+// watcher push may have re-parsed the documents into fresh objects. The rename it is carrying
+// then describes a state that no longer exists, and applying it would rewrite names the restore
+// just put back. Every wholesale document replacement bumps this counter; a ripple that finds
+// it moved abandons the rest of its work.
+let documentGeneration = 0;
+
+function discardPendingRipples(): void {
+  documentGeneration += 1;
+}
+
+async function retargetInnersAcrossWorkspace(
   identity: FlowDoc.ExpandIdentity | null,
   oldName: string,
   newName: string | null,
   alreadyUpdated: FlowDocument,
-): void {
+): Promise<void> {
   if (!identity) return;
+  const generation = documentGeneration;
+  // A local `graph:` block is only referenceable from its own file, so its inner names cannot
+  // be spelled anywhere else and the workspace-wide load would be wasted.
+  if (identity.kind === 'external-path') await loadEveryWorkspaceDocument();
+  if (generation !== documentGeneration) return;
   for (const entry of knownDocuments()) {
     if (entry.doc === alreadyUpdated) continue;
     if (!FlowDoc.hasInnerRefs([entry], identity, oldName)) continue;
@@ -1219,6 +1249,52 @@ function retargetInnersAcrossWorkspace(
       FlowDoc.retargetInnerRefs([entry], identity, oldName, newName);
     }, { commit: 'now' });
   }
+}
+
+// Renaming within the owning document is only half the job: `{Inner}` refinements that name
+// this node resolve against its containing expansion and can be written in any other file.
+function rippleInnerRefsAcrossWorkspace(node: FlowNode, oldName: string): void {
+  const owner = ownerOf(node);
+  void retargetInnersAcrossWorkspace(
+    FlowDoc.expandIdentityForNode(owner.doc, owner.path, node),
+    oldName,
+    node.name,
+    owner.doc,
+  );
+}
+
+// An edit to a node's `expand` carries one of two intents. Naming an existing `graph:` block —
+// or any `[Label](path)` link — repoints the node. Typing an unused name renames the block when
+// this node is its only host, so the block the node just had is never left orphaned; a block
+// with other hosts is not renamed out from under them, and the new name gets a block of its own
+// so the value still resolves (spec §10.3).
+function applyExpandEditAction(node: FlowNode, requestedValue: string): string {
+  const owner = ownerOf(node);
+  const requested = collapseToSingleLine(requestedValue).trim();
+  const repointing = !requested || parseExpandLink(requested) != null
+    || FlowDoc.graphBlockNamed(owner.doc, requested) != null;
+  if (repointing) {
+    applyToDoc(owner, () => setProp(node, 'expand', requested || null), { commit: 'now' });
+    return getProp(node, 'expand') ?? '';
+  }
+
+  const soleBlock = FlowDoc.graphBlockSolelyHostedBy(owner.doc, node);
+  const oldNodeName = node.name;
+  const oldBlockName = soleBlock?.name ?? null;
+  applyToDoc(owner, () => {
+    if (soleBlock) {
+      FlowDoc.renameGraphBlock(owner.doc, soleBlock, requested, { path: owner.path });
+    } else {
+      setProp(node, 'expand', requested);
+      FlowDoc.ensureScopeItems(owner.doc, requested);
+    }
+  }, { commit: 'now' });
+  if (soleBlock && owner.doc === state.doc && state.scope === oldBlockName) {
+    state.scope = soleBlock.name;
+    refresh();
+  }
+  if (node.name !== oldNodeName) rippleInnerRefsAcrossWorkspace(node, oldNodeName);
+  return getProp(node, 'expand') ?? '';
 }
 
 function renameNodeAction(node: FlowNode, requestedName: string): string {
@@ -1234,14 +1310,7 @@ function renameNodeAction(node: FlowNode, requestedName: string): string {
       { path: owner.path },
     );
   });
-  if (finalName !== oldName) {
-    retargetInnersAcrossWorkspace(
-      FlowDoc.expandIdentityForNode(owner.doc, owner.path, node),
-      oldName,
-      finalName,
-      owner.doc,
-    );
-  }
+  if (finalName !== oldName) rippleInnerRefsAcrossWorkspace(node, oldName);
   return finalName;
 }
 
@@ -1439,6 +1508,8 @@ const editors: Editors = createEditors({
   renameNode: renameNodeAction,
   applyEdit,
   applyEditNow: (node, mutation) => applyEdit(node, mutation, { commit: 'now' }),
+  applyExpandEdit: applyExpandEditAction,
+  expandOptions: (node) => FlowDoc.graphBlockNames(ownerOf(node).doc),
   descriptionOf,
   applyDescriptionEdit,
   referencesOf,
@@ -1559,9 +1630,16 @@ function wireGraphPanel(): void {
         (item): item is GraphItem => item.kind === 'graph' && item.name === state.scope,
       );
       if (!graphItem) return;
+      const mirroredHost = FlowDoc.mirroredHostOfGraphBlock(state.doc, graphItem);
+      const hostOldName = mirroredHost?.name ?? null;
       mutate(() => {
-        state.scope = FlowDoc.renameGraphBlock(state.doc!, graphItem, elements.graphName.value);
+        state.scope = FlowDoc.renameGraphBlock(state.doc!, graphItem, elements.graphName.value, {
+          path: state.path,
+        });
       }, { commit: 'now' });
+      if (mirroredHost && hostOldName && mirroredHost.name !== hostOldName) {
+        rippleInnerRefsAcrossWorkspace(mirroredHost, hostOldName);
+      }
     } else {
       mutate(() => setPreambleField(state.doc!, 'name', collapseToSingleLine(elements.graphName.value)));
     }

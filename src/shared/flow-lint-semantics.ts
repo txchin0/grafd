@@ -256,22 +256,52 @@ function reportDuplicateEdges(node: ScannedNode, diagnostics: Diagnostic[]): voi
 }
 
 function reportGraphBlockUsage(file: ScannedFile, diagnostics: Diagnostic[]): void {
-  const expandedNames = new Set(
-    allScannedNodes(file)
-      .map((node) => expandValueOf(node))
-      .filter((value): value is string => value != null && !parseExpandLink(value)),
-  );
+  const hostsByBlockName = localExpansionHostsByBlockName(file);
   for (const scope of file.scopes) {
     if (scope.name == null || scope.line == null) continue;
     if (scope.nodes.length === 0) {
       diagnostics.push(warning('empty-graph-block', scope.line, `Graph block "${scope.name}" contains no nodes.`));
     }
-    if (!expandedNames.has(scope.name)) {
+    const hosts = hostsByBlockName.get(scope.name) ?? [];
+    if (hosts.length === 0) {
       diagnostics.push(
         warning('unused-graph-block', scope.line, `No node in this file has \`expand: ${scope.name}\`.`),
       );
+      continue;
     }
+    reportSoleHostNameMismatch(scope.name, scope.line, hosts, diagnostics);
   }
+}
+
+// A block only one node expands is that node's definition (spec §4.2), so the two names are
+// two spellings of one thing and drift apart silently when either is edited alone. A block
+// several nodes share has no single owner to be named after and is left alone.
+function reportSoleHostNameMismatch(
+  blockName: string,
+  line: number,
+  hosts: ScannedNode[],
+  diagnostics: Diagnostic[],
+): void {
+  if (hosts.length !== 1 || hosts[0].name === blockName) return;
+  diagnostics.push(
+    warning(
+      'sole-host-name-mismatch',
+      line,
+      `Only "${hosts[0].name}" expands this block, so the two name the same thing; consider renaming one to match the other.`,
+    ),
+  );
+}
+
+function localExpansionHostsByBlockName(file: ScannedFile): Map<string, ScannedNode[]> {
+  const hostsByBlockName = new Map<string, ScannedNode[]>();
+  for (const node of allScannedNodes(file)) {
+    const expandValue = expandValueOf(node);
+    if (expandValue == null || parseExpandLink(expandValue)) continue;
+    const hosts = hostsByBlockName.get(expandValue) ?? [];
+    hosts.push(node);
+    hostsByBlockName.set(expandValue, hosts);
+  }
+  return hostsByBlockName;
 }
 
 function reportReferences(references: ScannedReference[], diagnostics: Diagnostic[]): void {

@@ -609,7 +609,41 @@ export function deleteNodes(
   }
 }
 
+// A node and the local `graph:` block it solely expands are kept in step: renaming either side
+// renames the other. The pairing is derived from the current names rather than stored, which
+// makes a block the user deliberately named something else simply unpaired — an explicit name
+// is never silently rewritten — and lets the rule survive the round-trip through the file,
+// which has nowhere to record editor state on a block.
 export function renameNode(
+  items: FlowItem[],
+  node: FlowNode,
+  requestedName: string,
+  doc: FlowDocument,
+  options?: { path?: string | null; relatedDocs?: DocPath[] },
+): string {
+  const mirroredBlock = mirroredGraphBlockOfHost(doc, node);
+  const finalName = applyNodeRename(items, node, requestedName, doc, options);
+  if (mirroredBlock && finalName !== mirroredBlock.name) {
+    applyGraphBlockRename(doc, mirroredBlock, finalName);
+  }
+  return finalName;
+}
+
+export function renameGraphBlock(
+  doc: FlowDocument,
+  graphItem: GraphItem,
+  requestedName: string,
+  options?: { path?: string | null; relatedDocs?: DocPath[] },
+): string {
+  const mirroredHost = mirroredHostOfGraphBlock(doc, graphItem);
+  const finalName = applyGraphBlockRename(doc, graphItem, requestedName);
+  if (mirroredHost && finalName !== mirroredHost.name) {
+    applyNodeRename(containingItems(doc, mirroredHost), mirroredHost, finalName, doc, options);
+  }
+  return finalName;
+}
+
+function applyNodeRename(
   items: FlowItem[],
   node: FlowNode,
   requestedName: string,
@@ -644,7 +678,7 @@ export function renameNode(
   return node.name;
 }
 
-export function renameGraphBlock(doc: FlowDocument, graphItem: GraphItem, requestedName: string): string {
+function applyGraphBlockRename(doc: FlowDocument, graphItem: GraphItem, requestedName: string): string {
   const cleanName = sanitizeName(requestedName);
   if (!cleanName || cleanName === graphItem.name) return graphItem.name;
 
@@ -768,6 +802,46 @@ export function expandIdentityForNode(
   return null;
 }
 
+// The reverse of an expansion reference: which nodes unfold this graph. Walked on demand
+// rather than kept as an index, because every mutation, watcher push, undo and lazy external
+// load would have to invalidate the index, and the walk over an in-memory document is cheap.
+export function hostsOfExpansion(docs: Iterable<DocPath>, identity: ExpandIdentity): FlowNode[] {
+  const hosts: FlowNode[] = [];
+  for (const { doc, path } of docs) {
+    for (const node of allNodes(doc)) {
+      const expandValue = getProp(node, 'expand');
+      if (expandValue && expandValueMatchesIdentity(expandValue, path, identity)) hosts.push(node);
+    }
+  }
+  return hosts;
+}
+
+/** The local `graph:` block `node` expands and is the only host of, if there is one. */
+export function graphBlockSolelyHostedBy(doc: FlowDocument, node: FlowNode): GraphItem | null {
+  const block = graphBlockNamed(doc, getProp(node, 'expand'));
+  if (!block) return null;
+  const hosts = hostsOfExpansion([{ doc, path: null }], { kind: 'graph-block', name: block.name });
+  return hosts.length === 1 && hosts[0] === node ? block : null;
+}
+
+/** The block of `graphBlockSolelyHostedBy` when the two already share a name (see renameNode). */
+export function mirroredGraphBlockOfHost(doc: FlowDocument, node: FlowNode): GraphItem | null {
+  const block = graphBlockSolelyHostedBy(doc, node);
+  return block && block.name === node.name ? block : null;
+}
+
+export function mirroredHostOfGraphBlock(doc: FlowDocument, graphItem: GraphItem): FlowNode | null {
+  const hosts = hostsOfExpansion([{ doc, path: null }], { kind: 'graph-block', name: graphItem.name });
+  return hosts.length === 1 && hosts[0].name === graphItem.name ? hosts[0] : null;
+}
+
+export function graphBlockNamed(doc: FlowDocument, blockName: string | null): GraphItem | null {
+  if (!blockName || parseExpandLink(blockName)) return null;
+  return doc.items.find(
+    (item): item is GraphItem => item.kind === 'graph' && item.name === blockName,
+  ) ?? null;
+}
+
 // The two refinements an edge can carry: an `{Inner Source}` prefix (spec §5.8, resolved
 // against the owning node's expansion) and an `{Inner Target}` suffix (spec §5.7, resolved
 // against the target node's expansion). Both are kept consistent as inner nodes change.
@@ -880,11 +954,19 @@ function edgeExpandsTo(
   const expandValue = side === 'source'
     ? getProp(edgeSource, 'expand')
     : expandValueOfTarget(doc, edgeSource, edge);
-  if (!expandValue) return false;
+  return expandValue != null && expandValueMatchesIdentity(expandValue, containingPath, identity);
+}
+
+// A local `expand: Block Name` can only ever name a block in its own file, so a graph-block
+// identity never has to consider the containing path; an external link resolves against it.
+function expandValueMatchesIdentity(
+  expandValue: string,
+  containingPath: string | null,
+  identity: ExpandIdentity,
+): boolean {
   if (identity.kind === 'graph-block') return expandValue === identity.name;
   const link = parseExpandLink(expandValue);
-  if (!link) return false;
-  return resolveLinkPath(containingPath, link.path) === identity.path;
+  return link != null && resolveLinkPath(containingPath, link.path) === identity.path;
 }
 
 function expandValueOfTarget(doc: FlowDocument, edgeSource: FlowNode, edge: EdgeSpec): string | null {

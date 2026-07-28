@@ -30,6 +30,10 @@ export interface EditorContext {
   renameNode(node: FlowNode, requestedName: string): string;
   applyEdit(node: FlowNode, mutation: () => void): void;
   applyEditNow(node: FlowNode, mutation: () => void): void;
+  // Editing `expand` can rename the target block rather than repoint the node, so the shell
+  // decides and reports back the value that was actually written.
+  applyExpandEdit(node: FlowNode, requestedValue: string): string;
+  expandOptions(node: FlowNode): string[];
   // External expand targets store description and references in the target file's preamble.
   descriptionOf(node: FlowNode): string;
   applyDescriptionEdit(node: FlowNode, text: string): void;
@@ -72,6 +76,7 @@ export function createEditors(context: EditorContext): Editors {
     onError: elementById<HTMLInputElement>('ne-on-error'),
     updates: elementById<HTMLInputElement>('ne-updates'),
     entrypoint: elementById<HTMLInputElement>('ne-entrypoint'),
+    expandOptions: elementById<HTMLDataListElement>('ne-expand-options'),
     referenceRows: elementById<HTMLDivElement>('ne-reference-rows'),
     addReference: elementById<HTMLButtonElement>('ne-add-reference'),
     openExpand: elementById<HTMLButtonElement>('ne-open-expand'),
@@ -138,6 +143,7 @@ export function createEditors(context: EditorContext): Editors {
     setUnlessFocused(elements.title, node.name);
     setUnlessFocused(elements.description, context.descriptionOf(node));
     setUnlessFocused(elements.expand, getProp(node, 'expand') ?? '');
+    fillExpandOptions(node);
     setUnlessFocused(elements.onError, getProp(node, 'on_error') ?? '');
     setUnlessFocused(elements.updates, parseListValue(getProp(node, 'updates')).join(', '));
     elements.entrypoint.checked = getProp(node, 'entrypoint') === 'true';
@@ -149,6 +155,18 @@ export function createEditors(context: EditorContext): Editors {
 
   function setUnlessFocused(field: HTMLInputElement | HTMLTextAreaElement, value: string): void {
     if (document.activeElement !== field) field.value = value;
+  }
+
+  // Offering the file's `graph:` blocks is what separates the two intents behind an edit to
+  // this field: picking a listed name repoints the node, typing an unlisted one renames.
+  function fillExpandOptions(node: FlowNode): void {
+    elements.expandOptions.replaceChildren(
+      ...context.expandOptions(node).map((blockName) => {
+        const option = document.createElement('option');
+        option.value = blockName;
+        return option;
+      }),
+    );
   }
 
   function openEdgeEditor(edge: ModelEdge): void {
@@ -288,7 +306,10 @@ export function createEditors(context: EditorContext): Editors {
     const node = editingNode();
     if (!node) return;
     const titleChanged = Boolean(elements.title.value.trim()) && elements.title.value !== node.name;
-    const expandChanged = elements.expand.value.trim() !== (getProp(node, 'expand') ?? '');
+    // Read before the title commit: renaming the node can rename the `graph:` block it mirrors,
+    // and an untouched expand field still showing the old block name must not be written back.
+    const expandBefore = getProp(node, 'expand') ?? '';
+    const requestedExpand = elements.expand.value.trim();
     const onErrorChanged = elements.onError.value.trim() !== (getProp(node, 'on_error') ?? '');
     const updatesEntries = elements.updates.value.split(',').map((entry) => entry.trim()).filter(Boolean);
     const updatesChanged = updatesEntries.join(', ') !== parseListValue(getProp(node, 'updates')).join(', ');
@@ -296,9 +317,11 @@ export function createEditors(context: EditorContext): Editors {
       elements.title.value = context.renameNode(node, elements.title.value);
     }
     referenceRows.commitPending(context.referencesOf(node));
-    if (!expandChanged && !onErrorChanged && !updatesChanged) return;
+    if (requestedExpand !== expandBefore) {
+      elements.expand.value = context.applyExpandEdit(node, requestedExpand);
+    }
+    if (!onErrorChanged && !updatesChanged) return;
     context.applyEdit(node, () => {
-      if (expandChanged) setProp(node, 'expand', elements.expand.value.trim() || null);
       if (onErrorChanged) setProp(node, 'on_error', elements.onError.value.trim() || null);
       if (updatesChanged) setProp(node, 'updates', updatesEntries.length ? formatListValue(updatesEntries) : null);
     });
@@ -386,10 +409,12 @@ export function createEditors(context: EditorContext): Editors {
   });
 
   elements.expand.addEventListener('change', () => {
-    applyToNode((node) => {
-      setProp(node, 'expand', elements.expand.value.trim() || null);
-      elements.openExpand.classList.toggle('hidden', !elements.expand.value.trim());
-    });
+    const node = editingNode();
+    if (!node) return;
+    elements.expand.value = context.applyExpandEdit(node, elements.expand.value);
+    // An edit inside an external frame document does not run the open file's refresh, so the
+    // buttons that depend on the node having an expansion are reconciled here.
+    fillNodeFields(node);
   });
 
   elements.onError.addEventListener('change', () => {

@@ -214,6 +214,10 @@ graph: Graph Name
 
 Graph blocks can be referenced by multiple nodes (reuse).
 
+When exactly one node expands a block, the block is that node's definition, so give the two the
+same name and rename them together — the editor keeps the pair in step and the linter warns
+when they drift apart. A block several nodes share has no single owner and keeps its own name.
+
 ### Expansion Is Recursive
 
 A node inside an expanded graph can itself have `expand`. Rule applies at every level.

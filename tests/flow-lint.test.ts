@@ -37,12 +37,12 @@ Process Payment
   id: 22222222-2222-4222-8222-222222222222
   updates: [Cart]
   on_error: -> Show Error
-  expand: Payment Steps
+  expand: Process Payment
   {Send Receipt} -> Show Error : "receipt failed"
 
 Show Error
 
-graph: Payment Steps
+graph: Process Payment
   Charge Card
     -> Send Receipt
 
@@ -155,6 +155,18 @@ describe('semantic rules', () => {
   it('reports graph blocks nobody expands and blocks with no nodes', () => {
     const text = '---\nname: T\n---\n\nA\n\ngraph: Unused\n';
     expect(rulesOf(text)).toEqual(expect.arrayContaining(['unused-graph-block', 'empty-graph-block']));
+  });
+
+  it('reports a block only one node expands under a different name', () => {
+    const diverged = '---\nname: T\n---\n\nA\n  expand: Sub\n\ngraph: Sub\n  Inner\n';
+    expect(rulesOf(diverged)).toContain('sole-host-name-mismatch');
+    expect(severityOf(diverged, 'sole-host-name-mismatch')).toBe('warning');
+
+    const mirrored = '---\nname: T\n---\n\nSub\n  expand: Sub\n\ngraph: Sub\n  Inner\n';
+    expect(rulesOf(mirrored)).not.toContain('sole-host-name-mismatch');
+
+    const shared = '---\nname: T\n---\n\nA\n  expand: Sub\n\nB\n  expand: Sub\n\ngraph: Sub\n  Inner\n';
+    expect(rulesOf(shared)).not.toContain('sole-host-name-mismatch');
   });
 
   it('reports inner-node refinements that name nothing', () => {

@@ -86,7 +86,12 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
 - `scripts/build-site.mjs` — assembles the static `site/` build (`npm run build:site`).
 - `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building
-  (`FlowModel` and its types).
+  (`FlowModel` and its types). Expansion references are also walked in reverse
+  (`hostsOfExpansion`), which is what lets a rename ripple: a `graph:` block with exactly one
+  host node whose name it already matches is renamed together with that node, in either
+  direction. The pairing is derived from the current names on every call rather than stored —
+  a block deliberately named something else is simply unpaired, and the format has nowhere to
+  record editor state on a block anyway.
 - `src/client/canvas-view.ts` — rough.js rendering plus all pointer interaction (pan, zoom,
   tool modes, drag-create, move, resize, port-drag edge creation, marquee select) and
   camera animations for subgraph navigation.
