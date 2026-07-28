@@ -538,6 +538,17 @@ function convertSelectionToSubgraph(): void {
   setTimeout(() => editors.openNodeEditor(host!, { focusTitle: true }), TOGGLE_DURATION_MS);
 }
 
+// A plain node becomes a subgraph host by gaining a local `graph:` block of its own name — the
+// mirrored pairing renames keep in step — and unfolds it straight away, empty, ready for the
+// first inner node. A name already taken by a block adopts that block rather than duplicating it,
+// which is what typing the same name into the node editor's expand field does.
+function convertNodeToSubgraph(node: FlowNode): void {
+  if (getProp(node, 'expand')) return;
+  editors.closeAll();
+  applyExpandEditAction(node, node.name);
+  toggleInlineExpansion(node);
+}
+
 // A node whose `expand` is a local `graph:` reference can be promoted to its own .flow file;
 // one already pointing at a file (the `[Label](path)` form) has nothing to extract.
 function extractableBlockNameFor(node: FlowNode): string | null {
@@ -1267,6 +1278,8 @@ function nodeMenuItems(node: FlowNode): MenuItem[] {
     if (selectionCount <= 1 && extractableBlockNameFor(node)) {
       items.push({ label: 'Extract into file', onSelect: () => extractSubgraphIntoFile(node) });
     }
+  } else if (selectionCount <= 1) {
+    items.push({ label: 'Convert to subgraph', onSelect: () => convertNodeToSubgraph(node) });
   }
   if (selectionCount <= 1) {
     const isEntrypoint = getProp(node, 'entrypoint') === 'true';
