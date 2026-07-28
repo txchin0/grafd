@@ -79,7 +79,7 @@
   --shadow-floating: 0 8px 28px rgba(0, 0, 0, 0.12);
   --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.18);
 
-  --canvas-grid: rgba(31, 31, 31, 0.06);
+  --canvas-grid: rgba(31, 31, 31, 0.09);
   --canvas-ink: #1f1f1f;
   --canvas-muted: rgba(31, 31, 31, 0.74);
   --canvas-node-fill: #ffffff;
