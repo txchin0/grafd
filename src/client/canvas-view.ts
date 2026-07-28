@@ -109,6 +109,7 @@ type SceneTransition =
       nodeRect: Rect;
       link: CameraLink;
       inlineAnchor: FrameTransform | null;
+      childDrawnByParent: boolean;
       bounds: ViewportSize;
       duration: number;
       startTime: number;
@@ -684,19 +685,40 @@ export class CanvasView {
     { nodeRect, inlineAnchor = null, duration = DIVE_IN_MS }:
       { nodeRect: Rect; inlineAnchor?: FrameTransform | null; duration?: number },
   ): Promise<void> {
-    return this.startZoomTransition({ mode: 'in', nodeRect, inlineAnchor, duration });
+    // A dive is only ever anchored to a frame that is unfolded on screen, so an anchor here
+    // always means the subgraph is already drawn inside the node it grows out of.
+    return this.startZoomTransition({
+      mode: 'in',
+      nodeRect,
+      inlineAnchor,
+      childDrawnByParent: inlineAnchor !== null,
+      duration,
+    });
   }
 
   zoomBackOut(
-    { nodeRect, targetView, inlineAnchor = null, duration = BACK_OUT_MS }:
-      { nodeRect: Rect; targetView: View; inlineAnchor?: FrameTransform | null; duration?: number },
+    { nodeRect, targetView, inlineAnchor = null, childDrawnByParent = false, duration = BACK_OUT_MS }:
+      {
+        nodeRect: Rect;
+        targetView: View;
+        inlineAnchor?: FrameTransform | null;
+        childDrawnByParent?: boolean;
+        duration?: number;
+      },
   ): Promise<void> {
-    return this.startZoomTransition({ mode: 'out', nodeRect, targetView, inlineAnchor, duration });
+    return this.startZoomTransition({ mode: 'out', nodeRect, targetView, inlineAnchor, childDrawnByParent, duration });
   }
 
   private startZoomTransition(
-    { mode, nodeRect, targetView, inlineAnchor, duration }:
-      { mode: 'in' | 'out'; nodeRect: Rect; targetView?: View; inlineAnchor: FrameTransform | null; duration: number },
+    { mode, nodeRect, targetView, inlineAnchor, childDrawnByParent, duration }:
+      {
+        mode: 'in' | 'out';
+        nodeRect: Rect;
+        targetView?: View;
+        inlineAnchor: FrameTransform | null;
+        childDrawnByParent: boolean;
+        duration: number;
+      },
   ): Promise<void> {
     const held = this.sceneTransition?.phase === 'hold' ? this.sceneTransition.outgoing : null;
     if (!held) {
@@ -737,6 +759,7 @@ export class CanvasView {
         nodeRect,
         link,
         inlineAnchor,
+        childDrawnByParent,
         bounds,
         duration,
         startTime: performance.now(),
@@ -1411,7 +1434,7 @@ export class CanvasView {
 
     this.view = { ...(parentIsIncoming ? parentView : childView) };
     const parentAlpha = parentIsIncoming ? eased : 1 - eased;
-    const childAlpha = transition.inlineAnchor ? 1 : (parentIsIncoming ? 1 - eased : eased);
+    const childAlpha = transition.childDrawnByParent ? 1 : (parentIsIncoming ? 1 - eased : eased);
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.drawGridIfVisible(this.view);

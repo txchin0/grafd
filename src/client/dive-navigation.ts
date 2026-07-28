@@ -35,6 +35,10 @@ export interface DivePath {
 export interface BackOutAnchor {
   transform: FrameTransform;
   rect: Rect;
+  // True only when every hop lands in an unfolded frame, so the destination scene draws the
+  // graph being left behind at exactly the placement it shrinks into. When any hop is a
+  // folded node the destination has nothing there and the leaving graph has to fade out.
+  drawnByDestination: boolean;
 }
 
 export interface DiveNavigationContext {
@@ -117,6 +121,7 @@ export function backOutAnchorFor(
   let model = ctx.model;
   let transform: FrameTransform = { scale: 1, tx: 0, ty: 0 };
   let rect: Rect | null = null;
+  let everyHopUnfolded = true;
   for (const [hop, entry] of dropped.entries()) {
     const node = model.nodes.find((candidate) => candidate.id === entry.nodeId);
     const nodeRect = node && (model.display?.rects.get(node) ?? node.pos);
@@ -127,9 +132,10 @@ export function backOutAnchorFor(
       ?? (isLastHop ? leavingModel : modelForLevel(ctx, dropped[hop + 1]));
     if (!childModel) return null;
 
+    if (!expansion) everyHopUnfolded = false;
     rect = transformRect(nodeRect, transform);
     transform = composeTransforms(transform, expansion?.transform ?? fitTransformIntoRect(childModel, nodeRect));
     model = childModel;
   }
-  return rect ? { transform, rect } : null;
+  return rect ? { transform, rect, drawnByDestination: everyHopUnfolded } : null;
 }

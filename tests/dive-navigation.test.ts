@@ -115,5 +115,29 @@ describe('backOutAnchorFor', () => {
 
     expect(anchor.transform).toEqual(onScreen.transform);
     expect(anchor.rect).toEqual(onScreen.frame);
+    expect(anchor.drawnByDestination).toBe(true);
+  });
+
+  it('reports that the destination does not draw the leaving graph when the host is folded', () => {
+    const { doc, ctx, host, middle } = nestedScene();
+    const dive = divePathTo(ctx, middle)!;
+    const deepModel = buildModel(doc, 'Deep') as FlowModel;
+    deepModel.sourcePath = 'nested.flow';
+    const foldedLayer = new ExpansionLayer({ onNeedsRender: vi.fn(), readExternalFile: vi.fn(async () => null) });
+    const foldedModel = buildModel(doc, null);
+    foldedModel.sourcePath = 'nested.flow';
+    foldedLayer.layout(foldedModel, performance.now());
+    foldedLayer.collectLoci(foldedModel);
+
+    const foldedCtx: DiveNavigationContext = {
+      ...ctx,
+      model: foldedModel,
+      modelOf: (node) => foldedLayer.modelOf(node),
+      ancestorHosts: (node) => foldedLayer.ancestorHosts(node),
+    };
+    const anchor = backOutAnchorFor(foldedCtx, dive.entries, deepModel)!;
+
+    expect(foldedModel.display!.expansions.get(host)).toBeUndefined();
+    expect(anchor.drawnByDestination).toBe(false);
   });
 });

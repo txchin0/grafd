@@ -750,7 +750,12 @@ async function navigateBackTo(index: number): Promise<void> {
     expansions.collectLoci(flow.model);
     const anchor = backOutAnchorFor(diveNavigationContext(flow), dropped, leavingModel);
     const nodeRect = anchor ? anchor.rect : { ...view.rect(enteredNode) };
-    await view.zoomBackOut({ nodeRect, targetView: entry.view, inlineAnchor: anchor?.transform ?? null });
+    await view.zoomBackOut({
+      nodeRect,
+      targetView: entry.view,
+      inlineAnchor: anchor?.transform ?? null,
+      childDrawnByParent: anchor?.drawnByDestination ?? false,
+    });
   } finally {
     navigation.inProgress = false;
   }
