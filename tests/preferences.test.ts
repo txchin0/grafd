@@ -18,6 +18,12 @@ describe('parsePreferences', () => {
     expect(parsePreferences('{"showCanvasGrid":false,"whatever":1}')).toEqual({ ...defaultPreferences(), showCanvasGrid: false });
   });
 
+  it('opens subgraphs on double-click by default and honours a stored opt-out', () => {
+    expect(defaultPreferences().openSubgraphOnDoubleClick).toBe(true);
+    expect(parsePreferences('{"openSubgraphOnDoubleClick":false}').openSubgraphOnDoubleClick).toBe(false);
+    expect(parsePreferences('{"openSubgraphOnDoubleClick":"off"}').openSubgraphOnDoubleClick).toBe(true);
+  });
+
   it('reads a stored editor link scheme and rejects an unknown one', () => {
     expect(parsePreferences('{"editorLinkScheme":"cursor"}').editorLinkScheme).toBe('cursor');
     expect(parsePreferences('{"editorLinkScheme":"emacs"}').editorLinkScheme).toBe(

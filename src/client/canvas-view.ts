@@ -366,6 +366,7 @@ export class CanvasView {
   selectedEdge: ModelEdge | null = null;
   expansionLayer: ExpansionLayer | null = null;
   gridIsVisible = true;
+  doubleClickOpensSubgraph = true;
   titleEditingNodeId: string | null = null;
 
   private hoverNode: FlowNode | null = null;
@@ -1132,6 +1133,12 @@ export class CanvasView {
       this.actions.editNodeTitle(titledNode);
       return;
     }
+    const subgraph = this.subgraphToOpenAt(world);
+    if (subgraph) {
+      this.select(subgraph);
+      this.actions.openExpand(subgraph);
+      return;
+    }
     if (this.hitNode(world) || this.hitGhost(world)) return;
     const target = this.creationTargetAt(world);
     this.actions.quickCreateNode(target.point, target.frameHost);
@@ -1188,6 +1195,17 @@ export class CanvasView {
     if (!node) return null;
     const placement = this.titlePlacementOf(node);
     return placement && rectContains(placement.rect, world) ? node : null;
+  }
+
+  // The node a double-click should dive into. The `expand` trait is read from the model that
+  // owns the node rather than the top-level one, so a node sitting inside an unfolded frame
+  // opens just as a top-level one does.
+  subgraphToOpenAt(world: Point): FlowNode | null {
+    if (!this.doubleClickOpensSubgraph) return null;
+    const node = this.hitNode(world);
+    if (!node) return null;
+    const owningModel = this.expansionLayer?.modelOf(node) ?? this.model;
+    return owningModel.traits.get(node)?.expand ? node : null;
   }
 
   private hitGhost(world: Point): GhostNode | null {

@@ -1233,6 +1233,7 @@ const screenshot = createScreenshotDialog({ view, fileStem: screenshotFileStem }
 function applyPreferences(preferences: Preferences): void {
   currentPreferences = preferences;
   view.gridIsVisible = preferences.showCanvasGrid;
+  view.doubleClickOpensSubgraph = preferences.openSubgraphOnDoubleClick;
   applyTheme(preferences.theme);
   view.requestRender();
 }

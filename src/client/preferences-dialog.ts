@@ -9,6 +9,7 @@ import { THEMES, type ThemeId } from './theme.js';
 export function createPreferencesDialog(onChange: (preferences: Preferences) => void): Modal {
   const modal = createModal('preferences-modal', 'preferences-panel');
   const showCanvasGrid = document.getElementById('pref-canvas-grid') as HTMLInputElement;
+  const openSubgraphOnDoubleClick = document.getElementById('pref-open-subgraph-dblclick') as HTMLInputElement;
   const editorLinkScheme = document.getElementById('pref-editor-link') as HTMLSelectElement;
   const theme = document.getElementById('pref-theme') as HTMLSelectElement;
   const closeButton = document.getElementById('preferences-close') as HTMLButtonElement;
@@ -21,6 +22,7 @@ export function createPreferencesDialog(onChange: (preferences: Preferences) => 
   function currentPreferences(): Preferences {
     return {
       showCanvasGrid: showCanvasGrid.checked,
+      openSubgraphOnDoubleClick: openSubgraphOnDoubleClick.checked,
       editorLinkScheme: editorLinkScheme.value as EditorLinkScheme,
       theme: theme.value as ThemeId,
     };
@@ -32,7 +34,7 @@ export function createPreferencesDialog(onChange: (preferences: Preferences) => 
     onChange(preferences);
   }
 
-  for (const control of [showCanvasGrid, editorLinkScheme, theme]) {
+  for (const control of [showCanvasGrid, openSubgraphOnDoubleClick, editorLinkScheme, theme]) {
     control.addEventListener('change', applyChange);
   }
   closeButton.addEventListener('click', modal.close);
@@ -42,6 +44,7 @@ export function createPreferencesDialog(onChange: (preferences: Preferences) => 
     open() {
       const stored = loadPreferences();
       showCanvasGrid.checked = stored.showCanvasGrid;
+      openSubgraphOnDoubleClick.checked = stored.openSubgraphOnDoubleClick;
       editorLinkScheme.value = stored.editorLinkScheme;
       theme.value = stored.theme;
       modal.open();

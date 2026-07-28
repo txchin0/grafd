@@ -10,12 +10,18 @@ import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from './theme.js';
 
 export interface Preferences {
   showCanvasGrid: boolean;
+  openSubgraphOnDoubleClick: boolean;
   editorLinkScheme: EditorLinkScheme;
   theme: ThemeId;
 }
 
 export function defaultPreferences(): Preferences {
-  return { showCanvasGrid: true, editorLinkScheme: 'vscode', theme: DEFAULT_THEME_ID };
+  return {
+    showCanvasGrid: true,
+    openSubgraphOnDoubleClick: true,
+    editorLinkScheme: 'vscode',
+    theme: DEFAULT_THEME_ID,
+  };
 }
 
 // Tolerant of hand-edited or older stored values: anything missing or of the wrong type
@@ -33,6 +39,9 @@ export function parsePreferences(text: string | null | undefined): Preferences {
   const record = raw as Record<string, unknown>;
   return {
     showCanvasGrid: typeof record.showCanvasGrid === 'boolean' ? record.showCanvasGrid : defaults.showCanvasGrid,
+    openSubgraphOnDoubleClick: typeof record.openSubgraphOnDoubleClick === 'boolean'
+      ? record.openSubgraphOnDoubleClick
+      : defaults.openSubgraphOnDoubleClick,
     editorLinkScheme: isEditorLinkScheme(record.editorLinkScheme)
       ? record.editorLinkScheme
       : defaults.editorLinkScheme,
