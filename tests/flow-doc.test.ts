@@ -20,6 +20,7 @@ import {
   deleteNodes,
   duplicateNodes,
   edgeSupportsData,
+  ensureScopeItems,
   expandEntryNames,
   expandIdentityForNode,
   extractGraphBlockToDocument,
@@ -133,6 +134,17 @@ graph: Sub
     expect(nodesIn(scopeItems(doc, 'Sub')).map((node) => node.name)).toEqual(['Inner']);
     expect(nodesIn(scopeItems(doc, null)).map((node) => node.name)).toEqual(['Top']);
     expect(nodesIn(scopeItems(doc, 'Missing')).map((node) => node.name)).toEqual(['Top']);
+  });
+
+  it('materializes a missing graph block when ensuring its items', () => {
+    const fresh = docFrom('Top\n  expand: Unwritten\n');
+    const items = ensureScopeItems(fresh, 'Unwritten');
+    addNode(items, { x: 0, y: 0, w: 200, h: 88 }, 'First');
+
+    expect(graphBlockNames(fresh)).toEqual(['Unwritten']);
+    expect(nodesIn(scopeItems(fresh, 'Unwritten')).map((node) => node.name)).toEqual(['First']);
+    expect(ensureScopeItems(fresh, 'Unwritten')).toBe(items);
+    expect(ensureScopeItems(fresh, null)).toBe(fresh.items);
   });
 
   it('finds nodes by id anywhere in the document', () => {

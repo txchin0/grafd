@@ -104,6 +104,11 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
 - `src/client/preferences.ts` / `preferences-dialog.ts` — user-level display options, stored in
   localStorage (not the manifest: they describe this browser, not the workspace) and edited in
   the Preferences modal reached from the sidebar's workspace menu.
+- `src/client/theme.ts` / `public/themes.css` — the theme registry and the colour tokens.
+  `themes.css` is the single source of truth for every colour, one `:root[data-theme="…"]`
+  block per theme; DOM chrome reads the tokens directly, and `resolveCanvasPalette` resolves
+  the `--canvas-*` ones into the palette `canvas-view.ts` draws from, refilled on each theme
+  change. Adding a theme means a new block plus one entry in `THEMES` — nothing else.
 - `src/client/main.ts` — app state, WebSocket sync, undo/redo, sidebar, keyboard shortcuts.
 - `tests/` — Vitest unit tests for the parser/serializer, document mutations, server file
   logic, expansion geometry, and camera math.

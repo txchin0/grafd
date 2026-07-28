@@ -4,9 +4,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseFlow } from '../src/shared/flow-format.js';
 import { allNodes, buildModel } from '../src/client/flow-doc.js';
+import type { Rect } from '../src/shared/flow-format.js';
 import {
   composeTransforms,
   ExpansionLayer,
+  inverseTransformPoint,
+  inverseTransformRect,
   pairMobility,
   ripplePush,
   separationVector,
@@ -38,6 +41,18 @@ Host
   pos: 200, 100, 200, 88
   expand: Sub
 `;
+
+function rectCenter(rect: Rect) {
+  return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+}
+
+function topLeftInside(rect: Rect) {
+  return { x: rect.x + 1, y: rect.y + 1 };
+}
+
+function contains(rect: Rect, point: { x: number; y: number }) {
+  return point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h;
+}
 
 describe('transformRect', () => {
   it('maps a local rect through a frame transform', () => {
@@ -307,6 +322,85 @@ describe('ExpansionLayer', () => {
     layer.collectLoci(model);
 
     expect(layer.diveAnchor(host)).toBeNull();
+  });
+
+  it('resolves the innermost frame a world point falls in', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(NESTED_FLOW);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    model.sourcePath = 'nested.flow';
+    const [host, middle] = ['Host', 'Middle'].map(
+      (name) => allNodes(doc).find((node) => node.name === name)!,
+    );
+
+    layer.restoreOpen([host.id!, middle.id!]);
+    layer.layout(model, performance.now());
+    layer.collectLoci(model);
+
+    const hostFrame = layer.frameFor(host)!;
+    const middleFrame = layer.frameFor(middle)!;
+
+    const cornerOfHostFrame = topLeftInside(hostFrame.interior);
+    expect(contains(middleFrame.interior, cornerOfHostFrame)).toBe(false);
+
+    expect(layer.frameAt(rectCenter(middleFrame.interior))!.host).toBe(middle);
+    expect(layer.frameAt(cornerOfHostFrame)!.host).toBe(host);
+    expect(layer.frameAt({ x: hostFrame.interior.x - 500, y: hostFrame.interior.y - 500 })).toBeNull();
+  });
+
+  it('names the graph block each frame writes into', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(NESTED_FLOW);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    model.sourcePath = 'nested.flow';
+    const [host, middle] = ['Host', 'Middle'].map(
+      (name) => allNodes(doc).find((node) => node.name === name)!,
+    );
+
+    layer.restoreOpen([host.id!, middle.id!]);
+    layer.layout(model, performance.now());
+    layer.collectLoci(model);
+
+    expect(layer.frameFor(host)!.model.sourceScope).toBe('Sub');
+    expect(layer.frameFor(host)!.model.sourcePath).toBe('nested.flow');
+    expect(layer.frameFor(middle)!.model.sourceScope).toBe('Deep');
+  });
+
+  it('reports the scope of a graph block that has no body yet', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow('Host\n  id: host-1\n  pos: 0, 0, 200, 88\n  expand: Unwritten\n');
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    model.sourcePath = 'nested.flow';
+    const host = allNodes(doc)[0];
+
+    layer.restoreOpen([host.id!]);
+    layer.layout(model, performance.now());
+    layer.collectLoci(model);
+
+    expect(layer.frameFor(host)!.model.sourceScope).toBe('Unwritten');
+  });
+
+  it('maps a point inside a frame back to subgraph coordinates', () => {
+    const { layer } = layerWithSpy();
+    const doc = parseFlow(NESTED_FLOW);
+    const model = buildModel(doc, null);
+    model.sourceDoc = doc;
+    model.sourcePath = 'nested.flow';
+    const host = allNodes(doc).find((node) => node.name === 'Host')!;
+
+    layer.restoreOpen([host.id!]);
+    layer.layout(model, performance.now());
+    layer.collectLoci(model);
+
+    const frame = layer.frameFor(host)!;
+    const middle = frame.model.nodes.find((node) => node.name === 'Middle')!;
+    const middleInWorld = transformRect(frame.model.display!.rects.get(middle) ?? middle.pos!, frame.transform);
+
+    expect(inverseTransformRect(middleInWorld, frame.transform)).toEqual(middle.pos);
+    expect(inverseTransformPoint(rectCenter(middleInWorld), frame.transform)).toEqual(rectCenter(middle.pos!));
   });
 
   it('leaves embedded loci stale when layout runs without collectLoci on the scoped graph', () => {

@@ -15,14 +15,9 @@
   line-gap-override: 0%;
 }
 
+/* Colours live in themes.css, one block per theme. Only the tokens that no theme varies
+   belong here. */
 :root {
-  --bg: #17191d;
-  --panel: #1f2228;
-  --panel-border: #2e333c;
-  --ink: #e8e2d5;
-  --muted: #9aa3ae;
-  --accent: #6aa9e9;
-  --danger: #d97a7a;
   --ui-font: "Hanken Grotesk", "Hanken Grotesk Fallback", system-ui, -apple-system,
     "Segoe UI", sans-serif;
   --text-caption: 0.6875rem;
@@ -40,6 +35,7 @@
 html, body {
   margin: 0;
   height: 100%;
+  color-scheme: var(--color-scheme);
   background: var(--bg);
   color: var(--ink);
   font-family: var(--ui-font);
@@ -100,9 +96,9 @@ html, body {
   text-overflow: ellipsis;
 }
 
-#file-list li:hover { background: #262a31; color: var(--ink); }
+#file-list li:hover { background: var(--row-hover); color: var(--ink); }
 #file-list li.active {
-  background: #2b3644;
+  background: var(--row-active);
   color: var(--ink);
   font-weight: var(--weight-medium);
 }
@@ -161,7 +157,7 @@ html, body {
 #new-file-input {
   margin: 8px;
   padding: 8px;
-  background: #171a1f;
+  background: var(--field-bg);
   border: 1px solid var(--accent);
   border-radius: 8px;
   color: var(--ink);
@@ -210,7 +206,7 @@ html, body {
 /* The button's edge is an inset shadow rather than a border so revealing it on hover cannot
    shift the bar's layout by the border's width. */
 #workspace-bar button:hover {
-  background: #262a31;
+  background: var(--row-hover);
   box-shadow: inset 0 0 0 1px var(--panel-border);
   color: var(--ink);
 }
@@ -242,7 +238,7 @@ html, body {
   display: inline-block;
 }
 
-#connection-dot.connected { background: #7fc48a; }
+#connection-dot.connected { background: var(--success); }
 
 #workspace {
   flex: 1;
@@ -347,18 +343,17 @@ html, body {
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 10px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-floating);
   padding: 10px;
   z-index: 10;
 }
 
 /* Sits on the canvas in place of the node's drawn title, so it carries no panel chrome and
-   takes its font, size, colour and alignment from the canvas at the current zoom. The
-   background is the opaque twin of the canvas node fill. */
+   takes its font, size, colour and alignment from the canvas at the current zoom. */
 #title-editor {
   position: absolute;
   z-index: 11;
-  background: #242830;
+  background: var(--title-editor-bg);
   border: none;
   padding: 0 4px;
   outline: none;
@@ -373,9 +368,10 @@ html, body {
 #edge-editor input,
 #edge-editor select,
 #graph-panel input:not([type]),
-#graph-panel textarea {
+#graph-panel textarea,
+#preferences-options select {
   width: 100%;
-  background: #171a1f;
+  background: var(--field-bg);
   border: 1px solid var(--panel-border);
   border-radius: 7px;
   color: var(--ink);
@@ -391,9 +387,30 @@ html, body {
 #edge-editor input:focus,
 #edge-editor select:focus,
 #graph-panel input:focus,
-#graph-panel textarea:focus {
+#graph-panel textarea:focus,
+#preferences-options select:focus {
   border-color: var(--accent);
 }
+
+/* The native control's arrow is drawn by the platform and ignores the theme, so it is
+   replaced: two gradient wedges make a chevron out of the theme's own tokens, which is why
+   the background colour has to be set separately from the background images. */
+#edge-editor select,
+#preferences-options select {
+  appearance: none;
+  padding-right: 26px;
+  background-color: var(--field-bg);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: right 13px center, right 9px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+#edge-editor select:hover,
+#preferences-options select:hover { border-color: var(--muted); }
 
 #ne-title { font-size: var(--text-title); }
 
@@ -502,7 +519,7 @@ html, body {
   border: 1px solid var(--panel-border);
   border-radius: 12px;
   padding: 18px 24px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--shadow-modal);
   z-index: 20;
 }
 
@@ -520,7 +537,7 @@ html, body {
 .modal {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--scrim);
   z-index: 40;
   display: flex;
   align-items: center;
@@ -531,7 +548,7 @@ html, body {
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 12px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--shadow-modal);
   padding: 18px 20px;
   display: flex;
   flex-direction: column;
@@ -549,10 +566,22 @@ html, body {
 #preferences-options {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   font-size: var(--text-body);
   color: var(--muted);
 }
+
+/* Caption left, control right, every control the same width, so the options read as a column
+   of settings rather than a stack of sentences. The checkbox row keeps its own layout: its
+   caption follows the box. */
+#preferences-options label:not(.check-row) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+#preferences-options select { width: 190px; }
 
 #screenshot-preview-frame {
   display: flex;
@@ -576,13 +605,13 @@ html, body {
 
 #screenshot-scale-presets { display: flex; gap: 4px; }
 #screenshot-scale-presets .quiet-button.active { color: var(--accent); border-color: var(--accent); }
-#screenshot-scale-presets .quiet-button:disabled { color: var(--panel-border); border-color: var(--panel-border); cursor: default; }
+#screenshot-scale-presets .quiet-button:disabled { color: var(--disabled); border-color: var(--disabled); cursor: default; }
 
 #screenshot-resolution label { display: flex; align-items: center; gap: 6px; }
 
 #screenshot-width {
   width: 84px;
-  background: #171a1f;
+  background: var(--field-bg);
   border: 1px solid var(--panel-border);
   border-radius: 7px;
   color: var(--ink);
@@ -595,7 +624,7 @@ html, body {
 #screenshot-width:focus { border-color: var(--accent); }
 #screenshot-dimensions { margin-left: auto; }
 #screenshot-error { margin: 0; font-size: var(--text-body); color: var(--danger); }
-#screenshot-download:disabled { color: var(--panel-border); border-color: var(--panel-border); cursor: default; }
+#screenshot-download:disabled { color: var(--disabled); border-color: var(--disabled); cursor: default; }
 
 .context-menu {
   position: fixed;
@@ -603,7 +632,7 @@ html, body {
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 10px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--shadow-modal);
   padding: 4px;
   z-index: 30;
   display: flex;
@@ -622,9 +651,9 @@ html, body {
   cursor: pointer;
 }
 
-.context-menu-item:hover { background: #262a31; color: var(--ink); }
-.context-menu-item.danger:hover { background: #262a31; color: var(--danger); }
-.context-menu-item.disabled { color: var(--panel-border); cursor: default; pointer-events: none; }
+.context-menu-item:hover { background: var(--row-hover); color: var(--ink); }
+.context-menu-item.danger:hover { background: var(--row-hover); color: var(--danger); }
+.context-menu-item.disabled { color: var(--disabled); cursor: default; pointer-events: none; }
 
 .context-menu-separator {
   height: 1px;

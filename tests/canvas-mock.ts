@@ -50,6 +50,8 @@ export function createCanvasMock(width = VIEWPORT.width, height = VIEWPORT.heigh
     style: {},
     parentElement: { tagName: 'DIV' },
     addEventListener: vi.fn(),
+    setPointerCapture: vi.fn(),
+    releasePointerCapture: vi.fn(),
     getBoundingClientRect: () => ({
       left: 0,
       top: 0,

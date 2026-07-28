@@ -49,13 +49,14 @@ import {
 } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
-import { CanvasView, type ContextTarget, type Tool, type View } from './canvas-view.js';
+import { CanvasView, type ContextTarget, type EmptyEdgeDrop, type Tool, type View } from './canvas-view.js';
 import { createContextMenu, type MenuItem } from './context-menu.js';
 import type { Modal } from './modal.js';
 import { createPreferencesDialog } from './preferences-dialog.js';
 import { loadPreferences, type Preferences } from './preferences.js';
 import { createReferenceRows } from './reference-rows.js';
 import type { LinkContext } from './reference-link.js';
+import { applyTheme } from './theme.js';
 import {
   ExpansionLayer,
   TOGGLE_DURATION_MS,
@@ -125,6 +126,7 @@ const externalCommittedTexts = new Map<string, string>();
 let commitTimer: ReturnType<typeof setTimeout> | undefined;
 
 let currentPreferences: Preferences = loadPreferences();
+applyTheme(currentPreferences.theme);
 let workspace: Workspace | null = null;
 let defaultWorkspaceKind: 'server' | 'browser' = 'browser';
 let manifest: WorkspaceManifest = emptyManifest();
@@ -617,14 +619,52 @@ function centeredDefaultRect(worldPoint: Point): Rect {
   return { x: Math.round(worldPoint.x - w / 2), y: Math.round(worldPoint.y - h / 2), w, h };
 }
 
-function createNodeAndEdit(rect: Rect, requestedName = 'Untitled'): FlowNode {
+// The document and `graph:` block a node drawn on the canvas belongs to: the open file's
+// current scope at the top level, or the subgraph an unfolded frame is showing — which may
+// live in another file entirely. Resolved from the host's `expand` against the live
+// documents rather than the frame geometry, which is rebuilt a frame behind every re-parse
+// (undo, redo, a watcher update) and would write into a document already replaced.
+function creationTargetFor(frameHost: FlowNode | null): { owner: DocumentOwner; scope: string | null } | null {
+  if (!frameHost) return { owner: { doc: state.doc!, path: state.path! }, scope: state.scope };
+  const host = liveNode(frameHost);
+  const expandValue = getProp(host, 'expand');
+  if (!expandValue) return null;
+  const hostOwner = ownerOf(host);
+  const path = resolvedExpandPath(expandValue, hostOwner.path);
+  if (!path) return { owner: hostOwner, scope: expandValue };
+  const doc = expandTargetDoc(path);
+  return doc ? { owner: { doc, path }, scope: null } : null;
+}
+
+function creationItems(target: { owner: DocumentOwner; scope: string | null }): FlowItem[] {
+  return FlowDoc.ensureScopeItems(target.owner.doc, target.scope);
+}
+
+// Canvas geometry hands back the node objects of the document it last drew. A re-parse
+// (undo, redo, a file change) replaces those objects, so anything about to be written is
+// looked up again by id — mutating the detached copy would be silently discarded, or
+// serialized back over the document that replaced it.
+function liveNode(node: FlowNode): FlowNode {
+  return (node.id ? findNode(node.id) : null) ?? node;
+}
+
+// A node added inside a frame has no locus until frame geometry is rebuilt; laying out now
+// keeps the editor from anchoring to subgraph coordinates read as world ones.
+function focusNewNode(node: FlowNode): void {
+  view.refreshDisplayGeometry();
+  view.select(node);
+  editors.openNodeEditor(node, { focusTitle: true });
+}
+
+function createNodeAndEdit(rect: Rect, frameHost: FlowNode | null = null, requestedName = 'Untitled'): FlowNode | null {
+  const target = creationTargetFor(frameHost);
+  if (!target) return null;
   let node: FlowNode | null = null;
-  mutate(() => {
-    node = FlowDoc.addNode(scopeItemsNow(), rect, requestedName);
+  applyToDoc(target.owner, () => {
+    node = FlowDoc.addNode(creationItems(target), rect, requestedName);
   }, { commit: 'now' });
-  view.select(node!);
-  editors.openNodeEditor(node!, { focusTitle: true });
-  return node!;
+  if (node) focusNewNode(node);
+  return node;
 }
 
 function extractionTargetForSelection(): { owner: DocumentOwner; items: FlowItem[]; nodes: FlowNode[] } | null {
@@ -1262,6 +1302,31 @@ function commitMovesFor(nodes: FlowNode[]): void {
   for (const owner of externalOwners.values()) commitExternalNow(owner.doc, owner.path);
 }
 
+// An edge dragged from inside a frame onto empty canvas. Released inside the same frame it
+// creates a sibling in that subgraph; released one level out it creates a node in the graph
+// that owns the frame, reached from inside by an `{Inner Source}` edge on the host (§5.8).
+function createNodeForEmptyDrop(fromNode: FlowNode, drop: EmptyEdgeDrop): void {
+  const rect = centeredDefaultRect(drop.point);
+  const host = liveNode(drop.host);
+  let created: FlowNode | null = null;
+  if (drop.kind === 'inner') {
+    const target = creationTargetFor(host);
+    if (!target) return;
+    const source = liveNode(fromNode);
+    applyToDoc(target.owner, () => {
+      created = FlowDoc.addNode(creationItems(target), rect);
+      FlowDoc.addEdge(source, created.name);
+    }, { commit: 'now' });
+  } else {
+    const owner = ownerOf(host);
+    applyToDoc(owner, () => {
+      created = FlowDoc.addNode(FlowDoc.containingItems(owner.doc, host), rect);
+      FlowDoc.addEdge(host, created.name, null, null, drop.innerName);
+    }, { commit: 'now' });
+  }
+  if (created) focusNewNode(created);
+}
+
 function completeEdge(
   fromNode: FlowNode,
   targetNode: FlowNode | null,
@@ -1271,6 +1336,7 @@ function completeEdge(
     ghostTarget: GhostNode | null;
     innerName?: string;
     outerSource?: { host: FlowNode; innerName: string };
+    emptyDrop?: EmptyEdgeDrop;
   },
 ): void {
   if (!state.doc || extra?.droppedOnSource) return;
@@ -1292,10 +1358,11 @@ function completeEdge(
   }
 
   if (expansions.isEmbedded(fromNode)) {
-    // Inside a frame, edges only connect existing nodes of that subgraph — dropping on
-    // empty canvas would otherwise spawn a node in the wrong graph.
-    if (!targetNode) return;
-    applyEdit(fromNode, () => FlowDoc.addEdge(fromNode, targetNode.name), { commit: 'now' });
+    if (targetNode) {
+      applyEdit(fromNode, () => FlowDoc.addEdge(fromNode, targetNode.name), { commit: 'now' });
+      return;
+    }
+    if (extra?.emptyDrop) createNodeForEmptyDrop(fromNode, extra.emptyDrop);
     return;
   }
 
@@ -1328,11 +1395,11 @@ function completeEdge(
 }
 
 const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
-  createNode: (rect) => {
-    if (state.doc) createNodeAndEdit(rect);
+  createNode: (rect, frameHost) => {
+    if (state.doc) createNodeAndEdit(rect, frameHost);
   },
-  quickCreateNode: (worldPoint) => {
-    if (state.doc) createNodeAndEdit(centeredDefaultRect(worldPoint));
+  quickCreateNode: (point, frameHost) => {
+    if (state.doc) createNodeAndEdit(centeredDefaultRect(point), frameHost);
   },
   nodeClicked: (node) => editors.openNodeEditor(node),
   canvasClicked: () => editors.closeAll(),
@@ -1343,9 +1410,7 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   openExpand,
   toggleExpand: toggleInlineExpansion,
   materializeGhost: (ghost) => {
-    if (!state.doc) return;
-    const node = createNodeAndEdit(ghost.pos, ghost.name);
-    view.select(node);
+    if (state.doc) createNodeAndEdit(ghost.pos, null, ghost.name);
   },
   contextMenu: openCanvasContextMenu,
   viewChanged: () => {
@@ -1402,6 +1467,7 @@ const screenshot = createScreenshotDialog({ view, fileStem: screenshotFileStem }
 function applyPreferences(preferences: Preferences): void {
   currentPreferences = preferences;
   view.gridIsVisible = preferences.showCanvasGrid;
+  applyTheme(preferences.theme);
   view.requestRender();
 }
 
@@ -1468,8 +1534,12 @@ function edgeMenuItems(edge: ModelEdge): MenuItem[] {
 }
 
 function canvasMenuItems(world: Point): MenuItem[] {
+  const creation = view.creationTargetAt(world);
   return [
-    { label: 'Add node here', onSelect: () => createNodeAndEdit(centeredDefaultRect(world)) },
+    {
+      label: 'Add node here',
+      onSelect: () => createNodeAndEdit(centeredDefaultRect(creation.point), creation.frameHost),
+    },
     { label: 'Paste', disabled: !clipboardHasNodes(), onSelect: () => pasteClipboard(world) },
     { separator: true },
     { label: 'Fit to content', onSelect: () => view.fitToContent() },

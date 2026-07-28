@@ -1,0 +1,99 @@
+/* Every colour in the editor, chrome and canvas alike, is declared here and nowhere else,
+   along with the handful of non-colour tokens a theme has to carry with them.
+   A theme is one block of custom properties; `applyTheme` in src/client/theme.ts stamps the
+   matching id onto <html data-theme>. The bare `:root` selector carries the dark values as
+   the unconditional fallback, so an unknown or missing attribute renders the default theme
+   rather than an unstyled page.
+
+   The canvas is drawn on a <canvas> and cannot read custom properties itself; the tokens
+   prefixed `--canvas-` are resolved to concrete colours by resolveCanvasPalette whenever the
+   theme changes. They are declared here so that adding a theme means editing one file. */
+
+:root,
+:root[data-theme="graf-dark"] {
+  /* Tells the browser which way to paint what a page cannot style: the native <select>
+     popup, scrollbars, and form control internals. */
+  --color-scheme: dark;
+  --bg: #17191d;
+  --panel: #1f2228;
+  --panel-border: #2e333c;
+  --ink: #e8e2d5;
+  --muted: #9aa3ae;
+  --accent: #6aa9e9;
+  --danger: #d97a7a;
+  --success: #7fc48a;
+  --disabled: #2e333c;
+  --row-hover: #262a31;
+  --row-active: #2b3644;
+  --field-bg: #171a1f;
+  /* The opaque twin of --canvas-node-fill: the inline title editor sits on the canvas in
+     place of a node's drawn title and must not let the node's fill show through. */
+  --title-editor-bg: #242830;
+  --scrim: rgba(0, 0, 0, 0.55);
+  --shadow-floating: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.55);
+
+  --canvas-grid: rgba(232, 226, 213, 0.07);
+  --canvas-ink: #e8e2d5;
+  --canvas-muted: rgba(232, 226, 213, 0.55);
+  --canvas-node-fill: rgba(36, 40, 48, 0.94);
+  --canvas-node-stroke: #9ba8b8;
+  --canvas-entry-stroke: #7fc48a;
+  --canvas-decision-stroke: #d9b96a;
+  --canvas-expand-stroke: #b48ad9;
+  --canvas-ghost: rgba(155, 168, 184, 0.45);
+  --canvas-edge: #8fa1b3;
+  --canvas-edge-label: #b9c2cc;
+  --canvas-edge-label-bg: #20242b;
+  --canvas-error: #d97a7a;
+  --canvas-updates: #7fc48a;
+  --canvas-select: #6aa9e9;
+  --canvas-marquee-fill: rgba(106, 169, 233, 0.08);
+  --canvas-port-fill: #1b1e24;
+}
+
+/* Ink on white paper: the canvas is pure #fff and the default node borders, arrows and text
+   are near-black, so the rough.js strokes read as pen rather than as tinted UI. The trait
+   colours are therefore free to stay light and saturated — they are accents on a black-and-
+   white drawing, not the drawing itself.
+
+   The chrome follows VS Code's modern light surfaces: the cool near-white #fafafd for
+   sidebar, topbar and overlays, separated from the white canvas by a visible hairline rather
+   than by a difference in tone. */
+:root[data-theme="graf-light"] {
+  --color-scheme: light;
+  --bg: #ffffff;
+  --panel: #fafafd;
+  --panel-border: #e5e5ea;
+  --ink: #1f1f1f;
+  --muted: #52525b;
+  --accent: #005fb8;
+  --danger: #cd3131;
+  --success: #2f8a3f;
+  --disabled: #bcbcc4;
+  --row-hover: #f0f0f4;
+  --row-active: #e4e6f1;
+  --field-bg: #ffffff;
+  --title-editor-bg: #ffffff;
+  --scrim: rgba(0, 0, 0, 0.3);
+  --shadow-floating: 0 8px 28px rgba(0, 0, 0, 0.12);
+  --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.18);
+
+  --canvas-grid: rgba(31, 31, 31, 0.06);
+  --canvas-ink: #1f1f1f;
+  --canvas-muted: rgba(31, 31, 31, 0.74);
+  --canvas-node-fill: #ffffff;
+  --canvas-node-stroke: #1f1f1f;
+  --canvas-entry-stroke: #47b374;
+  --canvas-decision-stroke: #ddaa25;
+  --canvas-expand-stroke: #9a6ee0;
+  --canvas-ghost: rgba(31, 31, 31, 0.32);
+  --canvas-edge: #1f1f1f;
+  --canvas-edge-label: #3f3f47;
+  --canvas-edge-label-bg: #ffffff;
+  --canvas-error: #cd3131;
+  --canvas-updates: #47b374;
+  --canvas-select: #005fb8;
+  --canvas-marquee-fill: rgba(0, 95, 184, 0.1);
+  --canvas-port-fill: #ffffff;
+}

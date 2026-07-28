@@ -16,6 +16,8 @@ import {
   type Rect,
 } from '../shared/flow-format.js';
 import type { EdgeGeometry, FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
+// A live object refilled in place on every theme change, never reassigned.
+import { canvasPalette } from './theme.js';
 import {
   cameraLinkFittingModelIntoRect,
   cameraLinkFromInlineModel,
@@ -28,6 +30,8 @@ import {
   type ViewportSize,
 } from './camera-transition.js';
 import {
+  inverseTransformPoint,
+  inverseTransformRect,
   transformPoint,
   transformRect,
   type ExpansionLayer,
@@ -104,9 +108,21 @@ type SceneTransition =
       resolve: () => void;
     };
 
+// Where an edge released on empty canvas should put the node it creates. Only edges leaving
+// a node inside an unfolded frame need one: at the top level the drop point is already in
+// the owning graph's coordinates.
+export type EmptyEdgeDrop =
+  // Inside the same frame the edge left from: an ordinary edge within that subgraph.
+  | { kind: 'inner'; host: FlowNode; point: Point }
+  // One level out, in the graph that owns the frame: an `{Inner Source}` edge on the host.
+  | { kind: 'outer'; host: FlowNode; innerName: string; point: Point };
+
+// Rects and points reaching these callbacks are expressed in the coordinate space of the
+// graph that will own the new node — world space at the top level, frame-local space
+// whenever a frame host comes with them.
 export interface CanvasActions {
-  createNode(rect: Rect): void;
-  quickCreateNode(worldPoint: Point): void;
+  createNode(rect: Rect, frameHost: FlowNode | null): void;
+  quickCreateNode(point: Point, frameHost: FlowNode | null): void;
   nodeClicked(node: FlowNode): void;
   canvasClicked(): void;
   moveCommitted(nodes: FlowNode[]): void;
@@ -119,6 +135,7 @@ export interface CanvasActions {
       ghostTarget: GhostNode | null;
       innerName?: string;
       outerSource?: { host: FlowNode; innerName: string };
+      emptyDrop?: EmptyEdgeDrop;
     },
   ): void;
   editEdge(edge: ModelEdge): void;
@@ -153,25 +170,6 @@ export type ContextTarget =
 
 export const HAND_FONT = '"Segoe Print", "Comic Sans MS", cursive';
 
-const COLORS = {
-  grid: 'rgba(232, 226, 213, 0.07)',
-  ink: '#e8e2d5',
-  muted: 'rgba(232, 226, 213, 0.55)',
-  nodeFill: 'rgba(36, 40, 48, 0.94)',
-  nodeStroke: '#9ba8b8',
-  entryStroke: '#7fc48a',
-  decisionStroke: '#d9b96a',
-  expandStroke: '#b48ad9',
-  ghost: 'rgba(155, 168, 184, 0.45)',
-  edge: '#8fa1b3',
-  edgeLabel: '#b9c2cc',
-  edgeLabelBg: '#20242b',
-  error: '#d97a7a',
-  updates: '#7fc48a',
-  select: '#6aa9e9',
-  marqueeFill: 'rgba(106, 169, 233, 0.08)',
-};
-
 const MIN_SCALE = 0.12;
 const MAX_SCALE = 3;
 const MAX_FIT_SCALE = 1.4;
@@ -179,6 +177,9 @@ const ZOOM_STEP_FACTOR = 1.1;
 const MIN_NODE_WIDTH = 120;
 const MIN_NODE_HEIGHT = 64;
 const DRAG_THRESHOLD_PX = 4;
+// Below this the drawn rectangle reads as a stray click rather than a deliberate node.
+const CREATE_MIN_SCREEN_WIDTH = 14;
+const CREATE_MIN_SCREEN_HEIGHT = 10;
 const SNAP = 8;
 const PORT_RADIUS = 5;
 const PORT_HIT_RADIUS = 11;
@@ -402,6 +403,7 @@ export class CanvasView {
       traits: new Map(),
       sourceDoc: { leading: [], preamble: null, items: [] },
       sourcePath: null,
+      sourceScope: null,
     };
 
     this.bindEvents();
@@ -485,6 +487,20 @@ export class CanvasView {
   private layoutDisplayGeometry(model: FlowModel): void {
     this.expansionLayer?.layout(model, performance.now());
     this.expansionLayer?.collectLoci(model);
+  }
+
+  // Brings frame geometry and loci up to date without waiting for the next animation frame,
+  // so a node just added inside a frame can be measured and edited immediately.
+  refreshDisplayGeometry(): void {
+    this.layoutDisplayGeometry(this.model);
+  }
+
+  // Which graph a point on the canvas belongs to, and the point in that graph's own
+  // coordinates: the innermost unfolded frame containing it, or the top-level graph.
+  creationTargetAt(world: Point): { frameHost: FlowNode | null; point: Point } {
+    const frame = this.expansionLayer?.frameAt(world) ?? null;
+    if (!frame) return { frameHost: null, point: world };
+    return { frameHost: frame.host, point: inverseTransformPoint(world, frame.transform) };
   }
 
   private rectOf(model: FlowModel, node: FlowNode): Rect {
@@ -800,8 +816,9 @@ export class CanvasView {
       return;
     }
 
+    const wantsCreate = this.tool === 'node' && !event.shiftKey;
     const node = this.hitNode(world);
-    if (node) {
+    if (node && !(wantsCreate && this.isFrameBackground(node, world))) {
       if (event.shiftKey && this.selection.has(node)) {
         this.selection.delete(node);
         this.requestRender();
@@ -849,7 +866,6 @@ export class CanvasView {
       this.selectedEdge = null;
       this.actions.canvasClicked();
     }
-    const wantsCreate = this.tool === 'node' && !event.shiftKey;
     this.gesture = wantsCreate
       ? { type: 'create', startWorld: world, startScreen: screen, rect: null }
       : { type: 'marquee', startWorld: world, rect: null };
@@ -953,19 +969,37 @@ export class CanvasView {
         ghostTarget: this.expansionLayer?.isEmbedded(gesture.from) ? null : this.hitGhost(world),
         innerName: drop.innerDrop?.innerName,
         outerSource: drop.outerDrop ?? undefined,
+        emptyDrop: this.emptyEdgeDropFor(gesture.from, rawTarget, drop.targetNode, world) ?? undefined,
       });
     } else if (gesture.type === 'create') {
-      const bigEnoughOnScreen =
-        gesture.rect != null &&
-        gesture.rect.w * this.view.scale > 14 &&
-        gesture.rect.h * this.view.scale > 10;
-      if (bigEnoughOnScreen) {
-        this.actions.createNode(this.snapCreateRect(gesture.rect!));
-      }
+      this.completeCreateGesture(gesture, world);
     } else if (gesture.type === 'marquee' && gesture.rect) {
       this.selectNodesInMarquee(gesture.rect);
     }
     this.requestRender();
+  }
+
+  // An unfolded frame answers hit-tests over its whole interior, so its empty space reads as
+  // a press on the host. With the node tool that space is the subgraph's drawing surface
+  // instead — otherwise a frame could never be drawn into, only dragged around.
+  private isFrameBackground(node: FlowNode, world: Point): boolean {
+    return this.expansionLayer?.frameAt(world)?.host === node;
+  }
+
+  // A drawn rectangle belongs to the graph its drag started in. Crossing a frame boundary
+  // makes the intended graph ambiguous — and would silently create a node whose drawn size
+  // means something else in the graph it lands in — so such a drag creates nothing.
+  private completeCreateGesture(gesture: Extract<Gesture, { type: 'create' }>, world: Point): void {
+    if (!gesture.rect || !this.isBigEnoughToCreate(gesture.rect)) return;
+    const startFrame = this.expansionLayer?.frameAt(gesture.startWorld) ?? null;
+    const endFrame = this.expansionLayer?.frameAt(world) ?? null;
+    if ((startFrame?.host ?? null) !== (endFrame?.host ?? null)) return;
+    const rect = startFrame ? inverseTransformRect(gesture.rect, startFrame.transform) : gesture.rect;
+    this.actions.createNode(this.snapCreateRect(rect), startFrame?.host ?? null);
+  }
+
+  private isBigEnoughToCreate(rect: Rect): boolean {
+    return rect.w * this.view.scale > CREATE_MIN_SCREEN_WIDTH && rect.h * this.view.scale > CREATE_MIN_SCREEN_HEIGHT;
   }
 
   private inSameModel(nodeA: FlowNode | null, nodeB: FlowNode | null): boolean {
@@ -1017,6 +1051,37 @@ export class CanvasView {
       innerDrop: { host, innerName: rawTarget.name },
       outerDrop: null,
     };
+  }
+
+  // A frame's empty interior hit-tests as its host, so "released on empty canvas" means no
+  // node under the cursor *or* only the frame the cursor is drawing inside. Releasing on a
+  // node the edge cannot legally reach stays a no-op rather than creating one beneath it.
+  private emptyEdgeDropFor(
+    from: FlowNode,
+    rawTarget: FlowNode | null,
+    resolvedTarget: FlowNode | null,
+    world: Point,
+  ): EmptyEdgeDrop | null {
+    if (resolvedTarget) return null;
+    if (rawTarget && !this.isFrameBackground(rawTarget, world)) return null;
+    return this.resolveEmptyEdgeDrop(from, world);
+  }
+
+  // An edge released on empty canvas from inside an unfolded frame. Landing in the frame it
+  // left creates a sibling in that subgraph; landing in the graph that owns the frame creates
+  // a node there, joined to the subgraph by an `{Inner Source}` edge on the host (§5.8).
+  // Anything further out has no single-level form to express, so it creates nothing.
+  private resolveEmptyEdgeDrop(from: FlowNode, world: Point): EmptyEdgeDrop | null {
+    const host = this.expansionLayer?.hostOf(from) ?? null;
+    if (!host) return null;
+    const dropFrame = this.expansionLayer?.frameAt(world) ?? null;
+    const dropHost = dropFrame?.host ?? null;
+    const point = dropFrame ? inverseTransformPoint(world, dropFrame.transform) : world;
+    if (dropHost === host) return { kind: 'inner', host, point };
+    if (dropHost === (this.expansionLayer?.hostOf(host) ?? null)) {
+      return { kind: 'outer', host, innerName: from.name, point };
+    }
+    return null;
   }
 
   // Marquee reaches into unfolded frames, but a node is skipped when one of its host
@@ -1081,7 +1146,8 @@ export class CanvasView {
       return;
     }
     if (this.hitNode(world) || this.hitGhost(world)) return;
-    this.actions.quickCreateNode(world);
+    const target = this.creationTargetAt(world);
+    this.actions.quickCreateNode(target.point, target.frameHost);
   }
 
   // Right-click classifies the target with the same hit chain as onPointerDown and hands it to
@@ -1395,7 +1461,7 @@ export class CanvasView {
     const spacing = 32 * view.scale;
     if (spacing < 9) return;
     const bounds = this.viewport;
-    ctx.fillStyle = COLORS.grid;
+    ctx.fillStyle = canvasPalette.grid;
     const offsetX = ((view.x % spacing) + spacing) % spacing;
     const offsetY = ((view.y % spacing) + spacing) % spacing;
     for (let gridX = offsetX; gridX < bounds.width; gridX += spacing) {
@@ -1473,8 +1539,8 @@ export class CanvasView {
   }
 
   private edgeColor(edge: ModelEdge): string {
-    if (edge === this.selectedEdge) return COLORS.select;
-    return edge.kind === 'error' ? COLORS.error : COLORS.edge;
+    if (edge === this.selectedEdge) return canvasPalette.select;
+    return edge.kind === 'error' ? canvasPalette.error : canvasPalette.edge;
   }
 
   private drawEdge(edge: ModelEdge): void {
@@ -1530,10 +1596,10 @@ export class CanvasView {
       w: ctx.measureText(text).width + paddingX * 2,
       h: 21,
     };
-    ctx.fillStyle = COLORS.edgeLabelBg;
+    ctx.fillStyle = canvasPalette.edgeLabelBg;
     this.roundedRect(rect, 7);
     ctx.fill();
-    ctx.fillStyle = isError ? COLORS.error : COLORS.edgeLabel;
+    ctx.fillStyle = isError ? canvasPalette.error : canvasPalette.edgeLabel;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, anchor.x, anchor.y + 1);
@@ -1560,16 +1626,16 @@ export class CanvasView {
       w: Math.max(...lineWidths) + paddingX * 2,
       h: fields.length * EDGE_DATA_LINE_HEIGHT + paddingY * 2,
     };
-    ctx.fillStyle = COLORS.edgeLabelBg;
+    ctx.fillStyle = canvasPalette.edgeLabelBg;
     this.roundedRect(rect, 6);
     ctx.fill();
 
     fields.forEach((field, index) => {
       const lineLeft = centerX - lineWidths[index] / 2;
       const lineMiddle = top + index * EDGE_DATA_LINE_HEIGHT + EDGE_DATA_LINE_HEIGHT / 2;
-      ctx.fillStyle = COLORS.edgeLabel;
+      ctx.fillStyle = canvasPalette.edgeLabel;
       ctx.fillText(keyTexts[index], lineLeft, lineMiddle);
-      ctx.fillStyle = COLORS.muted;
+      ctx.fillStyle = canvasPalette.muted;
       ctx.fillText(field.type, lineLeft + ctx.measureText(`${keyTexts[index]} `).width, lineMiddle);
     });
     return rect;
@@ -1598,10 +1664,10 @@ export class CanvasView {
   }
 
   private nodeStrokeColor(traits: NodeTraits | undefined): string {
-    if (traits?.expand) return COLORS.expandStroke;
-    if (traits?.decision) return COLORS.decisionStroke;
-    if (traits?.entry) return COLORS.entryStroke;
-    return COLORS.nodeStroke;
+    if (traits?.expand) return canvasPalette.expandStroke;
+    if (traits?.decision) return canvasPalette.decisionStroke;
+    if (traits?.entry) return canvasPalette.entryStroke;
+    return canvasPalette.nodeStroke;
   }
 
   private drawNode(model: FlowModel, node: FlowNode): void {
@@ -1621,7 +1687,7 @@ export class CanvasView {
       bowing: 0.7,
       stroke,
       strokeWidth: 1.6,
-      fill: COLORS.nodeFill,
+      fill: canvasPalette.nodeFill,
       fillStyle: 'solid',
     });
 
@@ -1638,15 +1704,15 @@ export class CanvasView {
       seed: seedFrom(node.id ?? node.name),
       roughness: 1.1,
       bowing: 0.5,
-      stroke: COLORS.expandStroke,
+      stroke: canvasPalette.expandStroke,
       strokeWidth: 1.6,
-      fill: COLORS.nodeFill,
+      fill: canvasPalette.nodeFill,
       fillStyle: 'solid',
     });
 
     if (!this.titleIsHidden(node)) {
       ctx.font = `600 ${FRAME_TITLE_FONT_PX}px ${HAND_FONT}`;
-      ctx.fillStyle = COLORS.expandStroke;
+      ctx.fillStyle = canvasPalette.expandStroke;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText(node.name, frame.x + FRAME_TITLE_LEFT, frame.y + FRAME_TITLE_MIDDLE_Y, frame.w - FRAME_TITLE_RIGHT_INSET);
@@ -1670,7 +1736,7 @@ export class CanvasView {
   private drawEmptySubgraphHint(): void {
     const { ctx } = this;
     ctx.font = `13px ${HAND_FONT}`;
-    ctx.fillStyle = COLORS.muted;
+    ctx.fillStyle = canvasPalette.muted;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('empty subgraph', 160, 90);
@@ -1716,7 +1782,7 @@ export class CanvasView {
     let lineY = layout.firstLineMiddleY;
     if (!this.titleIsHidden(node)) {
       ctx.font = `600 ${TITLE_FONT_PX}px ${HAND_FONT}`;
-      ctx.fillStyle = COLORS.ink;
+      ctx.fillStyle = canvasPalette.ink;
       for (const line of layout.titleLines) {
         ctx.fillText(line, centerX, lineY, layout.maxWidth);
         lineY += TITLE_LINE_HEIGHT;
@@ -1728,7 +1794,7 @@ export class CanvasView {
     if (layout.descriptionLines.length) {
       lineY += DESCRIPTION_FIRST_LINE_NUDGE;
       ctx.font = `${DESCRIPTION_FONT_PX}px ${HAND_FONT}`;
-      ctx.fillStyle = COLORS.muted;
+      ctx.fillStyle = canvasPalette.muted;
       for (const line of layout.descriptionLines) {
         ctx.fillText(line, centerX, lineY, layout.maxWidth);
         lineY += DESCRIPTION_LINE_HEIGHT;
@@ -1753,7 +1819,7 @@ export class CanvasView {
       rect: locus ? transformRect(band, locus.transform) : band,
       fontPx: expansion ? FRAME_TITLE_FONT_PX : TITLE_FONT_PX,
       align: expansion ? 'left' : 'center',
-      color: expansion ? COLORS.expandStroke : COLORS.ink,
+      color: expansion ? canvasPalette.expandStroke : canvasPalette.ink,
       screenScale: this.view.scale * (this.expansionLayer?.scaleOf(node) ?? 1),
     };
   }
@@ -1823,19 +1889,19 @@ export class CanvasView {
 
     if (traits?.entry) {
       ctx.font = `11px ${HAND_FONT}`;
-      ctx.fillStyle = COLORS.entryStroke;
+      ctx.fillStyle = canvasPalette.entryStroke;
       ctx.textAlign = 'left';
       ctx.fillText('▶', x + 8, y + 14);
     }
     if (traits?.hasErrorHandler) {
       ctx.font = `12px ${HAND_FONT}`;
-      ctx.fillStyle = COLORS.error;
+      ctx.fillStyle = canvasPalette.error;
       ctx.textAlign = 'right';
       ctx.fillText('⚠', x + w - 8, y + h - 12);
     }
     if (traits?.updates.length) {
       ctx.font = `10.5px ${HAND_FONT}`;
-      ctx.fillStyle = COLORS.updates;
+      ctx.fillStyle = canvasPalette.updates;
       ctx.textAlign = 'left';
       ctx.fillText(`↺ ${traits.updates.join(', ')}`, x + 8, y + h - 12, w - 30);
     }
@@ -1846,12 +1912,12 @@ export class CanvasView {
     for (const badge of this.nodeBadges(model, node)) {
       this.rough.circle(badge.x, badge.y, 20, {
         seed: seedFrom(`${node.id}-${badge.kind}`),
-        stroke: COLORS.expandStroke,
+        stroke: canvasPalette.expandStroke,
         strokeWidth: 1.3,
         roughness: 0.9,
       });
       ctx.font = `12px ${HAND_FONT}`;
-      ctx.fillStyle = COLORS.expandStroke;
+      ctx.fillStyle = canvasPalette.expandStroke;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(BADGE_SYMBOLS[badge.kind], badge.x, badge.y + 1);
@@ -1862,7 +1928,7 @@ export class CanvasView {
     const { ctx } = this;
     const { x, y, w, h } = ghost.pos;
     ctx.save();
-    ctx.strokeStyle = COLORS.ghost;
+    ctx.strokeStyle = canvasPalette.ghost;
     ctx.setLineDash([6, 6]);
     ctx.lineWidth = 1.3;
     ctx.strokeRect(x, y, w, h);
@@ -1870,7 +1936,7 @@ export class CanvasView {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = `600 14px ${HAND_FONT}`;
-    ctx.fillStyle = COLORS.ghost;
+    ctx.fillStyle = canvasPalette.ghost;
     ctx.fillText(ghost.name, x + w / 2, y + h / 2 - 8, w - 20);
     if (clickable) {
       ctx.font = `10.5px ${HAND_FONT}`;
@@ -1882,7 +1948,7 @@ export class CanvasView {
     const { ctx } = this;
     const inflate = 5;
     ctx.save();
-    ctx.strokeStyle = COLORS.select;
+    ctx.strokeStyle = canvasPalette.select;
     ctx.lineWidth = 1.4 / this.view.scale;
     ctx.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
     for (const node of this.selection) {
@@ -1897,7 +1963,7 @@ export class CanvasView {
       if (!this.isNodeVisible(node)) return;
       const handleSize = 8 / this.view.scale;
       const { x, y, w, h } = this.rect(node);
-      ctx.fillStyle = COLORS.select;
+      ctx.fillStyle = canvasPalette.select;
       for (const corner of [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]) {
         ctx.fillRect(corner[0] - handleSize / 2, corner[1] - handleSize / 2, handleSize, handleSize);
       }
@@ -1915,9 +1981,9 @@ export class CanvasView {
       for (const port of this.portPositions(node)) {
         ctx.beginPath();
         ctx.arc(port.x, port.y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = '#1b1e24';
+        ctx.fillStyle = canvasPalette.portFill;
         ctx.fill();
-        ctx.strokeStyle = COLORS.select;
+        ctx.strokeStyle = canvasPalette.select;
         ctx.lineWidth = 1.4 / this.view.scale;
         ctx.stroke();
       }
@@ -1931,15 +1997,15 @@ export class CanvasView {
 
     if (gesture.type === 'create' && gesture.rect) {
       ctx.save();
-      ctx.strokeStyle = COLORS.select;
+      ctx.strokeStyle = canvasPalette.select;
       ctx.setLineDash([7 / this.view.scale, 5 / this.view.scale]);
       ctx.lineWidth = 1.4 / this.view.scale;
       ctx.strokeRect(gesture.rect.x, gesture.rect.y, gesture.rect.w, gesture.rect.h);
       ctx.restore();
     } else if (gesture.type === 'marquee' && gesture.rect) {
-      ctx.fillStyle = COLORS.marqueeFill;
+      ctx.fillStyle = canvasPalette.marqueeFill;
       ctx.fillRect(gesture.rect.x, gesture.rect.y, gesture.rect.w, gesture.rect.h);
-      ctx.strokeStyle = COLORS.select;
+      ctx.strokeStyle = canvasPalette.select;
       ctx.lineWidth = 1 / this.view.scale;
       ctx.strokeRect(gesture.rect.x, gesture.rect.y, gesture.rect.w, gesture.rect.h);
     } else if (gesture.type === 'edge') {
@@ -1948,7 +2014,7 @@ export class CanvasView {
         ? rectBorderPointToward(this.rect(gesture.hoverTarget), rectCenter(this.rect(gesture.from)))
         : gesture.toWorld;
       ctx.save();
-      ctx.strokeStyle = COLORS.select;
+      ctx.strokeStyle = canvasPalette.select;
       ctx.setLineDash([7 / this.view.scale, 5 / this.view.scale]);
       ctx.lineWidth = 1.6 / this.view.scale;
       ctx.beginPath();
@@ -1956,10 +2022,10 @@ export class CanvasView {
       ctx.lineTo(end.x, end.y);
       ctx.stroke();
       ctx.restore();
-      this.drawArrowhead(start, end, COLORS.select);
+      this.drawArrowhead(start, end, canvasPalette.select);
       if (gesture.hoverTarget) {
         const { x, y, w, h } = this.rect(gesture.hoverTarget);
-        ctx.strokeStyle = COLORS.select;
+        ctx.strokeStyle = canvasPalette.select;
         ctx.lineWidth = 2 / this.view.scale;
         ctx.strokeRect(x - 3, y - 3, w + 6, h + 6);
       }

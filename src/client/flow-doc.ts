@@ -84,6 +84,9 @@ export interface FlowModel {
   traits: Map<FlowNode, NodeTraits>;
   sourceDoc: FlowDocument;
   sourcePath: string | null;
+  // The `graph:` block this model was built from, or null for a document body. Together with
+  // sourceDoc it names the item list new nodes drawn into this model must be appended to.
+  sourceScope: string | null;
   display?: DisplayGeometry;
   embedded?: boolean;
 }
@@ -121,6 +124,17 @@ export function scopeItems(doc: FlowDocument, scopeName: string | null): FlowIte
   if (!scopeName) return doc.items;
   const graph = doc.items.find((item): item is GraphItem => item.kind === 'graph' && item.name === scopeName);
   return graph ? graph.items : doc.items;
+}
+
+// Like scopeItems, but materializes a `graph:` block that has been referenced by an `expand`
+// without ever being written, so a subgraph can receive its first node.
+export function ensureScopeItems(doc: FlowDocument, scopeName: string | null): FlowItem[] {
+  if (!scopeName) return doc.items;
+  const existing = doc.items.find((item): item is GraphItem => item.kind === 'graph' && item.name === scopeName);
+  if (existing) return existing.items;
+  const block: GraphItem = { kind: 'graph', name: scopeName, items: [] };
+  doc.items.push(block);
+  return block.items;
 }
 
 export function nodesIn(items: FlowItem[]): FlowNode[] {
@@ -167,7 +181,7 @@ export function buildModel(doc: FlowDocument, scopeName: string | null): FlowMod
 
   const ghosts = resolveEdgeTargets(edges, nodesByName);
   const traits = inferTraits(nodes, edges);
-  return { nodes, edges, ghosts, nodesByName, traits, sourceDoc: doc, sourcePath: null };
+  return { nodes, edges, ghosts, nodesByName, traits, sourceDoc: doc, sourcePath: null, sourceScope: scopeName };
 }
 
 function resolveEdgeTargets(edges: ModelEdge[], nodesByName: Map<string, FlowNode>): GhostNode[] {

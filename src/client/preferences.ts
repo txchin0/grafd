@@ -6,14 +6,16 @@
 export const PREFERENCES_STORAGE_KEY = 'graf.preferences';
 
 import { EDITOR_LINK_SCHEMES, type EditorLinkScheme } from './reference-link.js';
+import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from './theme.js';
 
 export interface Preferences {
   showCanvasGrid: boolean;
   editorLinkScheme: EditorLinkScheme;
+  theme: ThemeId;
 }
 
 export function defaultPreferences(): Preferences {
-  return { showCanvasGrid: true, editorLinkScheme: 'vscode' };
+  return { showCanvasGrid: true, editorLinkScheme: 'vscode', theme: DEFAULT_THEME_ID };
 }
 
 // Tolerant of hand-edited or older stored values: anything missing or of the wrong type
@@ -34,6 +36,7 @@ export function parsePreferences(text: string | null | undefined): Preferences {
     editorLinkScheme: isEditorLinkScheme(record.editorLinkScheme)
       ? record.editorLinkScheme
       : defaults.editorLinkScheme,
+    theme: isThemeId(record.theme) ? record.theme : defaults.theme,
   };
 }
 

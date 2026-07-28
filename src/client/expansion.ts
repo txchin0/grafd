@@ -43,6 +43,19 @@ export function transformRect(rect: Rect, transform: FrameTransform): Rect {
   };
 }
 
+export function inverseTransformPoint(point: Point, transform: FrameTransform): Point {
+  return { x: (point.x - transform.tx) / transform.scale, y: (point.y - transform.ty) / transform.scale };
+}
+
+export function inverseTransformRect(rect: Rect, transform: FrameTransform): Rect {
+  return {
+    x: (rect.x - transform.tx) / transform.scale,
+    y: (rect.y - transform.ty) / transform.scale,
+    w: rect.w / transform.scale,
+    h: rect.h / transform.scale,
+  };
+}
+
 // Applying `inner` then `outer`: the transform that maps the inner space straight to
 // whatever space `outer` lands in.
 export function composeTransforms(outer: FrameTransform, inner: FrameTransform): FrameTransform {
@@ -76,6 +89,15 @@ export interface NodeLocus {
   model: FlowModel;
   transform: FrameTransform;
   host: FlowNode | null;
+}
+
+// An unfolded frame as a place things can be created in: the subgraph it shows, the
+// world-space region that means "inside this subgraph", and the transform between the two.
+export interface FrameTarget {
+  host: FlowNode;
+  model: FlowModel;
+  transform: FrameTransform;
+  interior: Rect;
 }
 
 export interface DocumentOwner {
@@ -121,6 +143,10 @@ function rectCenter(rect: Rect): Point {
   return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
 }
 
+function containsPoint(rect: Rect, point: Point): boolean {
+  return point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h;
+}
+
 // Half-extent of an axis-aligned rect along a unit direction (its support function), used
 // to measure clearance between rects without treating them as circles.
 function halfExtentAlong(rect: Rect, direction: Point): number {
@@ -134,6 +160,8 @@ export class ExpansionLayer {
   private readonly onNeedsRender: () => void;
   private readonly readExternalFile: (path: string) => Promise<string | null>;
   private topModel: FlowModel | null = null;
+  // Parents precede their children, so a reverse scan finds the innermost frame first.
+  private frames: FrameTarget[] = [];
   locus: Map<FlowNode, NodeLocus> | null = null;
 
   constructor({
@@ -155,6 +183,7 @@ export class ExpansionLayer {
     this.externalDocs.clear();
     this.topModel = null;
     this.locus = null;
+    this.frames = [];
   }
 
   isOpen(nodeId: string | null): boolean {
@@ -190,6 +219,7 @@ export class ExpansionLayer {
   collectLoci(topModel: FlowModel): void {
     this.topModel = topModel;
     this.locus = new Map();
+    this.frames = [];
     this.addLoci(topModel, { scale: 1, tx: 0, ty: 0 }, null);
   }
 
@@ -197,8 +227,28 @@ export class ExpansionLayer {
     for (const node of model.nodes) this.locus!.set(node, { model, transform, host });
     if (!model.display) return;
     for (const [frameHost, expansion] of model.display.expansions) {
-      this.addLoci(expansion.subModel, composeTransforms(transform, expansion.transform), frameHost);
+      const frameTransform = composeTransforms(transform, expansion.transform);
+      this.frames.push({
+        host: frameHost,
+        model: expansion.subModel,
+        transform: frameTransform,
+        interior: transformRect(expansion.inner, transform),
+      });
+      this.addLoci(expansion.subModel, frameTransform, frameHost);
     }
+  }
+
+  // The subgraph a world point falls in, innermost first, or null for the top-level graph.
+  frameAt(world: Point): FrameTarget | null {
+    for (let index = this.frames.length - 1; index >= 0; index -= 1) {
+      const frame = this.frames[index];
+      if (containsPoint(frame.interior, world)) return frame;
+    }
+    return null;
+  }
+
+  frameFor(host: FlowNode): FrameTarget | null {
+    return this.frames.find((frame) => frame.host === host) ?? null;
   }
 
   locusOf(node: FlowNode): NodeLocus | null {
@@ -473,7 +523,7 @@ export class ExpansionLayer {
     const link = parseExpandLink(expandValue);
     if (!link) {
       if (!FlowDoc.graphBlockNames(model.sourceDoc).includes(expandValue)) {
-        return withSource(emptyModel(model.sourceDoc), model.sourceDoc, model.sourcePath);
+        return withSource(emptyModel(model.sourceDoc, expandValue), model.sourceDoc, model.sourcePath);
       }
       return withSource(FlowDoc.buildModel(model.sourceDoc, expandValue), model.sourceDoc, model.sourcePath);
     }
@@ -520,7 +570,7 @@ function withSource(model: FlowModel, doc: FlowDocument, path: string | null): F
   return model;
 }
 
-function emptyModel(doc: FlowDocument): FlowModel {
+function emptyModel(doc: FlowDocument, scopeName: string | null): FlowModel {
   return {
     nodes: [],
     edges: [],
@@ -529,6 +579,7 @@ function emptyModel(doc: FlowDocument): FlowModel {
     traits: new Map(),
     sourceDoc: doc,
     sourcePath: null,
+    sourceScope: scopeName,
   };
 }
 

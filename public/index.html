@@ -6,7 +6,21 @@
   <title>Graf — .flow canvas</title>
   <link rel="icon" href="data:," />
   <link rel="preload" href="fonts/HankenGrotesk-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="themes.css" />
   <link rel="stylesheet" href="style.css" />
+  <!-- Selects the stored theme before first paint. main.js applies the theme too, but module
+       scripts are deferred, so leaving it to them flashes the default theme first. The stored
+       id is used unvalidated: an unknown one matches no block in themes.css and therefore
+       renders the default anyway, and main.js re-applies the validated value on boot. The
+       storage key mirrors PREFERENCES_STORAGE_KEY in src/client/preferences.ts. -->
+  <script>
+    try {
+      const storedTheme = JSON.parse(localStorage.getItem('graf.preferences') || '{}').theme;
+      if (typeof storedTheme === 'string') document.documentElement.dataset.theme = storedTheme;
+    } catch (error) {
+      console.error('Could not read the stored theme', error);
+    }
+  </script>
 </head>
 <body>
   <div id="app">
@@ -165,6 +179,9 @@
         <h2>Preferences</h2>
         <div id="preferences-options">
           <label class="check-row"><input type="checkbox" id="pref-canvas-grid" /> Show canvas grid</label>
+          <label>Theme
+            <select id="pref-theme"></select>
+          </label>
           <label>Open file references in
             <select id="pref-editor-link">
               <option value="vscode">VS Code</option>

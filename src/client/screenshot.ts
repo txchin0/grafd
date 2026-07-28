@@ -9,6 +9,7 @@
 import type { CanvasView, ViewportSize } from './canvas-view.js';
 import { downloadBlob } from './download.js';
 import { createModal, type Modal } from './modal.js';
+import { pageBackgroundColor } from './theme.js';
 
 export const SCALE_PRESETS = [1, 2, 3, 4];
 
@@ -20,12 +21,6 @@ export const MAX_SNAPSHOT_PIXELS = 40_000_000;
 const PREVIEW_BOX: ViewportSize = { width: 560, height: 340 };
 const MIN_PREVIEW_SUPERSAMPLE = 3;
 const DEFAULT_SCALE = 2;
-
-// The canvas itself is transparent — the background a viewer sees is the page's, so the
-// stylesheet stays the single source of truth for it.
-function pageBackgroundColor(): string {
-  return getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#17191d';
-}
 
 export interface SnapshotPixelSize {
   width: number;
