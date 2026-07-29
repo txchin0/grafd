@@ -113,6 +113,14 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
     through here or the overlay drifts off the ink.
   - `node-badges.ts` — where the expand/collapse affordances sit and what they show. The
     contract between painting and hit-testing, so neither owns it.
+  - `wheel-intent.ts` — whether a wheel event means zoom or pan. A touchpad two-finger swipe
+    and a mouse-wheel notch arrive as the same event, so the device is inferred from the delta
+    shape and latched for the rest of a streak; ctrl+wheel (what a touchpad pinch sends) is
+    always a smooth zoom. Owns `ZOOM_STEP_FACTOR`, the one discrete zoom step.
+  - `pinch-gesture.ts` — the camera during a two-finger gesture. Pan and zoom fall out of one
+    calculation: the world point under the fingers' midpoint when they landed is held under
+    their current midpoint. Scale limits are passed in, so the view stays the only place that
+    decides how far it may zoom.
 - `src/client/canvas/edge-path.ts` — the shape of a drawn edge. `EdgeGeometry` carries the points the
   spline passes through plus that spline flattened to a polyline, and every consumer (hit
   testing, label anchor, edit-popup anchor, arrowhead tangent) measures against the polyline

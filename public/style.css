@@ -35,6 +35,9 @@
 html, body {
   margin: 0;
   height: 100%;
+  /* The canvas pans on horizontal wheel deltas, which would otherwise reach the browser as
+     back-navigation, and on touch, which would otherwise pull to refresh. */
+  overscroll-behavior: none;
   color-scheme: var(--color-scheme);
   background: var(--bg);
   color: var(--ink);

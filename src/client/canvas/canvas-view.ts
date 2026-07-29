@@ -57,6 +57,13 @@ import {
   type ViewportSize,
 } from './camera-transition.js';
 import {
+  pinchCenter,
+  pinchDistance,
+  viewForPinch,
+  type PinchAnchor,
+} from './pinch-gesture.js';
+import { WheelIntentReader, ZOOM_STEP_FACTOR } from './wheel-intent.js';
+import {
   inverseTransformPoint,
   inverseTransformRect,
   transformPoint,
@@ -92,7 +99,8 @@ type Gesture =
       pressedBadge: BadgeHit | null;
     }
   | { type: 'create'; startWorld: Point; startScreen: Point; rect: Rect | null }
-  | { type: 'marquee'; startWorld: Point; rect: Rect | null };
+  | { type: 'marquee'; startWorld: Point; rect: Rect | null }
+  | { type: 'pinch'; pointers: [number, number]; start: PinchAnchor };
 
 interface HeldScene {
   model: FlowModel;
@@ -191,7 +199,6 @@ export type ContextTarget =
 const MIN_SCALE = 0.12;
 const MAX_SCALE = 3;
 const MAX_FIT_SCALE = 1.4;
-const ZOOM_STEP_FACTOR = 1.1;
 const MIN_NODE_WIDTH = 120;
 const MIN_NODE_HEIGHT = 64;
 const DRAG_THRESHOLD_PX = 4;
@@ -293,6 +300,14 @@ export class CanvasView {
   private sceneTransition: SceneTransition | null = null;
   private spaceDown = false;
   private renderQueued = false;
+  private readonly wheelIntents = new WheelIntentReader();
+
+  // Every pointer currently down, at its latest position on the canvas. A second entry turns
+  // whatever one finger had started into a pinch, so this is kept for mouse pointers too.
+  private activePointers = new Map<number, Point>();
+  // Fingers still resting on the glass after a pinch ended. They must not become a fresh drag
+  // or read as a tap, so they are ignored until the last one lifts.
+  private awaitingPointerRelease = false;
 
   // Where each edge currently sits on screen. Accumulated across a whole render — drawScene
   // recurses into every unfolded subgraph, and each level contributes its own edges — so this
@@ -327,6 +342,7 @@ export class CanvasView {
     this.canvas.addEventListener('pointerdown', (event) => this.onPointerDown(event));
     this.canvas.addEventListener('pointermove', (event) => this.onPointerMove(event));
     this.canvas.addEventListener('pointerup', (event) => this.onPointerUp(event));
+    this.canvas.addEventListener('pointercancel', (event) => this.onPointerCancel(event));
     this.canvas.addEventListener('pointerleave', () => {
       this.hoverNode = null;
       this.hoverPoint = null;
@@ -351,7 +367,9 @@ export class CanvasView {
     });
     window.addEventListener('blur', () => {
       this.spaceDown = false;
-      this.gesture = null;
+      this.abandonGesture();
+      this.activePointers.clear();
+      this.awaitingPointerRelease = false;
       this.requestRender();
     });
   }
@@ -482,6 +500,14 @@ export class CanvasView {
     this.view.x = screenPoint.x - (screenPoint.x - this.view.x) * appliedFactor;
     this.view.y = screenPoint.y - (screenPoint.y - this.view.y) * appliedFactor;
     this.view.scale = newScale;
+    this.requestRender();
+    this.actions.viewChanged?.();
+  }
+
+  // View offsets are already in screen pixels, so a wheel pan is a straight subtraction.
+  private panBy(dx: number, dy: number): void {
+    this.view.x -= dx;
+    this.view.y -= dy;
     this.requestRender();
     this.actions.viewChanged?.();
   }
@@ -716,8 +742,10 @@ export class CanvasView {
       this.finishSceneTransition();
       return;
     }
-    if (event.deltaY === 0) return;
-    this.stepZoom(event.deltaY < 0 ? 1 : -1, this.eventPoint(event));
+    if (event.deltaX === 0 && event.deltaY === 0) return;
+    const intent = this.wheelIntents.read(event, event.timeStamp);
+    if (intent.kind === 'pan') this.panBy(intent.dx, intent.dy);
+    else this.zoomAt(this.eventPoint(event), intent.factor);
   }
 
   private onPointerDown(event: PointerEvent): void {
@@ -728,6 +756,11 @@ export class CanvasView {
     const screen = this.eventPoint(event);
     const world = this.screenToWorld(screen);
     this.canvas.setPointerCapture(event.pointerId);
+    this.activePointers.set(event.pointerId, screen);
+    if (this.activePointers.size > 1) {
+      this.beginPinch();
+      return;
+    }
 
     const wantsPan = event.button === 1 || (event.button === 0 && this.spaceDown);
     if (wantsPan) {
@@ -812,8 +845,74 @@ export class CanvasView {
     this.requestRender();
   }
 
+  // A second pointer replaces the single-pointer gesture with a pinch. Nothing the abandoned
+  // gesture had begun may survive it: a move that already nudged its nodes is rolled back to
+  // the positions it recorded, and no gesture reaches its commit callbacks.
+  private beginPinch(): void {
+    this.abandonGesture();
+    const [first, second] = [...this.activePointers.keys()].slice(0, 2) as [number, number];
+    const firstPoint = this.activePointers.get(first)!;
+    const secondPoint = this.activePointers.get(second)!;
+    this.gesture = {
+      type: 'pinch',
+      pointers: [first, second],
+      start: {
+        view: { ...this.view },
+        center: pinchCenter(firstPoint, secondPoint),
+        distance: pinchDistance(firstPoint, secondPoint),
+      },
+    };
+    this.awaitingPointerRelease = false;
+    this.updateCursor();
+    this.requestRender();
+  }
+
+  private applyPinch(gesture: Extract<Gesture, { type: 'pinch' }>): void {
+    const [first, second] = gesture.pointers;
+    const firstPoint = this.activePointers.get(first);
+    const secondPoint = this.activePointers.get(second);
+    if (!firstPoint || !secondPoint) return;
+    this.setViewNow(viewForPinch(
+      gesture.start,
+      { center: pinchCenter(firstPoint, secondPoint), distance: pinchDistance(firstPoint, secondPoint) },
+      { min: MIN_SCALE, max: MAX_SCALE },
+    ));
+  }
+
+  private abandonGesture(): void {
+    const gesture = this.gesture;
+    this.gesture = null;
+    if (gesture?.type === 'move') {
+      for (const node of gesture.nodes) {
+        const start = gesture.startPositions.get(node);
+        if (start && node.pos) Object.assign(node.pos, start);
+      }
+    } else if (gesture?.type === 'resize') {
+      Object.assign(gesture.node.pos!, gesture.startRect);
+    }
+  }
+
+  // Whether this pointer belonged to a multi-touch interaction rather than to a gesture the
+  // single-pointer path started — the pinch itself, and every finger left over from it.
+  private releaseMultiTouch(): boolean {
+    const wasPinching = this.gesture?.type === 'pinch';
+    if (wasPinching) this.gesture = null;
+    if (!wasPinching && !this.awaitingPointerRelease) return false;
+    this.awaitingPointerRelease = this.activePointers.size > 0;
+    this.updateCursor();
+    this.requestRender();
+    return true;
+  }
+
   private onPointerMove(event: PointerEvent): void {
     const screen = this.eventPoint(event);
+    if (this.activePointers.has(event.pointerId)) this.activePointers.set(event.pointerId, screen);
+    if (this.gesture?.type === 'pinch') {
+      this.applyPinch(this.gesture);
+      return;
+    }
+    if (this.awaitingPointerRelease) return;
+
     const world = this.screenToWorld(screen);
     this.hoverPoint = world;
 
@@ -883,7 +982,18 @@ export class CanvasView {
     }
   }
 
+  private onPointerCancel(event: PointerEvent): void {
+    this.activePointers.delete(event.pointerId);
+    if (this.releaseMultiTouch()) return;
+    this.abandonGesture();
+    this.updateCursor();
+    this.requestRender();
+  }
+
   private onPointerUp(event: PointerEvent): void {
+    this.activePointers.delete(event.pointerId);
+    if (this.releaseMultiTouch()) return;
+
     const gesture = this.gesture;
     this.gesture = null;
     this.updateCursor();
