@@ -83,9 +83,15 @@ export interface FlowModel {
 // otherwise its authored `pos`. Nodes still awaiting auto-layout have neither and drop out.
 export function displayRects(model: FlowModel): Rect[] {
   return [
-    ...model.nodes.map((node) => model.display?.rects.get(node) ?? node.pos),
+    ...model.nodes.map((node) => displayRectOf(model, node)),
     ...model.ghosts.map((ghost) => ghost.pos),
   ].filter((rect): rect is Rect => rect != null);
+}
+
+// One node's rect in its own model's coordinates. Callers must prefer this over reading `pos`
+// directly, or an unfolded frame measures at its collapsed size.
+export function displayRectOf(model: FlowModel, node: FlowNode): Rect {
+  return model.display?.rects.get(node) ?? node.pos!;
 }
 
 export const DEFAULT_NODE_SIZE = { w: 200, h: 88 };

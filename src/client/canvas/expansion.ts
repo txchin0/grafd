@@ -11,6 +11,7 @@
 // committed positions never change.
 
 import {
+  descriptionForNode,
   getProp,
   parseExpandLink,
   parseFlow,
@@ -372,6 +373,12 @@ export class ExpansionLayer {
   expandDocumentFor(node: FlowNode, containingPath: string | null): FlowDocument | null {
     const path = resolvedExpandPath(getProp(node, 'expand'), containingPath);
     return path ? this.documentAt(path) : null;
+  }
+
+  // A node's description, which for an external expand lives in the target document's
+  // preamble rather than on the node — so resolving it needs the expand-document cache.
+  descriptionFor(node: FlowNode, containingPath: string | null): string | null {
+    return descriptionForNode(node, this.expandDocumentFor(node, containingPath)) || null;
   }
 
   adoptExternalText(path: string, text: string): void {

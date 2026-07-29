@@ -93,17 +93,34 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   direction. The pairing is derived from the current names on every call rather than stored —
   a block deliberately named something else is simply unpaired, and the format has nowhere to
   record editor state on a block anyway.
-- `src/client/canvas-view.ts` — rough.js rendering plus all pointer interaction (pan, zoom,
-  tool modes, drag-create, move, resize, port-drag edge creation, marquee select) and
-  camera animations for subgraph navigation.
-- `src/client/edge-path.ts` — the shape of a drawn edge. `EdgeGeometry` carries the points the
+- `src/client/geometry.ts` — pure point/rect math (centres, containment, unions, bounds,
+  interpolation) shared by every canvas module. No DOM, no AST. Owns the `Point` type.
+- `src/client/canvas/` — everything that draws or drives the canvas. The split inside it is by
+  what each part is allowed to know:
+  - `canvas-view.ts` — the interactive surface: camera, tool modes, hit-testing, pointer
+    gestures (drag-create, move, resize, port-drag edge creation, marquee), subgraph camera
+    animations, and the editing chrome (selection outlines, ports, marquee, in-flight edge).
+    Owns the edge-geometry map that hit-testing reads.
+  - `scene-painter.ts` — draws a `FlowModel` in that model's own coordinates. Knows nothing
+    about the camera, viewport, selection rectangle or gestures. Built fresh per render pass
+    from explicit inputs, which is how an export renders the same scene with different
+    settings (no hidden title, its own geometry map) without the view mutating itself.
+  - `edge-layout.ts` — where each edge runs: border points, the bow that fans parallel edges
+    apart, self-loops, and redirection onto a node inside an unfolded frame. Pure — the shape
+    of an edge is settled before anything is drawn, so it is testable without a renderer.
+  - `node-metrics.ts` — text measurement: title/description wrapping and the title band. The
+    inline title editor overlays the band this computes while the painter fills it, so both go
+    through here or the overlay drifts off the ink.
+  - `node-badges.ts` — where the expand/collapse affordances sit and what they show. The
+    contract between painting and hit-testing, so neither owns it.
+- `src/client/canvas/edge-path.ts` — the shape of a drawn edge. `EdgeGeometry` carries the points the
   spline passes through plus that spline flattened to a polyline, and every consumer (hit
   testing, label anchor, edit-popup anchor, arrowhead tangent) measures against the polyline
   rather than re-deriving the curve. The flattening mirrors rough.js's cardinal spline exactly,
   so its constants belong to rough.js and must not be tuned on their own; the oracle test in
   `tests/canvas-view-edge-hit.test.ts` fails if the two ever drift. Routing an edge through more
   waypoints needs no change here beyond passing a longer point list.
-- `src/client/expansion.ts` — session-local inline subgraph expansion: which nodes are
+- `src/client/canvas/expansion.ts` — session-local inline subgraph expansion: which nodes are
   unfolded, open/close animation, external .flow fetching, frame geometry, the warp
   displacement of surrounding nodes (view-only; never written to disk), and the loci map
   that lets nodes inside frames be edited in place (mutations are routed to the .flow file
@@ -120,7 +137,7 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
 - `src/client/theme.ts` / `public/themes.css` — the theme registry and the colour tokens.
   `themes.css` is the single source of truth for every colour, one `:root[data-theme="…"]`
   block per theme; DOM chrome reads the tokens directly, and `resolveCanvasPalette` resolves
-  the `--canvas-*` ones into the palette `canvas-view.ts` draws from, refilled on each theme
+  the `--canvas-*` ones into the palette `scene-painter.ts` draws from, refilled on each theme
   change. Adding a theme means a new block plus one entry in `THEMES` — nothing else.
 - `src/client/main.ts` — app state, WebSocket sync, undo/redo, sidebar, keyboard shortcuts.
 - `tests/` — Vitest unit tests for the parser/serializer, document mutations, server file

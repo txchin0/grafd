@@ -1,22 +1,21 @@
-// Canvas rendering (rough.js) and pointer interaction for the flow editor. The view owns
-// the pan/zoom transform, the active tool, hover/selection state, in-flight gestures, and
-// camera animations; every document mutation is delegated to the `actions` callbacks
-// supplied by main.ts. When an ExpansionLayer is attached it decorates each model with
-// per-frame display geometry (`model.display`), which the view must prefer over a node's
-// authored `pos` (see rectOf) so inline-expanded frames and warp offsets never touch the
-// document itself.
+// The canvas as an interactive surface: the pan/zoom transform, the active tool, hover and
+// selection state, in-flight pointer gestures, hit-testing, and the camera animations for
+// subgraph navigation. Every document mutation is delegated to the `actions` callbacks
+// supplied by main.ts.
+//
+// Drawing the scene itself belongs to ScenePainter, which this builds fresh for each render
+// pass; what stays here is the editing chrome the painter must not know about — selection
+// outlines, ports, the marquee and the in-flight edge.
+//
+// The ExpansionLayer decorates each model with per-frame display geometry (`model.display`).
+// Read a node's rect through `displayRectOf`, never its authored `pos`, or an unfolded frame
+// measures at its collapsed size and warp offsets are ignored.
 
 // Resolved by the import map in index.html to the served copy of rough.esm.js.
 import rough from 'roughjs';
-import type { Options as RoughOptions } from 'roughjs/bin/core';
-import {
-  descriptionForNode,
-  type EdgeDataField,
-  type FlowNode,
-  type Rect,
-} from '../../shared/flow-format.js';
+import type { FlowNode, Rect } from '../../shared/flow-format.js';
 import { DEFAULT_ROUGHNESS } from '../../shared/manifest.js';
-import { displayRects, type FlowModel, type GhostNode, type ModelEdge, type NodeTraits } from '../flow-doc.js';
+import { displayRectOf, displayRects, type FlowModel, type GhostNode, type ModelEdge } from '../flow-doc.js';
 import {
   boundsOfRects,
   easeInOutCubic,
@@ -26,17 +25,24 @@ import {
   rectCenter,
   rectContains,
   rectsIntersect,
-  unionRect,
   type Point,
 } from '../geometry.js';
 import {
-  createEdgeGeometry,
   distanceToEdgePath,
   type EdgeGeometry,
-  edgeEnd,
-  edgePathApproach,
   edgePathMidpoint,
 } from './edge-path.js';
+import type { EdgeGeometryMap } from './edge-layout.js';
+import { BADGE_HIT_RADIUS, nodeBadges, type BadgeHit } from './node-badges.js';
+import { ScenePainter } from './scene-painter.js';
+import {
+  FRAME_TITLE_FONT_PX,
+  TITLE_FONT_PX,
+  frameTitleBand,
+  layOutNodeText,
+  titleBandOf,
+  type NodeTextLayout,
+} from './node-metrics.js';
 // A live object refilled in place on every theme change, never reassigned.
 import { canvasPalette } from '../theme.js';
 import {
@@ -56,7 +62,6 @@ import {
   transformPoint,
   transformRect,
   type ExpansionLayer,
-  type FrameExpansion,
   type FrameTransform,
 } from './expansion.js';
 
@@ -65,18 +70,8 @@ export { childViewLinkedTo, interpolateView, parentViewLinkedTo } from './camera
 
 export type Tool = 'select' | 'node';
 
-type BadgeKind = 'open' | 'inline' | 'collapse';
 
-interface Badge {
-  kind: BadgeKind;
-  x: number;
-  y: number;
-}
 
-interface BadgeHit {
-  kind: BadgeKind;
-  node: FlowNode;
-}
 
 type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se';
 
@@ -170,12 +165,6 @@ export interface CanvasActions {
   afterRender?(): void;
 }
 
-interface NodeTextLayout {
-  titleLines: string[];
-  descriptionLines: string[];
-  maxWidth: number;
-  firstLineMiddleY: number;
-}
 
 export interface TitlePlacement {
   rect: Rect;
@@ -190,7 +179,6 @@ export type ContextTarget =
   | { kind: 'edge'; edge: ModelEdge }
   | { kind: 'canvas'; world: Point };
 
-export const HAND_FONT = '"Segoe Print", "Comic Sans MS", cursive';
 
 const MIN_SCALE = 0.12;
 const MAX_SCALE = 3;
@@ -205,46 +193,15 @@ const CREATE_MIN_SCREEN_HEIGHT = 10;
 const SNAP = 8;
 const PORT_RADIUS = 5;
 const PORT_HIT_RADIUS = 14;
-// Wider than the drawn stroke because rough.js jitters the ink a few pixels off the ideal curve.
 const EDGE_HIT_DISTANCE = 10;
-const ARROWHEAD_TANGENT_BACKOFF = 12;
-const EDGE_DATA_LINE_HEIGHT = 13;
-const EDGE_DATA_GAP = 2;
-const BADGE_HIT_RADIUS = 12;
-const BADGE_SLOT_SPACING = 24;
 const FIT_PADDING = 80;
 // Where the origin sits relative to the viewport centre when there is nothing to frame.
 const EMPTY_CANVAS_ORIGIN = { x: 200, y: 150 };
 const EMPTY_SNAPSHOT_SIZE = { w: 400, h: 300 };
-const BADGE_SYMBOLS: Record<BadgeKind, string> = { open: '⤢', inline: '⊞', collapse: '⊟' };
-// How sketchy each element is relative to the workspace's base roughness, so one setting
-// moves the whole canvas without flattening the differences between them.
-const NODE_ROUGHNESS = 1.4;
-const FRAME_ROUGHNESS = 1.1;
-const EDGE_ROUGHNESS = 1.1;
-const BADGE_ROUGHNESS = 0.9;
 const DIVE_IN_MS = 650;
 const BACK_OUT_MS = 560;
 export const SNAPSHOT_PADDING = 48;
 
-const NODE_TEXT_SIDE_PADDING = 13;
-const TITLE_FONT_PX = 15;
-const TITLE_LINE_HEIGHT = 20;
-const TITLE_MAX_LINES = 2;
-const DESCRIPTION_FONT_PX = 12.5;
-const DESCRIPTION_LINE_HEIGHT = 16;
-const DESCRIPTION_MAX_LINES = 4;
-const TITLE_DESCRIPTION_GAP = 6;
-// Both text runs are drawn on a middle baseline, so the first description line sits a
-// little tighter under the title than the block-height gap suggests.
-const DESCRIPTION_FIRST_LINE_NUDGE = 4;
-const FRAME_TITLE_FONT_PX = 13;
-const FRAME_TITLE_LINE_HEIGHT = 18;
-const FRAME_TITLE_LEFT = 12;
-const FRAME_TITLE_MIDDLE_Y = 16;
-// Keeps the frame's title clear of the expand/collapse badges in the header strip.
-const FRAME_TITLE_RIGHT_INSET = 64;
-const FRAME_TITLE_HIT_PADDING = 6;
 
 // A surface the scene can be drawn onto. The live canvas is one; an export renders the same
 // scene onto a detached canvas at an arbitrary resolution by swapping the target for the
@@ -284,17 +241,6 @@ function snap(value: number): number {
   return Math.round(value / SNAP) * SNAP;
 }
 
-function seedFrom(text: string): number {
-  let hash = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
-  }
-  return (hash >>> 0) % 2147483646 + 1;
-}
-
-function isGhost(target: FlowNode | GhostNode): target is GhostNode {
-  return 'ghost' in target && target.ghost === true;
-}
 
 export class CanvasView {
   private readonly canvas: HTMLCanvasElement;
@@ -342,7 +288,7 @@ export class CanvasView {
   // Where each edge currently sits on screen. Accumulated across a whole render — drawScene
   // recurses into every unfolded subgraph, and each level contributes its own edges — so this
   // is cleared once per pass rather than once per model.
-  private edgeGeometry = new Map<ModelEdge, EdgeGeometry>();
+  private edgeGeometry: EdgeGeometryMap = new Map();
 
   constructor(canvasElement: HTMLCanvasElement, actions: CanvasActions, expansionLayer: ExpansionLayer) {
     this.canvas = canvasElement;
@@ -458,16 +404,12 @@ export class CanvasView {
     return { frameHost: frame.host, point: inverseTransformPoint(world, frame.transform) };
   }
 
-  private rectOf(model: FlowModel, node: FlowNode): Rect {
-    return model.display?.rects.get(node) ?? node.pos!;
-  }
-
   // World-space rect of any visible node, including nodes inside unfolded frames: the
   // node's local display rect pushed through its locus transform.
   rect(node: FlowNode): Rect {
     const locus = this.expansionLayer.locusOf(node);
-    if (!locus) return this.rectOf(this.model, node);
-    return transformRect(this.rectOf(locus.model, node), locus.transform);
+    if (!locus) return displayRectOf(this.model, node);
+    return transformRect(displayRectOf(locus.model, node), locus.transform);
   }
 
   private isNodeVisible(node: FlowNode): boolean {
@@ -627,7 +569,7 @@ export class CanvasView {
         pixelRatio * view.scale, 0, 0, pixelRatio * view.scale,
         pixelRatio * view.x, pixelRatio * view.y,
       );
-      this.drawScene(this.model);
+      this.scenePainter(null).drawScene(this.model);
     } finally {
       this.target = previousTarget;
       this.edgeGeometry = previousEdgeGeometry;
@@ -1182,7 +1124,7 @@ export class CanvasView {
         const local = { x: (world.x - transform.tx) / transform.scale, y: (world.y - transform.ty) / transform.scale };
         return this.hitNodeIn(expansion.subModel, local) ?? node;
       }
-      if (rectContains(this.rectOf(model, node), world)) return node;
+      if (rectContains(displayRectOf(model, node), world)) return node;
     }
     return null;
   }
@@ -1268,25 +1210,6 @@ export class CanvasView {
     return null;
   }
 
-  // Badge slots run right-to-left from the node's top-right corner. Nodes inside unfolded
-  // frames offer full-page navigation too: the dive synthesizes a breadcrumb crumb for every
-  // frame level it skips over.
-  private nodeBadges(model: FlowModel, node: FlowNode): Badge[] {
-    if (!model.traits.get(node)?.expand) return [];
-    const rect = this.rectOf(model, node);
-    const slotCenter = (slot: number) => ({ x: rect.x + rect.w - 16 - slot * BADGE_SLOT_SPACING, y: rect.y + 15 });
-    if (this.expansionLayer.isOpen(node.id)) {
-      return [
-        { kind: 'open', ...slotCenter(0) },
-        { kind: 'collapse', ...slotCenter(1) },
-      ];
-    }
-    return [
-      { kind: 'open', ...slotCenter(0) },
-      { kind: 'inline', ...slotCenter(1) },
-    ];
-  }
-
   private hitBadge(world: Point): BadgeHit | null {
     return this.hitBadgeIn(this.model, world, this.view.scale);
   }
@@ -1295,7 +1218,7 @@ export class CanvasView {
     const hitRadius = BADGE_HIT_RADIUS / Math.min(effectiveScale, 1);
     for (let index = model.nodes.length - 1; index >= 0; index -= 1) {
       const node = model.nodes[index];
-      for (const badge of this.nodeBadges(model, node)) {
+      for (const badge of nodeBadges(model, node, this.expansionLayer.isOpen(node.id))) {
         if (Math.hypot(world.x - badge.x, world.y - badge.y) <= hitRadius) {
           return { kind: badge.kind, node };
         }
@@ -1357,14 +1280,27 @@ export class CanvasView {
     });
   }
 
+  private scenePainter(hiddenTitleNodeId: string | null): ScenePainter {
+    return new ScenePainter({
+      ctx: this.ctx,
+      rough: this.rough,
+      baseRoughness: this.baseRoughness,
+      selectedEdge: this.selectedEdge,
+      hiddenTitleNodeId,
+      edgeGeometry: this.edgeGeometry,
+      expansions: this.expansionLayer,
+    });
+  }
+
   private render(): void {
     const { ctx } = this;
     this.edgeGeometry.clear();
+    const painter = this.scenePainter(this.titleEditingNodeId);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
     if (this.sceneTransition) {
-      this.renderSceneTransition(this.sceneTransition);
+      this.renderSceneTransition(this.sceneTransition, painter);
       return;
     }
 
@@ -1377,16 +1313,16 @@ export class CanvasView {
     const { x, y, scale } = this.view;
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * x, dpr * y);
 
-    this.drawScene(this.model);
+    painter.drawScene(this.model);
     this.drawSelectionDecorations();
     this.drawPorts();
-    this.drawGestureOverlay();
+    this.drawGestureOverlay(painter);
 
     this.actions.afterRender?.();
     if (expansionState.animating) this.requestRender();
   }
 
-  private renderSceneTransition(transition: SceneTransition): void {
+  private renderSceneTransition(transition: SceneTransition, painter: ScenePainter): void {
     const { ctx } = this;
     const dpr = this.devicePixelRatio;
     const now = performance.now();
@@ -1395,7 +1331,7 @@ export class CanvasView {
       this.expansionLayer.layout(transition.outgoing.model, now);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       this.drawGridIfVisible(transition.outgoing.view);
-      this.drawWorldScene(transition.outgoing.model, transition.outgoing.view, 1);
+      this.drawWorldScene(painter, transition.outgoing.model, transition.outgoing.view, 1);
       return;
     }
 
@@ -1416,7 +1352,7 @@ export class CanvasView {
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.drawGridIfVisible(this.view);
-    this.drawWorldScene(parentModel, parentView, parentAlpha);
+    this.drawWorldScene(painter, parentModel, parentView, parentAlpha);
 
     // The child scene is clipped to the node's on-screen rectangle so the subgraph reads
     // as living inside the node; by the end of the dive that rectangle exceeds the
@@ -1427,7 +1363,7 @@ export class CanvasView {
       w: transition.nodeRect.w * parentView.scale,
       h: transition.nodeRect.h * parentView.scale,
     };
-    this.drawWorldScene(childModel, childView, childAlpha, nodeScreen);
+    this.drawWorldScene(painter, childModel, childView, childAlpha, nodeScreen);
 
     this.actions.viewChanged?.();
     this.actions.afterRender?.();
@@ -1435,7 +1371,13 @@ export class CanvasView {
     else this.requestRender();
   }
 
-  private drawWorldScene(model: FlowModel, view: View, alpha: number, clipScreenRect: Rect | null = null): void {
+  private drawWorldScene(
+    painter: ScenePainter,
+    model: FlowModel,
+    view: View,
+    alpha: number,
+    clipScreenRect: Rect | null = null,
+  ): void {
     if (alpha <= 0.01) return;
     const { ctx } = this;
     const dpr = this.devicePixelRatio;
@@ -1448,27 +1390,8 @@ export class CanvasView {
     }
     ctx.setTransform(dpr * view.scale, 0, 0, dpr * view.scale, dpr * view.x, dpr * view.y);
     ctx.globalAlpha = alpha;
-    this.drawScene(model);
+    painter.drawScene(model);
     ctx.restore();
-  }
-
-  // Labels get their own pass after nodes so they stay readable even where an edge dives
-  // under a node or an expanded frame. Edges that terminate inside an open frame are drawn
-  // after nodes so the frame fill does not occlude them (§5.7 expanded display).
-  private drawScene(model: FlowModel): void {
-    this.computeEdgeGeometry(model);
-    const redirected: ModelEdge[] = [];
-    for (const edge of model.edges) {
-      if (this.edgeTerminatesInsideOpenFrame(model, edge) || this.edgeOriginatesInsideOpenFrame(model, edge)) {
-        redirected.push(edge);
-      } else {
-        this.drawEdge(edge);
-      }
-    }
-    for (const node of model.nodes) this.drawNode(model, node);
-    for (const edge of redirected) this.drawEdge(edge);
-    for (const edge of model.edges) this.drawEdgeLabel(edge);
-    for (const ghost of model.ghosts) this.drawGhost(ghost, { clickable: !model.embedded });
   }
 
   // Only the live canvas honours the preference; an export draws whatever its own grid
@@ -1492,340 +1415,8 @@ export class CanvasView {
     }
   }
 
-  private computeEdgeGeometry(model: FlowModel): void {
-    const pairCounts = new Map<string, number>();
-    for (const edge of model.edges) {
-      if (!edge.to?.pos || !edge.from?.pos) {
-        this.edgeGeometry.delete(edge);
-        continue;
-      }
-      if (edge.to === edge.from) {
-        this.edgeGeometry.set(edge, this.selfLoopGeometry(model, edge.from));
-        continue;
-      }
-      let fromRect = this.rectOf(model, edge.from);
-      let toRect = isGhost(edge.to) ? edge.to.pos : this.rectOf(model, edge.to);
-      if (edge.kind === 'flow' && edge.spec.innerSource) {
-        const innerRect = this.innerNodeRect(model, edge.from, edge.spec.innerSource);
-        if (innerRect) fromRect = innerRect;
-      }
-      if (edge.kind === 'flow' && edge.spec.innerTarget && !isGhost(edge.to)) {
-        const innerRect = this.innerNodeRect(model, edge.to, edge.spec.innerTarget);
-        if (innerRect) toRect = innerRect;
-      }
-      const pairKey = [edge.from.name, edge.to.name].sort().join(' ');
-      const occurrence = pairCounts.get(pairKey) ?? 0;
-      pairCounts.set(pairKey, occurrence + 1);
-
-      const a = rectBorderPointToward(fromRect, rectCenter(toRect));
-      const b = rectBorderPointToward(toRect, rectCenter(fromRect));
-      const length = Math.hypot(b.x - a.x, b.y - a.y) || 1;
-      const normal = { x: -(b.y - a.y) / length, y: (b.x - a.x) / length };
-      const bowMagnitude = (Math.min(34, length * 0.1) + Math.floor(occurrence / 2) * 26)
-        * (occurrence % 2 === 0 ? 1 : -1);
-      const mid = {
-        x: (a.x + b.x) / 2 + normal.x * bowMagnitude,
-        y: (a.y + b.y) / 2 + normal.y * bowMagnitude,
-      };
-      this.edgeGeometry.set(edge, createEdgeGeometry([a, mid, b]));
-    }
-  }
-
-  private edgeTerminatesInsideOpenFrame(model: FlowModel, edge: ModelEdge): boolean {
-    if (edge.kind !== 'flow' || !edge.spec.innerTarget || !edge.to || isGhost(edge.to)) return false;
-    return this.innerNodeRect(model, edge.to, edge.spec.innerTarget) != null;
-  }
-
-  private edgeOriginatesInsideOpenFrame(model: FlowModel, edge: ModelEdge): boolean {
-    if (edge.kind !== 'flow' || !edge.spec.innerSource) return false;
-    return this.innerNodeRect(model, edge.from, edge.spec.innerSource) != null;
-  }
-
-  // When a host frame is expanded far enough, map its named inner node into this model's
-  // coordinates so an edge can start/end on it (collapsed / unresolved → plain host border).
-  private innerNodeRect(model: FlowModel, host: FlowNode, innerName: string): Rect | null {
-    const expansion = model.display?.expansions.get(host);
-    if (!expansion || expansion.alpha <= 0.15) return null;
-    const innerNode = expansion.subModel.nodesByName.get(innerName);
-    if (!innerNode) return null;
-    return transformRect(this.rectOf(expansion.subModel, innerNode), expansion.transform);
-  }
-
-  private selfLoopGeometry(model: FlowModel, node: FlowNode): EdgeGeometry {
-    const { x, y, w } = this.rectOf(model, node);
-    const a = { x: x + w - 30, y };
-    const b = { x: x + w, y: y + 24 };
-    const mid = { x: x + w + 42, y: y - 40 };
-    return createEdgeGeometry([a, mid, b]);
-  }
-
-  private roughnessFor(elementRoughness: number): number {
-    return elementRoughness * this.baseRoughness;
-  }
-
-  private edgeColor(edge: ModelEdge): string {
-    if (edge === this.selectedEdge) return canvasPalette.select;
-    return edge.kind === 'error' ? canvasPalette.error : canvasPalette.edge;
-  }
-
-  private drawEdge(edge: ModelEdge): void {
-    const geometry = this.edgeGeometryOf(edge);
-    if (!geometry) return;
-    const color = this.edgeColor(edge);
-    const seed = seedFrom(`${edge.from.name}->${edge.spec.target}:${edge.spec.label ?? ''}`);
-    const options: RoughOptions = {
-      seed,
-      stroke: color,
-      strokeWidth: edge === this.selectedEdge ? 2.2 : 1.5,
-      roughness: this.roughnessFor(EDGE_ROUGHNESS),
-      bowing: 0.4,
-    };
-    if (edge.kind === 'error') options.strokeLineDash = [7, 5];
-
-    this.rough.curve(geometry.through.map((point) => [point.x, point.y] as [number, number]), options);
-    this.drawArrowhead(
-      edgePathApproach(geometry.path, ARROWHEAD_TANGENT_BACKOFF),
-      edgeEnd(geometry),
-      color,
-    );
-  }
-
-  private drawEdgeLabel(edge: ModelEdge): void {
-    const geometry = this.edgeGeometryOf(edge);
-    if (!geometry) return;
-    const labelText = edge.spec.label ?? (edge.kind === 'error' ? 'on error' : null);
-    const anchor = edgePathMidpoint(geometry.path);
-    const fields = edge.spec.data ?? [];
-
-    const labelRect = labelText
-      ? this.drawEdgeLabelPill(labelText, anchor, edge.kind === 'error')
-      : null;
-    if (!fields.length) {
-      geometry.labelRect = labelRect;
-      return;
-    }
-
-    const fieldsTop = labelRect
-      ? labelRect.y + labelRect.h + EDGE_DATA_GAP
-      : anchor.y - (fields.length * EDGE_DATA_LINE_HEIGHT) / 2;
-    const fieldsRect = this.drawEdgeDataFields(fields, anchor.x, fieldsTop);
-    geometry.labelRect = labelRect ? unionRect(labelRect, fieldsRect) : fieldsRect;
-  }
-
-  private drawEdgeLabelPill(text: string, anchor: Point, isError: boolean): Rect {
-    const { ctx } = this;
-    ctx.font = `12px ${HAND_FONT}`;
-    const paddingX = 7;
-    const rect = {
-      x: anchor.x - ctx.measureText(text).width / 2 - paddingX,
-      y: anchor.y - 11,
-      w: ctx.measureText(text).width + paddingX * 2,
-      h: 21,
-    };
-    ctx.fillStyle = canvasPalette.edgeLabelBg;
-    this.roundedRect(rect, 7);
-    ctx.fill();
-    ctx.fillStyle = isError ? canvasPalette.error : canvasPalette.edgeLabel;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, anchor.x, anchor.y + 1);
-    return rect;
-  }
-
-  // Each field paints as `key: type`, the key in label ink and the type muted, so the schema
-  // is readable on the canvas without opening the edge editor.
-  private drawEdgeDataFields(fields: EdgeDataField[], centerX: number, top: number): Rect {
-    const { ctx } = this;
-    ctx.font = `10.5px ${HAND_FONT}`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-
-    const keyTexts = fields.map((field) => (field.type ? `${field.key}:` : field.key));
-    const lineWidths = fields.map(
-      (field, index) => ctx.measureText(`${keyTexts[index]} ${field.type}`).width,
-    );
-    const paddingX = 6;
-    const paddingY = 3;
-    const rect = {
-      x: centerX - Math.max(...lineWidths) / 2 - paddingX,
-      y: top - paddingY,
-      w: Math.max(...lineWidths) + paddingX * 2,
-      h: fields.length * EDGE_DATA_LINE_HEIGHT + paddingY * 2,
-    };
-    ctx.fillStyle = canvasPalette.edgeLabelBg;
-    this.roundedRect(rect, 6);
-    ctx.fill();
-
-    fields.forEach((field, index) => {
-      const lineLeft = centerX - lineWidths[index] / 2;
-      const lineMiddle = top + index * EDGE_DATA_LINE_HEIGHT + EDGE_DATA_LINE_HEIGHT / 2;
-      ctx.fillStyle = canvasPalette.edgeLabel;
-      ctx.fillText(keyTexts[index], lineLeft, lineMiddle);
-      ctx.fillStyle = canvasPalette.muted;
-      ctx.fillText(field.type, lineLeft + ctx.measureText(`${keyTexts[index]} `).width, lineMiddle);
-    });
-    return rect;
-  }
-
-  private drawArrowhead(fromPoint: Point, tip: Point, color: string): void {
-    const { ctx } = this;
-    const angle = Math.atan2(tip.y - fromPoint.y, tip.x - fromPoint.x);
-    const length = 11;
-    const spread = 0.46;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.6;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(tip.x, tip.y);
-    ctx.lineTo(tip.x - length * Math.cos(angle - spread), tip.y - length * Math.sin(angle - spread));
-    ctx.moveTo(tip.x, tip.y);
-    ctx.lineTo(tip.x - length * Math.cos(angle + spread), tip.y - length * Math.sin(angle + spread));
-    ctx.stroke();
-  }
-
-  private roundedRect(rect: Rect, radius: number): void {
-    const { ctx } = this;
-    ctx.beginPath();
-    ctx.roundRect(rect.x, rect.y, rect.w, rect.h, radius);
-  }
-
-  private nodeStrokeColor(traits: NodeTraits | undefined): string {
-    if (traits?.expand) return canvasPalette.expandStroke;
-    if (traits?.decision) return canvasPalette.decisionStroke;
-    if (traits?.entry) return canvasPalette.entryStroke;
-    return canvasPalette.nodeStroke;
-  }
-
-  private drawNode(model: FlowModel, node: FlowNode): void {
-    const expansion = model.display?.expansions.get(node);
-    if (expansion) {
-      this.drawExpandedNode(model, node, expansion);
-      return;
-    }
-
-    const traits = model.traits.get(node);
-    const rect = this.rectOf(model, node);
-    const stroke = this.nodeStrokeColor(traits);
-
-    this.rough.rectangle(rect.x, rect.y, rect.w, rect.h, {
-      seed: seedFrom(node.id ?? node.name),
-      roughness: this.roughnessFor(NODE_ROUGHNESS),
-      bowing: 0.7,
-      stroke,
-      strokeWidth: 1.6,
-      fill: canvasPalette.nodeFill,
-      fillStyle: 'solid',
-    });
-
-    this.drawNodeText(model, node, rect);
-    this.drawTraitBadges(node, model.traits.get(node), rect);
-    this.drawExpandBadges(model, node);
-  }
-
-  private drawExpandedNode(model: FlowModel, node: FlowNode, expansion: FrameExpansion): void {
-    const { ctx } = this;
-    const { frame, inner, transform, subModel } = expansion;
-
-    this.rough.rectangle(frame.x, frame.y, frame.w, frame.h, {
-      seed: seedFrom(node.id ?? node.name),
-      roughness: this.roughnessFor(FRAME_ROUGHNESS),
-      bowing: 0.5,
-      stroke: canvasPalette.expandStroke,
-      strokeWidth: 1.6,
-      fill: canvasPalette.nodeFill,
-      fillStyle: 'solid',
-    });
-
-    if (!this.titleIsHidden(node)) {
-      ctx.font = `600 ${FRAME_TITLE_FONT_PX}px ${HAND_FONT}`;
-      ctx.fillStyle = canvasPalette.expandStroke;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(node.name, frame.x + FRAME_TITLE_LEFT, frame.y + FRAME_TITLE_MIDDLE_Y, frame.w - FRAME_TITLE_RIGHT_INSET);
-    }
-
-    if (expansion.alpha > 0.02) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(inner.x, inner.y, inner.w, inner.h);
-      ctx.clip();
-      ctx.globalAlpha *= expansion.alpha;
-      ctx.translate(transform.tx, transform.ty);
-      ctx.scale(transform.scale, transform.scale);
-      if (subModel.nodes.length === 0) this.drawEmptySubgraphHint();
-      else this.drawScene(subModel);
-      ctx.restore();
-    }
-    this.drawExpandBadges(model, node);
-  }
-
-  private drawEmptySubgraphHint(): void {
-    const { ctx } = this;
-    ctx.font = `13px ${HAND_FONT}`;
-    ctx.fillStyle = canvasPalette.muted;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('empty subgraph', 160, 90);
-  }
-
-  // Wrapping and vertical placement of a node's title and description block. Shared by the
-  // painter and by titlePlacementOf so the editable title band cannot drift from the drawn
-  // text. Leaves ctx.font set to the description font.
   private layOutNodeText(model: FlowModel, node: FlowNode, rect: Rect): NodeTextLayout {
-    const { ctx } = this;
-    const maxWidth = rect.w - 2 * NODE_TEXT_SIDE_PADDING;
-
-    ctx.font = `600 ${TITLE_FONT_PX}px ${HAND_FONT}`;
-    const titleLines = this.wrapText(node.name, maxWidth, TITLE_MAX_LINES);
-    const description = this.descriptionText(model, node);
-    ctx.font = `${DESCRIPTION_FONT_PX}px ${HAND_FONT}`;
-    const descriptionLineBudget = Math.max(
-      0,
-      Math.floor((rect.h - TITLE_LINE_HEIGHT - titleLines.length * TITLE_LINE_HEIGHT) / DESCRIPTION_LINE_HEIGHT),
-    );
-    const descriptionLines = description
-      ? this.wrapText(description, maxWidth, Math.min(DESCRIPTION_MAX_LINES, descriptionLineBudget))
-      : [];
-
-    const blockHeight = titleLines.length * TITLE_LINE_HEIGHT
-      + (descriptionLines.length ? TITLE_DESCRIPTION_GAP + descriptionLines.length * DESCRIPTION_LINE_HEIGHT : 0);
-
-    return {
-      titleLines,
-      descriptionLines,
-      maxWidth,
-      firstLineMiddleY: rect.y + rect.h / 2 - blockHeight / 2 + TITLE_LINE_HEIGHT / 2,
-    };
-  }
-
-  private drawNodeText(model: FlowModel, node: FlowNode, rect: Rect): void {
-    const { ctx } = this;
-    const layout = this.layOutNodeText(model, node, rect);
-    const centerX = rect.x + rect.w / 2;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-
-    let lineY = layout.firstLineMiddleY;
-    if (!this.titleIsHidden(node)) {
-      ctx.font = `600 ${TITLE_FONT_PX}px ${HAND_FONT}`;
-      ctx.fillStyle = canvasPalette.ink;
-      for (const line of layout.titleLines) {
-        ctx.fillText(line, centerX, lineY, layout.maxWidth);
-        lineY += TITLE_LINE_HEIGHT;
-      }
-    } else {
-      lineY += layout.titleLines.length * TITLE_LINE_HEIGHT;
-    }
-
-    if (layout.descriptionLines.length) {
-      lineY += DESCRIPTION_FIRST_LINE_NUDGE;
-      ctx.font = `${DESCRIPTION_FONT_PX}px ${HAND_FONT}`;
-      ctx.fillStyle = canvasPalette.muted;
-      for (const line of layout.descriptionLines) {
-        ctx.fillText(line, centerX, lineY, layout.maxWidth);
-        lineY += DESCRIPTION_LINE_HEIGHT;
-      }
-    }
+    return layOutNodeText(this.ctx, node, rect, this.expansionLayer.descriptionFor(node, model.sourcePath));
   }
 
   // World-space rect and typography of a node's title as drawn, or null when the node is
@@ -1836,10 +1427,10 @@ export class CanvasView {
     if (this.expansionLayer.hasLoci() && !locus) return null;
     const model = locus?.model ?? this.model;
     const expansion = model.display?.expansions.get(node);
-    const localRect = this.rectOf(model, node);
+    const localRect = displayRectOf(model, node);
     const band = expansion
-      ? this.frameTitleBand(node, expansion.frame)
-      : this.titleBandOf(localRect, this.layOutNodeText(model, node, localRect));
+      ? frameTitleBand(this.ctx, node, expansion.frame)
+      : titleBandOf(localRect, this.layOutNodeText(model, node, localRect));
 
     return {
       rect: locus ? transformRect(band, locus.transform) : band,
@@ -1848,126 +1439,6 @@ export class CanvasView {
       color: expansion ? canvasPalette.expandStroke : canvasPalette.ink,
       screenScale: this.view.scale * this.expansionLayer.scaleOf(node),
     };
-  }
-
-  private titleBandOf(rect: Rect, layout: NodeTextLayout): Rect {
-    return {
-      x: rect.x + NODE_TEXT_SIDE_PADDING,
-      y: layout.firstLineMiddleY - TITLE_LINE_HEIGHT / 2,
-      w: layout.maxWidth,
-      h: Math.max(1, layout.titleLines.length) * TITLE_LINE_HEIGHT,
-    };
-  }
-
-  private frameTitleBand(node: FlowNode, frame: Rect): Rect {
-    const { ctx } = this;
-    ctx.font = `600 ${FRAME_TITLE_FONT_PX}px ${HAND_FONT}`;
-    const available = frame.w - FRAME_TITLE_RIGHT_INSET;
-    const width = Math.min(available, ctx.measureText(node.name).width) + 2 * FRAME_TITLE_HIT_PADDING;
-    return {
-      x: frame.x + FRAME_TITLE_LEFT - FRAME_TITLE_HIT_PADDING,
-      y: frame.y + FRAME_TITLE_MIDDLE_Y - FRAME_TITLE_LINE_HEIGHT / 2,
-      w: width,
-      h: FRAME_TITLE_LINE_HEIGHT,
-    };
-  }
-
-  // The inline title editor paints the name itself; drawing it again underneath would
-  // show through the overlay's background. Exports render through a swapped target
-  // and must always include the title.
-  private titleIsHidden(node: FlowNode): boolean {
-    return this.target === this.liveTarget && node.id != null && node.id === this.titleEditingNodeId;
-  }
-
-  private descriptionText(model: FlowModel, node: FlowNode): string | null {
-    const expandDoc = this.expansionLayer.expandDocumentFor(node, model.sourcePath);
-    const text = descriptionForNode(node, expandDoc);
-    return text || null;
-  }
-
-  private wrapText(text: string, maxWidth: number, maxLines: number): string[] {
-    if (maxLines <= 0) return [];
-    const { ctx } = this;
-    const words = text.split(' ');
-    const lines: string[] = [];
-    let current = '';
-    for (const word of words) {
-      const candidate = current ? `${current} ${word}` : word;
-      if (ctx.measureText(candidate).width <= maxWidth || !current) {
-        current = candidate;
-      } else {
-        lines.push(current);
-        current = word;
-        if (lines.length === maxLines) break;
-      }
-    }
-    if (lines.length < maxLines && current) lines.push(current);
-    if (lines.length === maxLines && words.join(' ') !== lines.join(' ')) {
-      lines[maxLines - 1] = lines[maxLines - 1].replace(/\s*\S*$/, '…');
-    }
-    return lines;
-  }
-
-  private drawTraitBadges(node: FlowNode, traits: NodeTraits | undefined, rect: Rect): void {
-    const { ctx } = this;
-    const { x, y, w, h } = rect;
-    ctx.textBaseline = 'middle';
-
-    if (traits?.entry) {
-      ctx.font = `11px ${HAND_FONT}`;
-      ctx.fillStyle = canvasPalette.entryStroke;
-      ctx.textAlign = 'left';
-      ctx.fillText('▶', x + 8, y + 14);
-    }
-    if (traits?.hasErrorHandler) {
-      ctx.font = `12px ${HAND_FONT}`;
-      ctx.fillStyle = canvasPalette.error;
-      ctx.textAlign = 'right';
-      ctx.fillText('⚠', x + w - 8, y + h - 12);
-    }
-    if (traits?.updates.length) {
-      ctx.font = `10.5px ${HAND_FONT}`;
-      ctx.fillStyle = canvasPalette.updates;
-      ctx.textAlign = 'left';
-      ctx.fillText(`↺ ${traits.updates.join(', ')}`, x + 8, y + h - 12, w - 30);
-    }
-  }
-
-  private drawExpandBadges(model: FlowModel, node: FlowNode): void {
-    const { ctx } = this;
-    for (const badge of this.nodeBadges(model, node)) {
-      this.rough.circle(badge.x, badge.y, 20, {
-        seed: seedFrom(`${node.id}-${badge.kind}`),
-        stroke: canvasPalette.expandStroke,
-        strokeWidth: 1.3,
-        roughness: this.roughnessFor(BADGE_ROUGHNESS),
-      });
-      ctx.font = `12px ${HAND_FONT}`;
-      ctx.fillStyle = canvasPalette.expandStroke;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(BADGE_SYMBOLS[badge.kind], badge.x, badge.y + 1);
-    }
-  }
-
-  private drawGhost(ghost: GhostNode, { clickable = true }: { clickable?: boolean } = {}): void {
-    const { ctx } = this;
-    const { x, y, w, h } = ghost.pos;
-    ctx.save();
-    ctx.strokeStyle = canvasPalette.ghost;
-    ctx.setLineDash([6, 6]);
-    ctx.lineWidth = 1.3;
-    ctx.strokeRect(x, y, w, h);
-    ctx.restore();
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `600 14px ${HAND_FONT}`;
-    ctx.fillStyle = canvasPalette.ghost;
-    ctx.fillText(ghost.name, x + w / 2, y + h / 2 - 8, w - 20);
-    if (clickable) {
-      ctx.font = `10.5px ${HAND_FONT}`;
-      ctx.fillText('click to create', x + w / 2, y + h / 2 + 14, w - 20);
-    }
   }
 
   private drawSelectionDecorations(): void {
@@ -2016,7 +1487,7 @@ export class CanvasView {
     }
   }
 
-  private drawGestureOverlay(): void {
+  private drawGestureOverlay(painter: ScenePainter): void {
     const gesture = this.gesture;
     if (!gesture) return;
     const { ctx } = this;
@@ -2048,7 +1519,7 @@ export class CanvasView {
       ctx.lineTo(end.x, end.y);
       ctx.stroke();
       ctx.restore();
-      this.drawArrowhead(start, end, canvasPalette.select);
+      painter.drawArrowhead(start, end, canvasPalette.select);
       if (gesture.hoverTarget) {
         const { x, y, w, h } = this.rect(gesture.hoverTarget);
         ctx.strokeStyle = canvasPalette.select;
