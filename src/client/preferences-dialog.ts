@@ -32,8 +32,11 @@ export function createPreferencesDialog(
     ...THEMES.map((descriptor) => new Option(descriptor.label, descriptor.id)),
   );
 
+  // Preferences the dialog has no control for — the sidebar's collapsed state, toggled from the
+  // sidebar itself — are carried through from storage rather than reset to their defaults.
   function currentPreferences(): Preferences {
     return {
+      ...loadPreferences(),
       showCanvasGrid: showCanvasGrid.checked,
       openSubgraphOnDoubleClick: openSubgraphOnDoubleClick.checked,
       editorLinkScheme: editorLinkScheme.value as EditorLinkScheme,

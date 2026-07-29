@@ -70,8 +70,49 @@ html, body {
 }
 
 #sidebar-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   padding: 14px 16px 10px;
   border-bottom: 1px solid var(--panel-border);
+}
+
+#sidebar-identity {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Collapsing hides the sidebar outright rather than narrowing it to a rail: the file rows,
+   workspace bar and footer have no icon-only form, and reclaiming the full width is the point.
+   #sidebar-reveal in the topbar is what brings it back. The state is stamped on the root
+   element so the pre-paint script in index.html can apply it before the sidebar is parsed. */
+:root[data-sidebar="collapsed"] #sidebar { display: none; }
+
+#sidebar-reveal { display: none; }
+
+:root[data-sidebar="collapsed"] #sidebar-reveal { display: block; }
+
+#sidebar-toggle,
+#sidebar-reveal {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-body);
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+/* An inset shadow rather than a border, so revealing the edge on hover cannot shift the
+   surrounding layout by the border's width. */
+#sidebar-toggle:hover,
+#sidebar-reveal:hover {
+  background: var(--row-hover);
+  box-shadow: inset 0 0 0 1px var(--panel-border);
+  color: var(--ink);
 }
 
 .logo {
@@ -259,12 +300,18 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--panel-border);
   background: var(--panel);
 }
 
+/* Flexes rather than relying on the topbar's space-between: #sidebar-reveal appears as a third
+   child, which would otherwise push the breadcrumb to the middle whenever it is shown. */
 #breadcrumb {
+  flex: 1;
+  min-width: 0;
+  margin-right: 12px;
   font-size: var(--text-body);
   color: var(--muted);
   white-space: nowrap;

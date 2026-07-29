@@ -8,17 +8,20 @@
   <link rel="preload" href="fonts/HankenGrotesk-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="themes.css" />
   <link rel="stylesheet" href="style.css" />
-  <!-- Selects the stored theme before first paint. main.js applies the theme too, but module
-       scripts are deferred, so leaving it to them flashes the default theme first. The stored
-       id is used unvalidated: an unknown one matches no block in themes.css and therefore
-       renders the default anyway, and main.js re-applies the validated value on boot. The
-       storage key mirrors PREFERENCES_STORAGE_KEY in src/client/preferences.ts. -->
+  <!-- Applies the stored theme and sidebar state before first paint. main.js applies both too,
+       but module scripts are deferred, so leaving it to them flashes the default theme and an
+       open sidebar first. The theme id is used unvalidated: an unknown one matches no block in
+       themes.css and therefore renders the default anyway, and main.js re-applies the validated
+       values on boot. Both land on the root element, which already exists this early — the
+       sidebar's own markup does not. The storage key mirrors PREFERENCES_STORAGE_KEY in
+       src/client/preferences.ts. -->
   <script>
     try {
-      const storedTheme = JSON.parse(localStorage.getItem('graf.preferences') || '{}').theme;
-      if (typeof storedTheme === 'string') document.documentElement.dataset.theme = storedTheme;
+      const stored = JSON.parse(localStorage.getItem('graf.preferences') || '{}');
+      if (typeof stored.theme === 'string') document.documentElement.dataset.theme = stored.theme;
+      if (stored.sidebarCollapsed === true) document.documentElement.dataset.sidebar = 'collapsed';
     } catch (error) {
-      console.error('Could not read the stored theme', error);
+      console.error('Could not read the stored preferences', error);
     }
   </script>
 </head>
@@ -26,8 +29,11 @@
   <div id="app">
     <aside id="sidebar">
       <header id="sidebar-header">
-        <span class="logo">✎ Graf</span>
-        <span class="tagline">.flow canvas</span>
+        <div id="sidebar-identity">
+          <span class="logo">✎ Graf</span>
+          <span class="tagline">.flow canvas</span>
+        </div>
+        <button id="sidebar-toggle" type="button" aria-controls="sidebar" title="Hide sidebar (Ctrl+B)">«</button>
       </header>
       <ul id="file-list"></ul>
       <button id="new-file-button" type="button">+ New flow</button>
@@ -45,6 +51,7 @@
 
     <main id="workspace">
       <div id="topbar">
+        <button id="sidebar-reveal" type="button" aria-controls="sidebar" title="Show sidebar (Ctrl+B)">☰</button>
         <nav id="breadcrumb"></nav>
         <div id="topbar-actions">
           <div id="toolbar">
@@ -146,6 +153,7 @@
             <tr><td>Wheel</td><td>zoom</td></tr>
             <tr><td>Space + drag, middle drag</td><td>pan</td></tr>
             <tr><td>Ctrl+0</td><td>zoom to fit</td></tr>
+            <tr><td>Ctrl+B</td><td>show / hide the sidebar</td></tr>
           </table>
         </div>
       </div>

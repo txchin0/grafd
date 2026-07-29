@@ -49,7 +49,7 @@ import { CanvasView, type ContextTarget, type EdgeDrop, type Tool, type View } f
 import { createContextMenu, type MenuItem } from './context-menu.js';
 import type { Modal } from './modal.js';
 import { createPreferencesDialog } from './preferences-dialog.js';
-import { loadPreferences, type Preferences } from './preferences.js';
+import { loadPreferences, savePreferences, type Preferences } from './preferences.js';
 import type { LinkContext } from './reference-link.js';
 import { applyTheme } from './theme.js';
 import {
@@ -122,6 +122,8 @@ const elements = {
   connectionDot: elementById<HTMLSpanElement>('connection-dot'),
   workspaceName: elementById<HTMLSpanElement>('workspace-name'),
   workspaceMenuButton: elementById<HTMLButtonElement>('workspace-menu-button'),
+  sidebarToggle: elementById<HTMLButtonElement>('sidebar-toggle'),
+  sidebarReveal: elementById<HTMLButtonElement>('sidebar-reveal'),
   helpToggle: elementById<HTMLButtonElement>('help-toggle'),
   helpOverlay: elementById<HTMLDivElement>('help-overlay'),
   toolSelectButton: elementById<HTMLButtonElement>('tool-select-button'),
@@ -1253,7 +1255,17 @@ function applyPreferences(preferences: Preferences): void {
   view.gridIsVisible = preferences.showCanvasGrid;
   view.doubleClickOpensSubgraph = preferences.openSubgraphOnDoubleClick;
   applyTheme(preferences.theme);
+  applySidebarVisibility(preferences.sidebarCollapsed);
   view.requestRender();
+}
+
+// The canvas needs no part in this: it observes its own container and re-syncs when the
+// sidebar stops taking width. The dataset key mirrors the pre-paint script in index.html.
+function applySidebarVisibility(collapsed: boolean): void {
+  if (collapsed) document.documentElement.dataset.sidebar = 'collapsed';
+  else delete document.documentElement.dataset.sidebar;
+  elements.sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
+  elements.sidebarReveal.setAttribute('aria-expanded', String(!collapsed));
 }
 
 // Unlike the user-level preferences, the workspace's display settings are read back from the
@@ -1388,6 +1400,22 @@ function renderFileList(): void {
   sidebarFiles.render();
 }
 
+function toggleSidebar(): void {
+  // The context menu is placed in viewport coordinates and only re-closes on window resize, so
+  // it would otherwise be left pointing at whatever the canvas slid underneath it.
+  contextMenu.close();
+  const preferences = { ...currentPreferences, sidebarCollapsed: !currentPreferences.sidebarCollapsed };
+  savePreferences(preferences);
+  applyPreferences(preferences);
+  if (!preferences.sidebarCollapsed) elements.sidebarToggle.focus();
+  else elements.sidebarReveal.focus();
+}
+
+function wireSidebarToggle(): void {
+  elements.sidebarToggle.addEventListener('click', toggleSidebar);
+  elements.sidebarReveal.addEventListener('click', toggleSidebar);
+}
+
 function wireHelp(): void {
   const toggleHelp = () => elements.helpOverlay.classList.toggle('hidden');
   elements.helpToggle.addEventListener('click', toggleHelp);
@@ -1423,6 +1451,9 @@ function wireKeyboard(): void {
     } else if (ctrl && event.key.toLowerCase() === 'y') {
       event.preventDefault();
       redo();
+    } else if (ctrl && event.key.toLowerCase() === 'b') {
+      event.preventDefault();
+      toggleSidebar();
     } else if (ctrl && event.key.toLowerCase() === 'c') {
       if (view.selection.size === 0) return;
       event.preventDefault();
@@ -1592,6 +1623,7 @@ function wireWorkspaceControls(): void {
 
 async function boot(): Promise<void> {
   wireViewControls();
+  wireSidebarToggle();
   wireHelp();
   wireKeyboard();
   wireWorkspaceControls();

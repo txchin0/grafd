@@ -13,6 +13,7 @@ export interface Preferences {
   openSubgraphOnDoubleClick: boolean;
   editorLinkScheme: EditorLinkScheme;
   theme: ThemeId;
+  sidebarCollapsed: boolean;
 }
 
 export function defaultPreferences(): Preferences {
@@ -21,6 +22,7 @@ export function defaultPreferences(): Preferences {
     openSubgraphOnDoubleClick: true,
     editorLinkScheme: 'vscode',
     theme: DEFAULT_THEME_ID,
+    sidebarCollapsed: false,
   };
 }
 
@@ -46,6 +48,9 @@ export function parsePreferences(text: string | null | undefined): Preferences {
       ? record.editorLinkScheme
       : defaults.editorLinkScheme,
     theme: isThemeId(record.theme) ? record.theme : defaults.theme,
+    sidebarCollapsed: typeof record.sidebarCollapsed === 'boolean'
+      ? record.sidebarCollapsed
+      : defaults.sidebarCollapsed,
   };
 }
 
