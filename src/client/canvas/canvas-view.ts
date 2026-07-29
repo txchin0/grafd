@@ -62,6 +62,7 @@ import {
   transformPoint,
   transformRect,
   type ExpansionLayer,
+  type FrameExpansion,
   type FrameTransform,
 } from './expansion.js';
 
@@ -77,14 +78,7 @@ type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se';
 
 type Gesture =
   | { type: 'pan'; startView: View; startScreen: Point }
-  | {
-      type: 'edge';
-      from: FlowNode;
-      toWorld: Point;
-      hoverTarget: FlowNode | null;
-      innerDrop: { host: FlowNode; innerName: string } | null;
-      outerDrop: { host: FlowNode; innerName: string } | null;
-    }
+  | { type: 'edge'; from: FlowNode; toWorld: Point; hoverTarget: FlowNode | null }
   | { type: 'resize'; node: FlowNode; corner: ResizeCorner; startRect: Rect; startWorld: Point; scale: number }
   | {
       type: 'move';
@@ -125,14 +119,39 @@ type SceneTransition =
       resolve: () => void;
     };
 
-// Where an edge released on empty canvas should put the node it creates. Only edges leaving
-// a node inside an unfolded frame need one: at the top level the drop point is already in
-// the owning graph's coordinates.
-export type EmptyEdgeDrop =
-  // Inside the same frame the edge left from: an ordinary edge within that subgraph.
-  | { kind: 'inner'; host: FlowNode; point: Point }
-  // One level out, in the graph that owns the frame: an `{Inner Source}` edge on the host.
-  | { kind: 'outer'; host: FlowNode; innerName: string; point: Point };
+// What a released port-drag meant. The view classifies the release; main.ts turns the
+// classification into document edits. Several members describe an edge that is not the one the
+// pointer drew: a drag between a frame and the graph around it resolves to a single-level
+// subgraph refinement declared on the frame's host.
+//
+// Points travel in the coordinate space of the graph that will own the new node — world space
+// at the top level, frame-local whenever a host comes with them.
+export type EdgeDrop =
+  // Released back on the node the drag started from.
+  | { kind: 'source' }
+  // No single-level edge can express this release, so it creates nothing.
+  | { kind: 'rejected' }
+  // Both ends share a graph: an ordinary edge.
+  | { kind: 'node'; target: FlowNode }
+  // §5.7 target-side: declared on `target`, the frame's host, naming a node inside it.
+  | { kind: 'into-frame'; target: FlowNode; innerName: string }
+  // §5.8 source-side: declared on `host`, which owns the frame the drag left, naming the inner
+  // node it started from. The edge lives in the parent graph, not inside the subgraph.
+  | { kind: 'out-of-frame'; target: FlowNode; host: FlowNode; innerName: string }
+  // Released on an unresolved edge target: materialize that ghost and join it.
+  | { kind: 'ghost'; ghost: GhostNode }
+  // Empty canvas at the top level: create a node where it landed and join it.
+  | { kind: 'empty'; point: Point }
+  // Empty canvas inside the frame the drag left: a sibling in that subgraph.
+  | { kind: 'empty-inner'; host: FlowNode; point: Point }
+  // Empty canvas one level out, in the graph that owns the frame (§5.8).
+  | { kind: 'empty-outer'; host: FlowNode; innerName: string; point: Point };
+
+// The three releases that attach to a node already on the canvas, and so light it up under the
+// cursor while the drag is live.
+function dropAttachesToNode(drop: EdgeDrop): boolean {
+  return drop.kind === 'node' || drop.kind === 'into-frame' || drop.kind === 'out-of-frame';
+}
 
 // Rects and points reaching these callbacks are expressed in the coordinate space of the
 // graph that will own the new node — world space at the top level, frame-local space
@@ -143,18 +162,7 @@ export interface CanvasActions {
   nodeClicked(node: FlowNode): void;
   canvasClicked(): void;
   moveCommitted(nodes: FlowNode[]): void;
-  completeEdge(
-    fromNode: FlowNode,
-    targetNode: FlowNode | null,
-    worldPoint: Point,
-    extra?: {
-      droppedOnSource: boolean;
-      ghostTarget: GhostNode | null;
-      innerName?: string;
-      outerSource?: { host: FlowNode; innerName: string };
-      emptyDrop?: EmptyEdgeDrop;
-    },
-  ): void;
+  completeEdge(fromNode: FlowNode, drop: EdgeDrop): void;
   editEdge(edge: ModelEdge): void;
   editNodeTitle(node: FlowNode): void;
   openExpand(node: FlowNode): void;
@@ -193,6 +201,7 @@ const CREATE_MIN_SCREEN_HEIGHT = 10;
 const SNAP = 8;
 const PORT_RADIUS = 5;
 const PORT_HIT_RADIUS = 14;
+// Wider than the drawn stroke because rough.js jitters the ink a few pixels off the ideal curve.
 const EDGE_HIT_DISTANCE = 10;
 const FIT_PADDING = 80;
 // Where the origin sits relative to the viewport centre when there is nothing to frame.
@@ -730,7 +739,7 @@ export class CanvasView {
 
     const port = this.hitPort(world);
     if (port) {
-      this.gesture = { type: 'edge', from: port.node, toWorld: world, hoverTarget: null, innerDrop: null, outerDrop: null };
+      this.gesture = { type: 'edge', from: port.node, toWorld: world, hoverTarget: null };
       return;
     }
 
@@ -842,10 +851,9 @@ export class CanvasView {
       this.actions.viewChanged?.();
     } else if (gesture.type === 'edge') {
       gesture.toWorld = world;
-      const drop = this.resolveEdgeDrop(gesture.from, this.hitNode(world));
-      gesture.hoverTarget = drop.hoverTarget;
-      gesture.innerDrop = drop.innerDrop;
-      gesture.outerDrop = drop.outerDrop;
+      const rawTarget = this.hitNode(world);
+      const drop = this.resolveEdgeDrop(gesture.from, rawTarget, world);
+      gesture.hoverTarget = dropAttachesToNode(drop) ? rawTarget : null;
       this.requestRender();
     } else if (gesture.type === 'create' || gesture.type === 'marquee') {
       gesture.rect = normalizedRect(gesture.startWorld, world);
@@ -893,15 +901,7 @@ export class CanvasView {
     } else if (gesture.type === 'resize') {
       this.actions.moveCommitted([gesture.node]);
     } else if (gesture.type === 'edge') {
-      const rawTarget = this.hitNode(world);
-      const drop = this.resolveEdgeDrop(gesture.from, rawTarget);
-      this.actions.completeEdge(gesture.from, drop.targetNode, world, {
-        droppedOnSource: rawTarget === gesture.from,
-        ghostTarget: this.expansionLayer.isEmbedded(gesture.from) ? null : this.hitGhost(world),
-        innerName: drop.innerDrop?.innerName,
-        outerSource: drop.outerDrop ?? undefined,
-        emptyDrop: this.emptyEdgeDropFor(gesture.from, rawTarget, drop.targetNode, world) ?? undefined,
-      });
+      this.actions.completeEdge(gesture.from, this.resolveEdgeDrop(gesture.from, this.hitNode(world), world));
     } else if (gesture.type === 'create') {
       this.completeCreateGesture(gesture, world);
     } else if (gesture.type === 'marquee' && gesture.rect) {
@@ -940,78 +940,51 @@ export class CanvasView {
 
   // Port-drag between an expanded frame and the surrounding graph resolves to a single-level
   // subgraph refinement (§5.7 target-side entering a frame, §5.8 source-side leaving one).
-  private resolveEdgeDrop(
-    from: FlowNode,
-    rawTarget: FlowNode | null,
-  ): {
-    hoverTarget: FlowNode | null;
-    targetNode: FlowNode | null;
-    innerDrop: { host: FlowNode; innerName: string } | null;
-    outerDrop: { host: FlowNode; innerName: string } | null;
-  } {
-    if (!rawTarget || rawTarget === from) {
-      return { hoverTarget: null, targetNode: null, innerDrop: null, outerDrop: null };
-    }
-    if (this.inSameModel(from, rawTarget)) {
-      return { hoverTarget: rawTarget, targetNode: rawTarget, innerDrop: null, outerDrop: null };
-    }
+  private resolveEdgeDrop(from: FlowNode, rawTarget: FlowNode | null, world: Point): EdgeDrop {
+    if (rawTarget === from) return { kind: 'source' };
+    const ontoNode = rawTarget ? this.dropOntoNode(from, rawTarget) : null;
+    return ontoNode ?? this.dropOntoEmptyCanvas(from, rawTarget, world);
+  }
+
+  // Null when the two nodes are in different graphs and no single-level form joins them.
+  private dropOntoNode(from: FlowNode, rawTarget: FlowNode): EdgeDrop | null {
+    if (this.inSameModel(from, rawTarget)) return { kind: 'node', target: rawTarget };
     if (this.expansionLayer.isEmbedded(from)) {
-      // §5.8: an edge dragged out of a frame lands on a sibling of the frame's host and
-      // becomes an `{Inner Source}` edge declared on the host. Single-level: the host must
-      // share a graph with the drop target.
+      // §5.8: an edge dragged out of a frame lands on a sibling of the frame's host.
+      // Single-level: the host must share a graph with the drop target.
       const host = this.expansionLayer.hostOf(from);
-      if (!host || host === rawTarget || !this.inSameModel(host, rawTarget)) {
-        return { hoverTarget: null, targetNode: null, innerDrop: null, outerDrop: null };
-      }
-      return {
-        hoverTarget: rawTarget,
-        targetNode: rawTarget,
-        innerDrop: null,
-        outerDrop: { host, innerName: from.name },
-      };
+      if (!host || host === rawTarget || !this.inSameModel(host, rawTarget)) return null;
+      return { kind: 'out-of-frame', target: rawTarget, host, innerName: from.name };
     }
     const host = this.expansionLayer.hostOf(rawTarget);
     // Dropping from a host onto a node inside its own frame would be a self-edge; reject it.
-    if (!host || host === from || !this.inSameModel(from, host)) {
-      return { hoverTarget: null, targetNode: null, innerDrop: null, outerDrop: null };
-    }
-    return {
-      hoverTarget: rawTarget,
-      targetNode: host,
-      innerDrop: { host, innerName: rawTarget.name },
-      outerDrop: null,
-    };
+    if (!host || host === from || !this.inSameModel(from, host)) return null;
+    return { kind: 'into-frame', target: host, innerName: rawTarget.name };
   }
 
-  // A frame's empty interior hit-tests as its host, so "released on empty canvas" means no
-  // node under the cursor *or* only the frame the cursor is drawing inside. Releasing on a
-  // node the edge cannot legally reach stays a no-op rather than creating one beneath it.
-  private emptyEdgeDropFor(
-    from: FlowNode,
-    rawTarget: FlowNode | null,
-    resolvedTarget: FlowNode | null,
-    world: Point,
-  ): EmptyEdgeDrop | null {
-    if (resolvedTarget) return null;
-    if (rawTarget && !this.isFrameBackground(rawTarget, world)) return null;
-    return this.resolveEmptyEdgeDrop(from, world);
-  }
-
-  // An edge released on empty canvas from inside an unfolded frame. Landing in the frame it
-  // left creates a sibling in that subgraph; landing in the graph that owns the frame creates
-  // a node there, joined to the subgraph by an `{Inner Source}` edge on the host (§5.8).
-  // Anything further out has no single-level form to express, so it creates nothing.
-  private resolveEmptyEdgeDrop(from: FlowNode, world: Point): EmptyEdgeDrop | null {
+  // A frame's empty interior hit-tests as its host, so "released on empty canvas" means no node
+  // under the cursor *or* only the frame the cursor is drawing inside.
+  //
+  // A drag that started at the top level always creates something where it landed. One that
+  // left a frame can only express two single-level forms — a sibling in the frame it left, or a
+  // node one level out joined by an `{Inner Source}` edge on the host (§5.8) — and releasing it
+  // anywhere else, including on a node it cannot legally reach, creates nothing.
+  private dropOntoEmptyCanvas(from: FlowNode, rawTarget: FlowNode | null, world: Point): EdgeDrop {
     const host = this.expansionLayer.hostOf(from);
-    if (!host) return null;
+    if (!host) {
+      const ghost = this.hitGhost(world);
+      return ghost ? { kind: 'ghost', ghost } : { kind: 'empty', point: world };
+    }
+    if (rawTarget && !this.isFrameBackground(rawTarget, world)) return { kind: 'rejected' };
+
     const dropFrame = this.expansionLayer.frameAt(world);
     const dropHost = dropFrame?.host ?? null;
     const point = dropFrame ? inverseTransformPoint(world, dropFrame.transform) : world;
-    if (dropHost === host) return { kind: 'inner', host, point };
+    if (dropHost === host) return { kind: 'empty-inner', host, point };
     if (dropHost === this.expansionLayer.hostOf(host)) {
-      return { kind: 'outer', host, innerName: from.name, point };
+      return { kind: 'empty-outer', host, innerName: from.name, point };
     }
-    return null;
+    return { kind: 'rejected' };
   }
 
   // Marquee reaches into unfolded frames, but a node is skipped when one of its host
@@ -1111,6 +1084,20 @@ export class CanvasView {
     this.actions.contextMenu({ kind: 'canvas', world }, screenPoint);
   }
 
+  // The scale a node is actually drawn at: the camera's, times the frame nesting it sits in.
+  // Hit tolerances divide by this so a target stays equally easy to hit however deeply it is
+  // nested — and it has to be the product, because the clamps applied to it are not linear.
+  private screenScaleOf(node: FlowNode): number {
+    return this.view.scale * this.expansionLayer.scaleOf(node);
+  }
+
+  // Descending into an unfolded frame: the point in the subgraph's own coordinates, or null
+  // when it falls outside the frame's interior. The one place the frame transform is inverted.
+  private pointInsideFrame(expansion: FrameExpansion, local: Point): Point | null {
+    if (!rectContains(expansion.inner, local)) return null;
+    return inverseTransformPoint(local, expansion.transform);
+  }
+
   private hitNode(world: Point): FlowNode | null {
     return this.hitNodeIn(this.model, world);
   }
@@ -1119,11 +1106,9 @@ export class CanvasView {
     for (let index = model.nodes.length - 1; index >= 0; index -= 1) {
       const node = model.nodes[index];
       const expansion = model.display?.expansions.get(node);
-      if (expansion && rectContains(expansion.inner, world)) {
-        const transform = expansion.transform;
-        const local = { x: (world.x - transform.tx) / transform.scale, y: (world.y - transform.ty) / transform.scale };
-        return this.hitNodeIn(expansion.subModel, local) ?? node;
-      }
+      const inside = expansion ? this.pointInsideFrame(expansion, world) : null;
+      // A frame answers for its whole interior, so a miss inside it is a hit on the host.
+      if (expansion && inside) return this.hitNodeIn(expansion.subModel, inside) ?? node;
       if (rectContains(displayRectOf(model, node), world)) return node;
     }
     return null;
@@ -1211,26 +1196,22 @@ export class CanvasView {
   }
 
   private hitBadge(world: Point): BadgeHit | null {
-    return this.hitBadgeIn(this.model, world, this.view.scale);
+    return this.hitBadgeIn(this.model, world);
   }
 
-  private hitBadgeIn(model: FlowModel, world: Point, effectiveScale: number): BadgeHit | null {
-    const hitRadius = BADGE_HIT_RADIUS / Math.min(effectiveScale, 1);
+  private hitBadgeIn(model: FlowModel, world: Point): BadgeHit | null {
     for (let index = model.nodes.length - 1; index >= 0; index -= 1) {
       const node = model.nodes[index];
+      const hitRadius = BADGE_HIT_RADIUS / Math.min(this.screenScaleOf(node), 1);
       for (const badge of nodeBadges(model, node, this.expansionLayer.isOpen(node.id))) {
         if (Math.hypot(world.x - badge.x, world.y - badge.y) <= hitRadius) {
           return { kind: badge.kind, node };
         }
       }
       const expansion = model.display?.expansions.get(node);
-      if (expansion && rectContains(expansion.inner, world)) {
-        const transform = expansion.transform;
-        const subWorld = {
-          x: (world.x - transform.tx) / transform.scale,
-          y: (world.y - transform.ty) / transform.scale,
-        };
-        const hit = this.hitBadgeIn(expansion.subModel, subWorld, effectiveScale * transform.scale);
+      const inside = expansion ? this.pointInsideFrame(expansion, world) : null;
+      if (expansion && inside) {
+        const hit = this.hitBadgeIn(expansion.subModel, inside);
         if (hit) return hit;
       }
     }
@@ -1238,23 +1219,23 @@ export class CanvasView {
   }
 
   private hitEdge(world: Point): ModelEdge | null {
-    return this.hitEdgeIn(this.model, world, this.view.scale);
+    return this.hitEdgeIn(this.model, world);
   }
 
-  private hitEdgeIn(model: FlowModel, world: Point, effectiveScale: number): ModelEdge | null {
-    for (const [, expansion] of model.display?.expansions ?? []) {
-      if (!rectContains(expansion.inner, world)) continue;
-      const transform = expansion.transform;
-      const local = { x: (world.x - transform.tx) / transform.scale, y: (world.y - transform.ty) / transform.scale };
-      const hit = this.hitEdgeIn(expansion.subModel, local, effectiveScale * transform.scale);
+  // Unlike nodes and badges, every containing frame is searched before this model's own edges:
+  // an edge inside a frame is drawn over the frame's fill, so it wins wherever they overlap.
+  private hitEdgeIn(model: FlowModel, world: Point): ModelEdge | null {
+    for (const expansion of model.display?.expansions.values() ?? []) {
+      const inside = this.pointInsideFrame(expansion, world);
+      if (!inside) continue;
+      const hit = this.hitEdgeIn(expansion.subModel, inside);
       if (hit) return hit;
     }
-    const hitDistance = EDGE_HIT_DISTANCE / effectiveScale;
     for (const edge of model.edges) {
       const geometry = this.edgeGeometryOf(edge);
       if (!geometry) continue;
       if (geometry.labelRect && rectContains(geometry.labelRect, world)) return edge;
-      if (distanceToEdgePath(world, geometry.path) <= hitDistance) return edge;
+      if (distanceToEdgePath(world, geometry.path) <= EDGE_HIT_DISTANCE / this.screenScaleOf(edge.from)) return edge;
     }
     return null;
   }
@@ -1437,7 +1418,7 @@ export class CanvasView {
       fontPx: expansion ? FRAME_TITLE_FONT_PX : TITLE_FONT_PX,
       align: expansion ? 'left' : 'center',
       color: expansion ? canvasPalette.expandStroke : canvasPalette.ink,
-      screenScale: this.view.scale * this.expansionLayer.scaleOf(node),
+      screenScale: this.screenScaleOf(node),
     };
   }
 

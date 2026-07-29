@@ -1,12 +1,13 @@
 // Pointer gestures aimed at an unfolded frame: the graph a drawn rectangle belongs to, and
 // where an edge dropped on empty canvas puts the node it creates.
 
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, vi, type Mock } from 'vitest';
 import { parseFlow, type FlowNode, type Rect } from '../src/shared/flow-format.js';
 import { allNodes, assignMissingIds, buildModel } from '../src/client/flow-doc.js';
 import type { Point } from '../src/client/geometry.js';
-import { ExpansionLayer, transformRect, type FrameTarget } from '../src/client/canvas/expansion.js';
-import type { CanvasActions } from '../src/client/canvas/canvas-view.js';
+import { ExpansionLayer, transformPoint, transformRect, type FrameTarget } from '../src/client/canvas/expansion.js';
+import { BADGE_HIT_RADIUS, nodeBadges } from '../src/client/canvas/node-badges.js';
+import type { CanvasActions, EdgeDrop } from '../src/client/canvas/canvas-view.js';
 import { createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
 
 // A subgraph far larger than the frame that shows it, so its contents render scaled down and
@@ -177,6 +178,18 @@ function emptySpotIn(frame: FrameTarget, occupied: Rect[]): Point {
   return emptyRegionIn(frame, occupied);
 }
 
+// The single classification the view hands to completeEdge for a released port-drag.
+function dropOf(actions: CanvasActions) {
+  const calls = (actions.completeEdge as unknown as { mock: { calls: [FlowNode, EdgeDrop][] } }).mock.calls;
+  expect(calls.length).toBe(1);
+  return calls[0][1];
+}
+
+function sourceOf(actions: CanvasActions): FlowNode {
+  const calls = (actions.completeEdge as unknown as { mock: { calls: [FlowNode, EdgeDrop][] } }).mock.calls;
+  return calls[0][0];
+}
+
 function portOf(view: InstanceType<typeof CanvasView>, node: FlowNode): Point {
   const rect = view.rect(node);
   return { x: rect.x + rect.w, y: rect.y + rect.h / 2 };
@@ -246,11 +259,6 @@ describe('drawing a node rectangle inside an unfolded frame', () => {
 });
 
 describe('dragging an edge from inside a frame onto empty canvas', () => {
-  function emptyDropOf(actions: CanvasActions) {
-    const calls = (actions.completeEdge as unknown as { mock: { calls: unknown[][] } }).mock.calls;
-    return (calls[0][3] as { emptyDrop?: { kind: string; host: FlowNode; innerName?: string; point: Point } }).emptyDrop;
-  }
-
   it('creates a sibling in the same subgraph when released inside the frame', () => {
     const { view, layer, actions, canvas, nodeNamed } = openedCanvas(FRAMED_FLOW, ['Host']);
     const host = nodeNamed('Host');
@@ -261,10 +269,10 @@ describe('dragging an edge from inside a frame onto empty canvas', () => {
     const target = emptySpotIn(frame, [view.rect(innerA), view.rect(nodeNamed('Inner B'))]);
     dragOnCanvas(canvas, portOf(view, innerA), target);
 
-    const drop = emptyDropOf(actions)!;
-    expect(drop.kind).toBe('inner');
-    expect(drop.host).toBe(host);
-    expect(transformRect({ ...drop.point, w: 0, h: 0 }, frame.transform).x).toBeCloseTo(target.x, 6);
+    const drop = dropOf(actions);
+    expect(drop).toMatchObject({ kind: 'empty-inner', host });
+    const point = (drop as Extract<EdgeDrop, { kind: 'empty-inner' }>).point;
+    expect(transformRect({ ...point, w: 0, h: 0 }, frame.transform).x).toBeCloseTo(target.x, 6);
   });
 
   it('creates an inner-source edge one level up when released in the graph that owns the frame', () => {
@@ -274,8 +282,8 @@ describe('dragging an edge from inside a frame onto empty canvas', () => {
 
     dragOnCanvas(canvas, portOf(view, innerA), { x: 2600, y: 1800 });
 
-    expect(emptyDropOf(actions)).toEqual({
-      kind: 'outer',
+    expect(dropOf(actions)).toEqual({
+      kind: 'empty-outer',
       host: nodeNamed('Host'),
       innerName: 'Inner A',
       point: { x: 2600, y: 1800 },
@@ -292,10 +300,11 @@ describe('dragging an edge from inside a frame onto empty canvas', () => {
     const target = emptySpotIn(outerFrame, [innerFrame.interior, view.rect(nodeNamed('Middle')), view.rect(nodeNamed('Filler'))]);
     dragOnCanvas(canvas, portOf(view, leaf), target);
 
-    const drop = emptyDropOf(actions)!;
-    expect(drop.kind).toBe('outer');
-    expect(drop.host).toBe(nodeNamed('Middle'));
-    expect(drop.innerName).toBe('Leaf');
+    expect(dropOf(actions)).toMatchObject({
+      kind: 'empty-outer',
+      host: nodeNamed('Middle'),
+      innerName: 'Leaf',
+    });
   });
 
   it('creates nothing when released more than one level out', () => {
@@ -305,7 +314,7 @@ describe('dragging an edge from inside a frame onto empty canvas', () => {
 
     dragOnCanvas(canvas, portOf(view, leaf), { x: 2600, y: 1800 });
 
-    expect(emptyDropOf(actions)).toBeUndefined();
+    expect(dropOf(actions)).toEqual({ kind: 'rejected' });
   });
 
   it('creates nothing when released on a node the edge cannot reach', () => {
@@ -320,17 +329,19 @@ describe('dragging an edge from inside a frame onto empty canvas', () => {
     const header = { x: frame.interior.x + 20, y: (view.rect(host).y + frame.interior.y) / 2 };
     dragOnCanvas(canvas, portOf(view, innerA), header);
 
-    expect(emptyDropOf(actions)).toBeUndefined();
+    expect(dropOf(actions)).toEqual({ kind: 'rejected' });
   });
 
-  it('leaves top-level edge drops alone', () => {
+  // A drag that never entered a frame is plain empty canvas: the node is created where it
+  // landed, in world coordinates, with no host to route it through.
+  it('treats a top-level release as plain empty canvas', () => {
     const { view, actions, canvas, nodeNamed } = openedCanvas(FRAMED_FLOW, ['Host']);
     const sibling = nodeNamed('Sibling');
     view.select(sibling);
 
     dragOnCanvas(canvas, portOf(view, sibling), { x: 2600, y: 1800 });
 
-    expect(emptyDropOf(actions)).toBeUndefined();
+    expect(dropOf(actions)).toEqual({ kind: 'empty', point: { x: 2600, y: 1800 } });
   });
 });
 
@@ -366,5 +377,114 @@ describe('edge geometry across nested models', () => {
 
     expect(view.edgeGeometryOf(topEdge)).toBe(before[0]);
     expect(view.edgeGeometryOf(innerEdge)).toBe(before[1]);
+  });
+});
+
+// Dropping a port-drag on a node that lives in another graph resolves to a single-level
+// subgraph refinement. These pin what the view hands to completeEdge, because the edge the
+// document ends up with is not the edge the pointer described: §5.7 declares it on the frame's
+// host with an `{Inner}` target, §5.8 declares it on the host with an `{Inner}` source.
+describe('dragging an edge onto a node in another graph', () => {
+  it('§5.7 retargets onto the frame host and names the inner node', () => {
+    const { view, actions, canvas, nodeNamed } = openedCanvas(FRAMED_FLOW, ['Host']);
+    const sibling = nodeNamed('Sibling');
+    view.select(sibling);
+
+    dragOnCanvas(canvas, portOf(view, sibling), rectCenter(view.rect(nodeNamed('Inner A'))));
+
+    expect(sourceOf(actions)).toBe(sibling);
+    expect(dropOf(actions)).toEqual({ kind: 'into-frame', target: nodeNamed('Host'), innerName: 'Inner A' });
+  });
+
+  it('§5.8 keeps the sibling as target and declares the inner source on the host', () => {
+    const { view, actions, canvas, nodeNamed } = openedCanvas(FRAMED_FLOW, ['Host']);
+    const innerA = nodeNamed('Inner A');
+    view.select(innerA);
+
+    dragOnCanvas(canvas, portOf(view, innerA), rectCenter(view.rect(nodeNamed('Sibling'))));
+
+    expect(dropOf(actions)).toEqual({
+      kind: 'out-of-frame',
+      target: nodeNamed('Sibling'),
+      host: nodeNamed('Host'),
+      innerName: 'Inner A',
+    });
+  });
+
+  // Reaching into a host's own frame has no single-level form, so the release falls back to
+  // plain empty canvas — which at the top level still creates a node where it landed.
+  it('does not join a host to a node inside its own frame', () => {
+    const { view, actions, canvas, nodeNamed } = openedCanvas(FRAMED_FLOW, ['Host']);
+    const host = nodeNamed('Host');
+    view.select(host);
+
+    dragOnCanvas(canvas, portOf(view, host), rectCenter(view.rect(nodeNamed('Inner A'))));
+
+    expect(dropOf(actions).kind).toBe('empty');
+  });
+
+  it('reports a drop back on the source as its own outcome, not as empty canvas', () => {
+    const { view, actions, canvas, nodeNamed } = openedCanvas(FRAMED_FLOW, ['Host']);
+    const sibling = nodeNamed('Sibling');
+    view.select(sibling);
+
+    dragOnCanvas(canvas, portOf(view, sibling), rectCenter(view.rect(sibling)));
+
+    expect(dropOf(actions)).toEqual({ kind: 'source' });
+  });
+
+  // The drag highlight follows the node under the cursor, which for §5.7 is the inner node —
+  // not the host the edge will actually be declared on.
+  it('highlights the inner node during the drag, not the host it retargets to', () => {
+    const { view, canvas, nodeNamed } = openedCanvas(FRAMED_FLOW, ['Host']);
+    const sibling = nodeNamed('Sibling');
+    view.select(sibling);
+
+    const start = portOf(view, sibling);
+    const over = rectCenter(view.rect(nodeNamed('Inner A')));
+    listenerFor(canvas, 'pointerdown')({ button: 0, pointerId: 1, clientX: start.x, clientY: start.y, shiftKey: false, detail: 1 });
+    listenerFor(canvas, 'pointermove')({ pointerId: 1, clientX: over.x, clientY: over.y });
+    (view as unknown as { render(): void }).render();
+
+    const strokeRects = (canvas.getContext('2d') as unknown as { strokeRect: Mock }).strokeRect.mock.calls;
+    const outlined = (node: FlowNode) => {
+      const rect = view.rect(node);
+      return strokeRects.some(([x, y, w, h]: number[]) =>
+        Math.abs(x - (rect.x - 3)) < 0.5 && Math.abs(y - (rect.y - 3)) < 0.5
+        && Math.abs(w - (rect.w + 6)) < 0.5 && Math.abs(h - (rect.h + 6)) < 0.5);
+    };
+    expect(outlined(nodeNamed('Inner A'))).toBe(true);
+    expect(outlined(nodeNamed('Host'))).toBe(false);
+  });
+});
+
+// A hit radius is a screen-space tolerance applied to model-space distances, so it divides by
+// the camera scale *and* the frame scale a node is nested in. The clamp is applied to the
+// product, so neither factor can be dropped or reassembled from the other.
+describe('hit tolerance inside a scaled frame', () => {
+  it('keeps a nested badge reachable at the product of camera and frame scale', () => {
+    const { view, layer, canvas, nodeNamed } = openedCanvas(NESTED_FLOW, ['Host']);
+    const middle = nodeNamed('Middle');
+    const frame = layer.frameFor(nodeNamed('Host'))!;
+    const frameScale = frame.transform.scale;
+    expect(frameScale).toBeLessThan(1);
+
+    const cameraScale = 0.5;
+    view.setViewNow({ x: 0, y: 0, scale: cameraScale });
+
+    const radiusFor = (scale: number) => BADGE_HIT_RADIUS / Math.min(scale, 1);
+    const correct = radiusFor(cameraScale * frameScale);
+    const ignoringCamera = radiusFor(frameScale);
+    expect(correct).toBeGreaterThan(ignoringCamera);
+
+    // Between the two radii: reachable only if the camera scale is part of the tolerance.
+    const probeDistance = (correct + ignoringCamera) / 2;
+    const badge = nodeBadges(frame.model, middle, false)[0];
+    const probe = view.worldToScreen(
+      transformPoint({ x: badge.x + probeDistance, y: badge.y }, frame.transform),
+    );
+
+    listenerFor(canvas, 'pointermove')({ pointerId: 1, clientX: probe.x, clientY: probe.y });
+    expect(canvas.style.cursor).toBe('pointer');
   });
 });

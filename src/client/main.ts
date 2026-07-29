@@ -43,9 +43,9 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
-import type { FlowModel, GhostNode, ModelEdge } from './flow-doc.js';
+import type { FlowModel, ModelEdge } from './flow-doc.js';
 import type { Point } from './geometry.js';
-import { CanvasView, type ContextTarget, type EmptyEdgeDrop, type Tool, type View } from './canvas/canvas-view.js';
+import { CanvasView, type ContextTarget, type EdgeDrop, type Tool, type View } from './canvas/canvas-view.js';
 import { createContextMenu, type MenuItem } from './context-menu.js';
 import type { Modal } from './modal.js';
 import { createPreferencesDialog } from './preferences-dialog.js';
@@ -1074,11 +1074,14 @@ function commitMovesFor(nodes: FlowNode[]): void {
 // An edge dragged from inside a frame onto empty canvas. Released inside the same frame it
 // creates a sibling in that subgraph; released one level out it creates a node in the graph
 // that owns the frame, reached from inside by an `{Inner Source}` edge on the host (§5.8).
-function createNodeForEmptyDrop(fromNode: FlowNode, drop: EmptyEdgeDrop): void {
+function createNodeForEmptyDrop(
+  fromNode: FlowNode,
+  drop: Extract<EdgeDrop, { kind: 'empty-inner' | 'empty-outer' }>,
+): void {
   const rect = centeredDefaultRect(drop.point);
   const host = liveNode(drop.host);
   let created: FlowNode | null = null;
-  if (drop.kind === 'inner') {
+  if (drop.kind === 'empty-inner') {
     const target = creationTargetFor(host);
     if (!target) return;
     const source = liveNode(fromNode);
@@ -1096,72 +1099,79 @@ function createNodeForEmptyDrop(fromNode: FlowNode, drop: EmptyEdgeDrop): void {
   if (created) focusNewNode(created);
 }
 
-function completeEdge(
-  fromNode: FlowNode,
-  targetNode: FlowNode | null,
-  worldPoint: Point,
-  extra?: {
-    droppedOnSource: boolean;
-    ghostTarget: GhostNode | null;
-    innerName?: string;
-    outerSource?: { host: FlowNode; innerName: string };
-    emptyDrop?: EmptyEdgeDrop;
-  },
-): void {
-  if (!openFlow || extra?.droppedOnSource) return;
+function editCreatedEdge(spec: EdgeSpec | null): void {
+  const createdEdge = spec ? findEdge(spec) : null;
+  if (!createdEdge) return;
+  view.selectedEdge = createdEdge;
+  editors.openEdgeEditor(createdEdge);
+}
+
+function addEdgeToExistingNode(fromNode: FlowNode, targetName: string, innerName: string | null): void {
+  let createdSpec: EdgeSpec | null = null;
+  mutate(() => {
+    createdSpec = FlowDoc.addEdge(fromNode, targetName, null, innerName);
+  }, { commit: 'now' });
+  editCreatedEdge(createdSpec);
+}
+
+// Invents the node the edge points at. A ghost already carries the name the document asked for,
+// so only a node conjured out of empty canvas still needs one — and gets the title editor
+// opened on it rather than the edge editor.
+function addEdgeToNewNode(fromNode: FlowNode, rect: Rect, ghostName: string | null): void {
   const flow = openFlow;
-  const scopeItems = () => FlowDoc.scopeItems(flow.doc, flow.scope);
-
-  // §5.8: dragging out of a frame onto a sibling of its host declares an `{Inner Source}`
-  // edge on the host — the edge lives in the parent graph, not inside the subgraph.
-  if (extra?.outerSource && targetNode) {
-    const { host, innerName } = extra.outerSource;
-    let createdSpec: EdgeSpec | null = null;
-    applyEdit(host, () => {
-      createdSpec = FlowDoc.addEdge(host, targetNode.name, null, null, innerName);
-    }, { commit: 'now' });
-    const createdEdge = createdSpec ? findEdge(createdSpec) : null;
-    if (createdEdge) {
-      view.selectedEdge = createdEdge;
-      editors.openEdgeEditor(createdEdge);
-    }
-    return;
-  }
-
-  if (expansions.isEmbedded(fromNode)) {
-    if (targetNode) {
-      applyEdit(fromNode, () => FlowDoc.addEdge(fromNode, targetNode.name), { commit: 'now' });
-      return;
-    }
-    if (extra?.emptyDrop) createNodeForEmptyDrop(fromNode, extra.emptyDrop);
-    return;
-  }
-
+  if (!flow) return;
   let createdNode: FlowNode | null = null;
   let createdSpec: EdgeSpec | null = null;
   mutate(() => {
-    let targetName: string;
-    if (targetNode) {
-      targetName = targetNode.name;
-    } else if (extra?.ghostTarget) {
-      createdNode = FlowDoc.addNode(scopeItems(), extra.ghostTarget.pos, extra.ghostTarget.name);
-      targetName = createdNode.name;
-    } else {
-      createdNode = FlowDoc.addNode(scopeItems(), centeredDefaultRect(worldPoint));
-      targetName = createdNode.name;
-    }
-    createdSpec = FlowDoc.addEdge(fromNode, targetName, null, extra?.innerName ?? null);
+    createdNode = FlowDoc.addNode(FlowDoc.scopeItems(flow.doc, flow.scope), rect, ghostName ?? undefined);
+    createdSpec = FlowDoc.addEdge(fromNode, createdNode.name, null, null);
   }, { commit: 'now' });
 
-  if (createdNode && !extra?.ghostTarget) {
+  if (!ghostName && createdNode) {
     view.select(createdNode);
     editors.openNodeEditor(createdNode, { focusTitle: true });
     return;
   }
-  const createdEdge = flow.model.edges.find((edge) => edge.spec === createdSpec);
-  if (createdEdge) {
-    view.selectedEdge = createdEdge;
-    editors.openEdgeEditor(createdEdge);
+  editCreatedEdge(createdSpec);
+}
+
+function completeEdge(fromNode: FlowNode, drop: EdgeDrop): void {
+  if (!openFlow) return;
+  switch (drop.kind) {
+    case 'source':
+    case 'rejected':
+      return;
+    case 'out-of-frame': {
+      // §5.8: the `{Inner Source}` edge is declared on the host, so it lives in the parent
+      // graph rather than inside the subgraph the drag left.
+      let createdSpec: EdgeSpec | null = null;
+      applyEdit(drop.host, () => {
+        createdSpec = FlowDoc.addEdge(drop.host, drop.target.name, null, null, drop.innerName);
+      }, { commit: 'now' });
+      editCreatedEdge(createdSpec);
+      return;
+    }
+    case 'node':
+      // An edge between two nodes inside a frame belongs to the .flow file that owns them.
+      if (expansions.isEmbedded(fromNode)) {
+        applyEdit(fromNode, () => FlowDoc.addEdge(fromNode, drop.target.name), { commit: 'now' });
+        return;
+      }
+      addEdgeToExistingNode(fromNode, drop.target.name, null);
+      return;
+    case 'into-frame':
+      addEdgeToExistingNode(fromNode, drop.target.name, drop.innerName);
+      return;
+    case 'ghost':
+      addEdgeToNewNode(fromNode, drop.ghost.pos, drop.ghost.name);
+      return;
+    case 'empty':
+      addEdgeToNewNode(fromNode, centeredDefaultRect(drop.point), null);
+      return;
+    case 'empty-inner':
+    case 'empty-outer':
+      createNodeForEmptyDrop(fromNode, drop);
+      return;
   }
 }
 
