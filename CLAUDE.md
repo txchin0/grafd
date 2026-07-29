@@ -46,9 +46,10 @@ editor-owned node properties:
 - `pos: x, y, w, h` — the node's canvas rectangle
 
 Each workspace additionally has a `graf.manifest.json` at its root
-(`src/shared/manifest.ts`): the workspace `entrypoint` plus UI state (active flow, per-flow
-cameras). It is editor-owned, ignored by agents apart from `entrypoint`, and travels
-through the same read/write path as .flow files.
+(`src/shared/manifest.ts`): the workspace `entrypoint`, its `display` settings (the base
+rough.js roughness the canvas draws with), plus UI state (active flow, per-flow cameras). It
+is editor-owned, ignored by agents apart from `entrypoint`, and travels through the same
+read/write path as .flow files.
 
 Everything else follows the spec. `src/shared/flow-format.ts` is the single
 parser/serializer, used by both the server and the browser, and defines the shared domain

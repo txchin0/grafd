@@ -15,7 +15,7 @@ You are reading a `.flow` workspace. This guide defines how to parse, interpret,
 
 ```
 workspace/
-  graf.manifest.json     # editor state: entrypoint + UI state (not for you)
+  graf.manifest.json     # editor state: entrypoint + display and UI state (not for you)
   SAVE-GUIDE.md          # this guide
   main.flow              # root graph (whatever the manifest's entrypoint names)
   auth/

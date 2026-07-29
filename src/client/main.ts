@@ -1243,7 +1243,20 @@ function applyPreferences(preferences: Preferences): void {
   view.requestRender();
 }
 
-const preferencesDialog = createPreferencesDialog(applyPreferences);
+// Unlike the user-level preferences, the workspace's display settings are read back from the
+// manifest the editor already has open rather than from storage of their own.
+function applyWorkspaceDisplay(): void {
+  view.baseRoughness = uiState.roughness();
+  view.requestRender();
+}
+
+const preferencesDialog = createPreferencesDialog(applyPreferences, {
+  roughness: () => uiState.roughness(),
+  setRoughness: (value) => {
+    uiState.setRoughness(value);
+    applyWorkspaceDisplay();
+  },
+});
 
 // Only one modal is ever up at a time; Escape closes whichever it is.
 const modals: Modal[] = [screenshot, preferencesDialog];
@@ -1469,6 +1482,7 @@ async function switchWorkspace(next: Workspace, { preferHash = false } = {}): Pr
     workspaceFiles = [];
   }
   uiState.adopt(await next.readFile(MANIFEST_FILE_NAME), workspaceFiles);
+  applyWorkspaceDisplay();
   renderFileList();
   renderWorkspaceBar();
 

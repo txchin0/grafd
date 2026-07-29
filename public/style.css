@@ -588,6 +588,27 @@ html, body {
 
 #preferences-options select { width: 190px; }
 
+/* Marks where the user-level options end and the ones stored in this workspace's manifest
+   begin — the two are saved to different places and travel differently. */
+.settings-group-title {
+  margin: 6px 0 0;
+  font-size: var(--text-caption);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border-top: 1px solid var(--panel-border);
+  padding-top: 10px;
+}
+
+.settings-hint { margin: -4px 0 0; font-size: var(--text-caption); }
+
+/* Slider and readout stay together on the right, rather than being spread apart by the
+   space-between the other option rows use. */
+.slider-row { justify-content: flex-start; }
+.slider-row input[type="range"] { width: 150px; margin-left: auto; accent-color: var(--accent); }
+.slider-row output { width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+
 #screenshot-preview-frame {
   display: flex;
   align-items: center;

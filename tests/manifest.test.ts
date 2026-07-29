@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_ROUGHNESS,
   MANIFEST_FORMAT,
+  MAX_ROUGHNESS,
+  MIN_ROUGHNESS,
   chooseStartupFlow,
   defaultEntrypoint,
   emptyManifest,
@@ -15,6 +18,7 @@ describe('parseManifest', () => {
     manifest.ui.activeFlow = 'auth/login.flow';
     manifest.ui.cameras['main.flow'] = { x: 10, y: -20, scale: 1.5 };
     manifest.ui.expansions['main.flow'] = ['node-a', 'node-b'];
+    manifest.display.roughness = 2.5;
     expect(parseManifest(serializeManifest(manifest))).toEqual(manifest);
   });
 
@@ -30,8 +34,30 @@ describe('parseManifest', () => {
     expect(parsed).toEqual({
       format: MANIFEST_FORMAT,
       entrypoint: null,
+      display: { roughness: DEFAULT_ROUGHNESS },
       ui: { activeFlow: null, cameras: { 'b.flow': { x: 1, y: 2, scale: 3 } }, expansions: {} },
     });
+  });
+
+  it('defaults roughness when it is missing or not a finite number', () => {
+    const roughnessOf = (display: unknown) => parseManifest(JSON.stringify({ display }))?.display.roughness;
+    expect(roughnessOf(undefined)).toBe(DEFAULT_ROUGHNESS);
+    expect(roughnessOf(null)).toBe(DEFAULT_ROUGHNESS);
+    expect(roughnessOf('rough')).toBe(DEFAULT_ROUGHNESS);
+    expect(roughnessOf({})).toBe(DEFAULT_ROUGHNESS);
+    expect(roughnessOf({ roughness: '2' })).toBe(DEFAULT_ROUGHNESS);
+    // JSON has no literal for these, so they serialize to null and must not survive as one.
+    expect(roughnessOf({ roughness: Number.NaN })).toBe(DEFAULT_ROUGHNESS);
+    expect(roughnessOf({ roughness: Number.POSITIVE_INFINITY })).toBe(DEFAULT_ROUGHNESS);
+  });
+
+  it('clamps roughness into the supported range', () => {
+    const roughnessOf = (roughness: number) =>
+      parseManifest(JSON.stringify({ display: { roughness } }))?.display.roughness;
+    expect(roughnessOf(-3)).toBe(MIN_ROUGHNESS);
+    expect(roughnessOf(999)).toBe(MAX_ROUGHNESS);
+    expect(roughnessOf(0)).toBe(0);
+    expect(roughnessOf(4.5)).toBe(4.5);
   });
 
   it('reads expansions and drops malformed entries', () => {

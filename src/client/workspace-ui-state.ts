@@ -1,6 +1,6 @@
-// The workspace's `graf.manifest.json`: its entrypoint plus the UI state the editor remembers
-// between sessions — which flow was open, where each flow's camera sat, and which frames were
-// unfolded in it.
+// The workspace's `graf.manifest.json`: its entrypoint, its display settings, plus the UI
+// state the editor remembers between sessions — which flow was open, where each flow's camera
+// sat, and which frames were unfolded in it.
 //
 // Saves are debounced because the events that dirty this are continuous: every pan and zoom
 // records a camera. It is editor-owned and agents ignore everything but `entrypoint`, so a
@@ -10,6 +10,7 @@
 import {
   MANIFEST_FILE_NAME,
   chooseStartupFlow,
+  clampRoughness,
   defaultEntrypoint,
   emptyManifest,
   parseManifest,
@@ -80,6 +81,15 @@ export function createWorkspaceUiState(options: WorkspaceUiStateOptions) {
 
     startupFlow(files: string[]): string | null {
       return chooseStartupFlow(manifest, files);
+    },
+
+    roughness(): number {
+      return manifest.display.roughness;
+    },
+
+    setRoughness(value: number): void {
+      manifest.display.roughness = clampRoughness(value);
+      scheduleSave();
     },
 
     savedViewOf(path: string): SavedFlowView {

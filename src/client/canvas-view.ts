@@ -15,6 +15,7 @@ import {
   type FlowNode,
   type Rect,
 } from '../shared/flow-format.js';
+import { DEFAULT_ROUGHNESS } from '../shared/manifest.js';
 import type { FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
 import {
   createEdgeGeometry,
@@ -200,6 +201,12 @@ const BADGE_HIT_RADIUS = 12;
 const BADGE_SLOT_SPACING = 24;
 const FIT_PADDING = 80;
 const BADGE_SYMBOLS: Record<BadgeKind, string> = { open: '⤢', inline: '⊞', collapse: '⊟' };
+// How sketchy each element is relative to the workspace's base roughness, so one setting
+// moves the whole canvas without flattening the differences between them.
+const NODE_ROUGHNESS = 1.4;
+const FRAME_ROUGHNESS = 1.1;
+const EDGE_ROUGHNESS = 1.1;
+const BADGE_ROUGHNESS = 0.9;
 const DIVE_IN_MS = 650;
 const BACK_OUT_MS = 560;
 export const SNAPSHOT_PADDING = 48;
@@ -368,6 +375,7 @@ export class CanvasView {
   expansionLayer: ExpansionLayer | null = null;
   gridIsVisible = true;
   doubleClickOpensSubgraph = true;
+  baseRoughness = DEFAULT_ROUGHNESS;
   titleEditingNodeId: string | null = null;
 
   private hoverNode: FlowNode | null = null;
@@ -1581,6 +1589,10 @@ export class CanvasView {
     return createEdgeGeometry([a, mid, b]);
   }
 
+  private roughnessFor(elementRoughness: number): number {
+    return elementRoughness * this.baseRoughness;
+  }
+
   private edgeColor(edge: ModelEdge): string {
     if (edge === this.selectedEdge) return canvasPalette.select;
     return edge.kind === 'error' ? canvasPalette.error : canvasPalette.edge;
@@ -1595,7 +1607,7 @@ export class CanvasView {
       seed,
       stroke: color,
       strokeWidth: edge === this.selectedEdge ? 2.2 : 1.5,
-      roughness: 1.1,
+      roughness: this.roughnessFor(EDGE_ROUGHNESS),
       bowing: 0.4,
     };
     if (edge.kind === 'error') options.strokeLineDash = [7, 5];
@@ -1727,7 +1739,7 @@ export class CanvasView {
 
     this.rough.rectangle(rect.x, rect.y, rect.w, rect.h, {
       seed: seedFrom(node.id ?? node.name),
-      roughness: 1.4,
+      roughness: this.roughnessFor(NODE_ROUGHNESS),
       bowing: 0.7,
       stroke,
       strokeWidth: 1.6,
@@ -1746,7 +1758,7 @@ export class CanvasView {
 
     this.rough.rectangle(frame.x, frame.y, frame.w, frame.h, {
       seed: seedFrom(node.id ?? node.name),
-      roughness: 1.1,
+      roughness: this.roughnessFor(FRAME_ROUGHNESS),
       bowing: 0.5,
       stroke: canvasPalette.expandStroke,
       strokeWidth: 1.6,
@@ -1958,7 +1970,7 @@ export class CanvasView {
         seed: seedFrom(`${node.id}-${badge.kind}`),
         stroke: canvasPalette.expandStroke,
         strokeWidth: 1.3,
-        roughness: 0.9,
+        roughness: this.roughnessFor(BADGE_ROUGHNESS),
       });
       ctx.font = `12px ${HAND_FONT}`;
       ctx.fillStyle = canvasPalette.expandStroke;
