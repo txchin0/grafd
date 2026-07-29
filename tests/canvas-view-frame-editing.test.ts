@@ -3,9 +3,10 @@
 
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { parseFlow, type FlowNode, type Rect } from '../src/shared/flow-format.js';
-import { allNodes, assignMissingIds, buildModel, type Point } from '../src/client/flow-doc.js';
-import { ExpansionLayer, transformRect, type FrameTarget } from '../src/client/expansion.js';
-import type { CanvasActions } from '../src/client/canvas-view.js';
+import { allNodes, assignMissingIds, buildModel } from '../src/client/flow-doc.js';
+import type { Point } from '../src/client/geometry.js';
+import { ExpansionLayer, transformRect, type FrameTarget } from '../src/client/canvas/expansion.js';
+import type { CanvasActions } from '../src/client/canvas/canvas-view.js';
 import { createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
 
 // A subgraph far larger than the frame that shows it, so its contents render scaled down and
@@ -26,6 +27,31 @@ graph: Sub
   Inner A
     id: inner-a
     pos: 0, 0, 200, 88
+  Inner B
+    id: inner-b
+    pos: 1200, 700, 200, 88
+`;
+
+// An edge at the top level and another inside the subgraph, so one render has to compute
+// geometry for two models.
+const EDGED_FRAME_FLOW = `---
+name: Edged
+---
+
+Host
+  id: host-1
+  pos: 400, 300, 200, 88
+  -> Sibling
+
+Sibling
+  id: sibling-1
+  pos: 1600, 300, 200, 88
+
+graph: Sub
+  Inner A
+    id: inner-a
+    pos: 0, 0, 200, 88
+    -> Inner B
   Inner B
     id: inner-b
     pos: 1200, 700, 200, 88
@@ -54,11 +80,11 @@ graph: Deep
     pos: 0, 0, 200, 88
 `;
 
-let CanvasView: typeof import('../src/client/canvas-view.js').CanvasView;
+let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
 beforeAll(async () => {
   stubCanvasGlobals();
-  ({ CanvasView } = await import('../src/client/canvas-view.js'));
+  ({ CanvasView } = await import('../src/client/canvas/canvas-view.js'));
   vi.spyOn(CanvasView.prototype, 'requestRender').mockImplementation(() => {});
 });
 
@@ -89,8 +115,7 @@ function openedCanvas(flowText: string, openNames: string[]) {
   const layer = new ExpansionLayer({ onNeedsRender: () => {}, readExternalFile: async () => null });
   const actions = stubActions();
   const canvas = createCanvasMock();
-  const view = new CanvasView(canvas, actions);
-  view.expansionLayer = layer;
+  const view = new CanvasView(canvas, actions, layer);
 
   const nodeNamed = (name: string) => allNodes(doc).find((node) => node.name === name)!;
   // `expand` is set here rather than in the source text so the host keeps a plain rect until
@@ -306,5 +331,40 @@ describe('dragging an edge from inside a frame onto empty canvas', () => {
     dragOnCanvas(canvas, portOf(view, sibling), { x: 2600, y: 1800 });
 
     expect(emptyDropOf(actions)).toBeUndefined();
+  });
+});
+
+// Drawing a frame recurses into another geometry pass for its subgraph. That pass has to add
+// to what the outer one computed rather than replace it, or every top-level edge would lose
+// its geometry — and with it its hit region — the moment any frame was unfolded.
+describe('edge geometry across nested models', () => {
+  function renderedFrame() {
+    const opened = openedCanvas(EDGED_FRAME_FLOW, ['Host']);
+    (opened.view as unknown as { render(): void }).render();
+    const subModel = opened.view.model.display!.expansions.get(opened.nodeNamed('Host'))!.subModel;
+    return { ...opened, topEdge: opened.view.model.edges[0], innerEdge: subModel.edges[0] };
+  }
+
+  it('keeps geometry for every model one render walks', () => {
+    const { view, topEdge, innerEdge } = renderedFrame();
+
+    expect(view.edgeGeometryOf(innerEdge)).not.toBeNull();
+    expect(view.edgeGeometryOf(topEdge)).not.toBeNull();
+  });
+
+  it('leaves the live geometry untouched when a snapshot renders the same scene', () => {
+    const { view, topEdge, innerEdge } = renderedFrame();
+    const before = [view.edgeGeometryOf(topEdge), view.edgeGeometryOf(innerEdge)];
+
+    view.renderSnapshot({
+      canvas: createCanvasMock(),
+      viewport: { width: 800, height: 600 },
+      pixelRatio: 1,
+      background: null,
+      grid: false,
+    });
+
+    expect(view.edgeGeometryOf(topEdge)).toBe(before[0]);
+    expect(view.edgeGeometryOf(innerEdge)).toBe(before[1]);
   });
 });

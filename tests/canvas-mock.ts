@@ -2,6 +2,7 @@
 // can be exercised under Vitest without a DOM.
 
 import { vi } from 'vitest';
+import { ExpansionLayer } from '../src/client/canvas/expansion.js';
 
 export const VIEWPORT = { width: 1280, height: 800 };
 
@@ -65,6 +66,13 @@ export function createCanvasMock(width = VIEWPORT.width, height = VIEWPORT.heigh
     }),
     getContext: vi.fn(() => context),
   } as unknown as HTMLCanvasElement;
+}
+
+// An inert expansion layer for views whose test does not exercise inline expansion. It still
+// has to be a real layer — the view requires one — so tests that never collect loci get the
+// same "no geometry pass has run yet" behaviour the app has before its first frame.
+export function createExpansionLayer(): ExpansionLayer {
+  return new ExpansionLayer({ onNeedsRender: () => {}, readExternalFile: async () => null });
 }
 
 export function stubCanvasGlobals(): void {

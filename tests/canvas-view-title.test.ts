@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { parseFlow } from '../src/shared/flow-format.js';
 import { buildModel } from '../src/client/flow-doc.js';
-import { ExpansionLayer } from '../src/client/expansion.js';
-import { createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
+import { ExpansionLayer } from '../src/client/canvas/expansion.js';
+import { createCanvasMock, createExpansionLayer, stubCanvasGlobals } from './canvas-mock.js';
 
 const DASHBOARD_FLOW = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '../flows/dashboard.flow'),
@@ -19,16 +19,16 @@ const DASHBOARD_FLOW = readFileSync(
 const TITLE_LINE_HEIGHT = 20;
 const NODE_TEXT_SIDE_PADDING = 13;
 
-let CanvasView: typeof import('../src/client/canvas-view.js').CanvasView;
+let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
 beforeAll(async () => {
   stubCanvasGlobals();
-  ({ CanvasView } = await import('../src/client/canvas-view.js'));
+  ({ CanvasView } = await import('../src/client/canvas/canvas-view.js'));
   vi.spyOn(CanvasView.prototype, 'requestRender').mockImplementation(() => {});
 });
 
-function createView() {
-  return new CanvasView(createCanvasMock(), {} as unknown as ConstructorParameters<typeof CanvasView>[1]);
+function createView(layer: ExpansionLayer = createExpansionLayer()) {
+  return new CanvasView(createCanvasMock(), {} as unknown as ConstructorParameters<typeof CanvasView>[1], layer);
 }
 
 function dashboardModel() {
@@ -72,9 +72,8 @@ describe('CanvasView title placement', () => {
 
   it('titles an unfolded frame host left-aligned in its header strip', () => {
     const model = dashboardModel();
-    const view = createView();
-    const expansions = new ExpansionLayer({ onNeedsRender: () => {}, readExternalFile: async () => null });
-    view.expansionLayer = expansions;
+    const expansions = createExpansionLayer();
+    const view = createView(expansions);
     view.setModel(model);
 
     const host = model.nodes.find((candidate) => candidate.name === 'Handle Logout Button')!;
@@ -95,9 +94,8 @@ describe('CanvasView title placement', () => {
 
   it('pushes a nested node title through its frame transform', () => {
     const model = dashboardModel();
-    const view = createView();
-    const expansions = new ExpansionLayer({ onNeedsRender: () => {}, readExternalFile: async () => null });
-    view.expansionLayer = expansions;
+    const expansions = createExpansionLayer();
+    const view = createView(expansions);
     view.setModel(model);
 
     const host = model.nodes.find((candidate) => candidate.name === 'Handle Logout Button')!;
@@ -121,9 +119,8 @@ describe('CanvasView title placement', () => {
 
   it('reports no placement for a node that is not on the canvas', () => {
     const model = dashboardModel();
-    const view = createView();
-    const expansions = new ExpansionLayer({ onNeedsRender: () => {}, readExternalFile: async () => null });
-    view.expansionLayer = expansions;
+    const expansions = createExpansionLayer();
+    const view = createView(expansions);
     view.setModel(model);
     expansions.collectLoci(model);
 

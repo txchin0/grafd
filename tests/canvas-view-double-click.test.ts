@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { parseFlow } from '../src/shared/flow-format.js';
 import { buildModel } from '../src/client/flow-doc.js';
-import { ExpansionLayer } from '../src/client/expansion.js';
-import { createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
+import { ExpansionLayer } from '../src/client/canvas/expansion.js';
+import { createCanvasMock, createExpansionLayer, stubCanvasGlobals } from './canvas-mock.js';
 
 const DASHBOARD_FLOW = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '../flows/dashboard.flow'),
@@ -32,16 +32,16 @@ graph: Deep
     pos: 0, 0, 120, 60
 `;
 
-let CanvasView: typeof import('../src/client/canvas-view.js').CanvasView;
+let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
 beforeAll(async () => {
   stubCanvasGlobals();
-  ({ CanvasView } = await import('../src/client/canvas-view.js'));
+  ({ CanvasView } = await import('../src/client/canvas/canvas-view.js'));
   vi.spyOn(CanvasView.prototype, 'requestRender').mockImplementation(() => {});
 });
 
-function createView() {
-  return new CanvasView(createCanvasMock(), {} as unknown as ConstructorParameters<typeof CanvasView>[1]);
+function createView(layer: ExpansionLayer = createExpansionLayer()) {
+  return new CanvasView(createCanvasMock(), {} as unknown as ConstructorParameters<typeof CanvasView>[1], layer);
 }
 
 function modelOf(text: string) {
@@ -88,9 +88,8 @@ describe('CanvasView subgraphToOpenAt', () => {
 
   it('reaches a subgraph node nested inside an unfolded frame', () => {
     const model = modelOf(NESTED_FLOW);
-    const view = createView();
-    const expansions = new ExpansionLayer({ onNeedsRender: () => {}, readExternalFile: async () => null });
-    view.expansionLayer = expansions;
+    const expansions = createExpansionLayer();
+    const view = createView(expansions);
     view.setModel(model);
 
     const host = model.nodes.find((candidate) => candidate.name === 'Host')!;

@@ -16,7 +16,7 @@ import {
   subModelBounds,
   TOGGLE_DURATION_MS,
   transformRect,
-} from '../src/client/expansion.js';
+} from '../src/client/canvas/expansion.js';
 
 const DASHBOARD_FLOW = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '../flows/dashboard.flow'),

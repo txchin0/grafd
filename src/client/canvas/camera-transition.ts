@@ -1,5 +1,6 @@
-import type { Rect } from '../shared/flow-format.js';
-import type { FlowModel, Point } from './flow-doc.js';
+import type { Rect } from '../../shared/flow-format.js';
+import { displayRects, type FlowModel } from '../flow-doc.js';
+import { boundsOfRects, lerp, rectCenter, type Point } from '../geometry.js';
 import { subModelBounds, transformPoint, type FrameTransform } from './expansion.js';
 
 export interface View {
@@ -19,25 +20,11 @@ export interface ViewportSize {
   height: number;
 }
 
-function lerp(from: number, to: number, t: number): number {
-  return from + (to - from) * t;
-}
-
-function rectCenter(rect: Rect): Point {
-  return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
-}
+// A model with nothing in it still has to be framed by something.
+const EMPTY_MODEL_SIZE = { w: 400, h: 300 };
 
 export function modelContentBounds(model: FlowModel): Rect {
-  const rects = [
-    ...model.nodes.map((node) => model.display?.rects.get(node) ?? node.pos),
-    ...model.ghosts.map((ghost) => ghost.pos),
-  ].filter((rect): rect is Rect => rect != null);
-  if (rects.length === 0) return { x: 0, y: 0, w: 400, h: 300 };
-  const minX = Math.min(...rects.map((rect) => rect.x));
-  const minY = Math.min(...rects.map((rect) => rect.y));
-  const maxX = Math.max(...rects.map((rect) => rect.x + rect.w));
-  const maxY = Math.max(...rects.map((rect) => rect.y + rect.h));
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  return boundsOfRects(displayRects(model)) ?? { x: 0, y: 0, ...EMPTY_MODEL_SIZE };
 }
 
 export function cameraLinkFromRect(contentBounds: Rect, nodeRect: Rect): CameraLink {

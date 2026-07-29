@@ -1,11 +1,11 @@
 import { beforeAll, describe, expect, it, type Mock } from 'vitest';
-import { createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
+import { createCanvasMock, createExpansionLayer, stubCanvasGlobals } from './canvas-mock.js';
 
-let CanvasView: typeof import('../src/client/canvas-view.js').CanvasView;
+let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
 beforeAll(async () => {
   stubCanvasGlobals();
-  ({ CanvasView } = await import('../src/client/canvas-view.js'));
+  ({ CanvasView } = await import('../src/client/canvas/canvas-view.js'));
 });
 
 // drawGrid is the only thing that paints dots this size, so counting them isolates the grid
@@ -21,7 +21,7 @@ function countGridDots(canvas: HTMLCanvasElement): number {
 // cleared spy rather than from whatever that first frame drew.
 function createViewOnMockCanvas() {
   const canvas = createCanvasMock();
-  const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1]);
+  const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1], createExpansionLayer());
   const renderAndCountGridDots = () => {
     (canvas.getContext('2d') as unknown as { fillRect: Mock }).fillRect.mockClear();
     view.requestRender();

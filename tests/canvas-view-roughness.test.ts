@@ -5,7 +5,7 @@
 import { beforeAll, describe, expect, it, type Mock } from 'vitest';
 import { parseFlow } from '../src/shared/flow-format.js';
 import { buildModel } from '../src/client/flow-doc.js';
-import { createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
+import { createCanvasMock, createExpansionLayer, stubCanvasGlobals } from './canvas-mock.js';
 
 const NODE_RECT = { x: 60, y: 100, w: 200, h: 72 };
 const SOLO_FLOW = `---
@@ -19,11 +19,11 @@ Only Node
 
 const PATH_METHODS = ['moveTo', 'lineTo'] as const;
 
-let CanvasView: typeof import('../src/client/canvas-view.js').CanvasView;
+let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
 beforeAll(async () => {
   stubCanvasGlobals();
-  ({ CanvasView } = await import('../src/client/canvas-view.js'));
+  ({ CanvasView } = await import('../src/client/canvas/canvas-view.js'));
 });
 
 // Distance from a point to the rectangle's outline, which is 0 for ink laid exactly on the
@@ -46,7 +46,7 @@ function distanceToRectOutline({ x, y }: { x: number; y: number }): number {
 function widestStrayFromRect(baseRoughness: number): number {
   const canvas = createCanvasMock();
   const context = canvas.getContext('2d') as unknown as Record<string, Mock>;
-  const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1]);
+  const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1], createExpansionLayer());
   view.baseRoughness = baseRoughness;
   view.setModel(buildModel(parseFlow(SOLO_FLOW), null));
   for (const method of PATH_METHODS) context[method].mockClear();

@@ -14,18 +14,31 @@ import {
   type EdgeDataField,
   type FlowNode,
   type Rect,
-} from '../shared/flow-format.js';
-import { DEFAULT_ROUGHNESS } from '../shared/manifest.js';
-import type { FlowModel, GhostNode, ModelEdge, NodeTraits, Point } from './flow-doc.js';
+} from '../../shared/flow-format.js';
+import { DEFAULT_ROUGHNESS } from '../../shared/manifest.js';
+import { displayRects, type FlowModel, type GhostNode, type ModelEdge, type NodeTraits } from '../flow-doc.js';
+import {
+  boundsOfRects,
+  easeInOutCubic,
+  normalizedRect,
+  padRect,
+  rectBorderPointToward,
+  rectCenter,
+  rectContains,
+  rectsIntersect,
+  unionRect,
+  type Point,
+} from '../geometry.js';
 import {
   createEdgeGeometry,
   distanceToEdgePath,
+  type EdgeGeometry,
   edgeEnd,
   edgePathApproach,
   edgePathMidpoint,
 } from './edge-path.js';
 // A live object refilled in place on every theme change, never reassigned.
-import { canvasPalette } from './theme.js';
+import { canvasPalette } from '../theme.js';
 import {
   cameraLinkFittingModelIntoRect,
   cameraLinkFromInlineModel,
@@ -200,6 +213,9 @@ const EDGE_DATA_GAP = 2;
 const BADGE_HIT_RADIUS = 12;
 const BADGE_SLOT_SPACING = 24;
 const FIT_PADDING = 80;
+// Where the origin sits relative to the viewport centre when there is nothing to frame.
+const EMPTY_CANVAS_ORIGIN = { x: 200, y: 150 };
+const EMPTY_SNAPSHOT_SIZE = { w: 400, h: 300 };
 const BADGE_SYMBOLS: Record<BadgeKind, string> = { open: '⤢', inline: '⊞', collapse: '⊟' };
 // How sketchy each element is relative to the workspace's base roughness, so one setting
 // moves the whole canvas without flattening the differences between them.
@@ -260,17 +276,8 @@ function centerBoundsAt(bounds: Rect, viewport: ViewportSize, scale: number): Vi
   };
 }
 
-function padRect(rect: Rect, padding: number): Rect {
-  return { x: rect.x - padding, y: rect.y - padding, w: rect.w + padding * 2, h: rect.h + padding * 2 };
-}
-
-export function fitScaleFor(bounds: Rect, viewport: ViewportSize): number {
+function fitScaleFor(bounds: Rect, viewport: ViewportSize): number {
   return Math.min(viewport.width / bounds.w, viewport.height / bounds.h);
-}
-
-// Camera that frames `bounds` centered inside `viewport`, with no scale limits applied.
-export function fitViewInto(bounds: Rect, viewport: ViewportSize): View {
-  return centerBoundsAt(bounds, viewport, fitScaleFor(bounds, viewport));
 }
 
 function snap(value: number): number {
@@ -285,62 +292,8 @@ function seedFrom(text: string): number {
   return (hash >>> 0) % 2147483646 + 1;
 }
 
-function lerp(from: number, to: number, t: number): number {
-  return from + (to - from) * t;
-}
-
-function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-}
-
-function rectCenter(rect: Rect): Point {
-  return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
-}
-
-function rectContains(rect: Rect, point: Point): boolean {
-  return (
-    point.x >= rect.x && point.x <= rect.x + rect.w &&
-    point.y >= rect.y && point.y <= rect.y + rect.h
-  );
-}
-
-function rectsIntersect(a: Rect, b: Rect): boolean {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
-function unionRect(a: Rect, b: Rect): Rect {
-  const left = Math.min(a.x, b.x);
-  const top = Math.min(a.y, b.y);
-  return {
-    x: left,
-    y: top,
-    w: Math.max(a.x + a.w, b.x + b.w) - left,
-    h: Math.max(a.y + a.h, b.y + b.h) - top,
-  };
-}
-
-function normalizedRect(pointA: Point, pointB: Point): Rect {
-  return {
-    x: Math.min(pointA.x, pointB.x),
-    y: Math.min(pointA.y, pointB.y),
-    w: Math.abs(pointA.x - pointB.x),
-    h: Math.abs(pointA.y - pointB.y),
-  };
-}
-
 function isGhost(target: FlowNode | GhostNode): target is GhostNode {
   return 'ghost' in target && target.ghost === true;
-}
-
-function rectBorderPointToward(rect: Rect, towardPoint: Point): Point {
-  const center = rectCenter(rect);
-  const dx = towardPoint.x - center.x;
-  const dy = towardPoint.y - center.y;
-  if (dx === 0 && dy === 0) return center;
-  const scaleX = dx === 0 ? Infinity : (rect.w / 2) / Math.abs(dx);
-  const scaleY = dy === 0 ? Infinity : (rect.h / 2) / Math.abs(dy);
-  const t = Math.min(scaleX, scaleY);
-  return { x: center.x + dx * t, y: center.y + dy * t };
 }
 
 export class CanvasView {
@@ -372,7 +325,7 @@ export class CanvasView {
   model: FlowModel;
   selection = new Set<FlowNode>();
   selectedEdge: ModelEdge | null = null;
-  expansionLayer: ExpansionLayer | null = null;
+  readonly expansionLayer: ExpansionLayer;
   gridIsVisible = true;
   doubleClickOpensSubgraph = true;
   baseRoughness = DEFAULT_ROUGHNESS;
@@ -386,11 +339,17 @@ export class CanvasView {
   private spaceDown = false;
   private renderQueued = false;
 
-  constructor(canvasElement: HTMLCanvasElement, actions: CanvasActions) {
+  // Where each edge currently sits on screen. Accumulated across a whole render — drawScene
+  // recurses into every unfolded subgraph, and each level contributes its own edges — so this
+  // is cleared once per pass rather than once per model.
+  private edgeGeometry = new Map<ModelEdge, EdgeGeometry>();
+
+  constructor(canvasElement: HTMLCanvasElement, actions: CanvasActions, expansionLayer: ExpansionLayer) {
     this.canvas = canvasElement;
     this.liveTarget = targetForCanvas(canvasElement, { width: 0, height: 0 }, window.devicePixelRatio || 1);
     this.target = this.liveTarget;
     this.actions = actions;
+    this.expansionLayer = expansionLayer;
     this.model = {
       nodes: [],
       edges: [],
@@ -462,15 +421,15 @@ export class CanvasView {
     this.selection = new Set(
       [...this.selection]
         .map((node) => model.nodes.find((candidate) => candidate.id === node.id)
-          ?? (this.expansionLayer?.isEmbedded(node) ? node : null))
+          ?? (this.expansionLayer.isEmbedded(node) ? node : null))
         .filter((node): node is FlowNode => node != null),
     );
     this.selectedEdge = model.edges.find((edge) => edge.spec === selectedEdgeSpec)
-      ?? (this.selectedEdge && this.expansionLayer?.isEmbedded(this.selectedEdge.from) ? this.selectedEdge : null);
+      ?? (this.selectedEdge && this.expansionLayer.isEmbedded(this.selectedEdge.from) ? this.selectedEdge : null);
     if (this.hoverNode) {
       const previousHoverId = this.hoverNode.id;
       this.hoverNode = model.nodes.find((node) => node.id === previousHoverId)
-        ?? (this.expansionLayer?.isEmbedded(this.hoverNode) ? this.hoverNode : null);
+        ?? (this.expansionLayer.isEmbedded(this.hoverNode) ? this.hoverNode : null);
     }
     this.requestRender();
   }
@@ -481,8 +440,8 @@ export class CanvasView {
   }
 
   private layoutDisplayGeometry(model: FlowModel): void {
-    this.expansionLayer?.layout(model, performance.now());
-    this.expansionLayer?.collectLoci(model);
+    this.expansionLayer.layout(model, performance.now());
+    this.expansionLayer.collectLoci(model);
   }
 
   // Brings frame geometry and loci up to date without waiting for the next animation frame,
@@ -494,7 +453,7 @@ export class CanvasView {
   // Which graph a point on the canvas belongs to, and the point in that graph's own
   // coordinates: the innermost unfolded frame containing it, or the top-level graph.
   creationTargetAt(world: Point): { frameHost: FlowNode | null; point: Point } {
-    const frame = this.expansionLayer?.frameAt(world) ?? null;
+    const frame = this.expansionLayer.frameAt(world);
     if (!frame) return { frameHost: null, point: world };
     return { frameHost: frame.host, point: inverseTransformPoint(world, frame.transform) };
   }
@@ -506,19 +465,26 @@ export class CanvasView {
   // World-space rect of any visible node, including nodes inside unfolded frames: the
   // node's local display rect pushed through its locus transform.
   rect(node: FlowNode): Rect {
-    const locus = this.expansionLayer?.locusOf(node);
+    const locus = this.expansionLayer.locusOf(node);
     if (!locus) return this.rectOf(this.model, node);
     return transformRect(this.rectOf(locus.model, node), locus.transform);
   }
 
   private isNodeVisible(node: FlowNode): boolean {
-    return !this.expansionLayer || this.expansionLayer.locusOf(node) != null;
+    return !this.expansionLayer.hasLoci() || this.expansionLayer.locusOf(node) != null;
+  }
+
+  // Where an edge currently is on screen, or null when it has not been drawn — an unresolved
+  // target, or no render yet. Keyed by edge here rather than stored on it because it describes
+  // how the scene is drawn, which is the view's business and not the document's.
+  edgeGeometryOf(edge: ModelEdge): EdgeGeometry | null {
+    return this.edgeGeometry.get(edge) ?? null;
   }
 
   edgeAnchor(edge: ModelEdge): Point {
-    const geometry = edge.geometry;
+    const geometry = this.edgeGeometryOf(edge);
     const mid = geometry ? edgePathMidpoint(geometry.path) : rectCenter(this.rect(edge.from));
-    const locus = this.expansionLayer?.locusOf(edge.from);
+    const locus = this.expansionLayer.locusOf(edge.from);
     if (!locus) return mid;
     return transformPoint(mid, locus.transform);
   }
@@ -586,25 +552,22 @@ export class CanvasView {
     this.actions.viewChanged?.();
   }
 
-  private paddedContentBounds(padding: number): Rect | null {
-    const rects = [
-      ...this.model.nodes.map((node) => this.rect(node)),
-      ...this.model.ghosts.map((ghost) => ghost.pos),
-    ].filter((rect): rect is Rect => rect != null);
-    if (rects.length === 0) return null;
-    const minX = Math.min(...rects.map((rect) => rect.x));
-    const minY = Math.min(...rects.map((rect) => rect.y));
-    const maxX = Math.max(...rects.map((rect) => rect.x + rect.w));
-    const maxY = Math.max(...rects.map((rect) => rect.y + rect.h));
-    return padRect({ x: minX, y: minY, w: maxX - minX, h: maxY - minY }, padding);
+  private contentBounds(): Rect | null {
+    return boundsOfRects(displayRects(this.model));
   }
 
-  private clampedFitView(bounds: Rect | null, viewport: ViewportSize): View {
-    if (!bounds) {
-      return { x: viewport.width / 2 - 200, y: viewport.height / 2 - 150, scale: 1 };
-    }
+  private clampedFitView(bounds: Rect, viewport: ViewportSize): View {
     const scale = Math.max(MIN_SCALE, Math.min(fitScaleFor(bounds, viewport), MAX_FIT_SCALE));
     return centerBoundsAt(bounds, viewport, scale);
+  }
+
+  // An empty canvas has no content to frame, so it parks at unit scale instead of fitting.
+  private emptyCanvasView(viewport: ViewportSize): View {
+    return {
+      x: viewport.width / 2 - EMPTY_CANVAS_ORIGIN.x,
+      y: viewport.height / 2 - EMPTY_CANVAS_ORIGIN.y,
+      scale: 1,
+    };
   }
 
   private computeFitView(padding = FIT_PADDING, viewport: ViewportSize = this.viewport): View {
@@ -613,7 +576,8 @@ export class CanvasView {
     // collapsed pos and expanded subgraphs get clipped — the same reason a manual
     // zoom-to-fit a moment later frames them correctly.
     this.layoutDisplayGeometry(this.model);
-    return this.clampedFitView(this.paddedContentBounds(padding), viewport);
+    const bounds = this.contentBounds();
+    return bounds ? this.clampedFitView(padRect(bounds, padding), viewport) : this.emptyCanvasView(viewport);
   }
 
   // The camera zoom-to-fit would give a model that is not the active one, in that model's own
@@ -630,7 +594,10 @@ export class CanvasView {
   // with display geometry laid out first so unfolded frames measure at their frame rect.
   snapshotBounds(padding = SNAPSHOT_PADDING): Rect {
     this.layoutDisplayGeometry(this.model);
-    return this.paddedContentBounds(padding) ?? { x: 0, y: 0, w: 400, h: 300 };
+    const bounds = this.contentBounds();
+    // The empty fallback is deliberately unpadded — it is already a whole notional page
+    // rather than content that needs room around it.
+    return bounds ? padRect(bounds, padding) : { x: 0, y: 0, ...EMPTY_SNAPSHOT_SIZE };
   }
 
   // Draws the scene onto a caller-owned canvas at an arbitrary resolution, framed exactly
@@ -639,7 +606,9 @@ export class CanvasView {
   // pixels back the moment this returns.
   renderSnapshot({ canvas, viewport, pixelRatio, background, grid }: SnapshotRequest): void {
     const previousTarget = this.target;
+    const previousEdgeGeometry = this.edgeGeometry;
     this.target = targetForCanvas(canvas, viewport, pixelRatio);
+    this.edgeGeometry = new Map();
     try {
       const { ctx } = this;
       const view = this.computeFitView(SNAPSHOT_PADDING, viewport);
@@ -661,6 +630,7 @@ export class CanvasView {
       this.drawScene(this.model);
     } finally {
       this.target = previousTarget;
+      this.edgeGeometry = previousEdgeGeometry;
     }
   }
 
@@ -830,7 +800,7 @@ export class CanvasView {
         corner: handle.corner,
         startRect: { ...handle.node.pos! },
         startWorld: world,
-        scale: this.expansionLayer?.scaleOf(handle.node) ?? 1,
+        scale: this.expansionLayer.scaleOf(handle.node),
       };
       return;
     }
@@ -854,7 +824,7 @@ export class CanvasView {
         startPositions: new Map([...this.selection].map((n) => [n, { x: n.pos!.x, y: n.pos!.y }])),
         // World-space drag deltas are divided by each node's locus scale so nodes inside
         // scaled-down frames track the cursor instead of racing ahead of it.
-        scales: new Map([...this.selection].map((n) => [n, this.expansionLayer?.scaleOf(n) ?? 1])),
+        scales: new Map([...this.selection].map((n) => [n, this.expansionLayer.scaleOf(n)])),
         startWorld: world,
         startScreen: screen,
         moved: false,
@@ -985,7 +955,7 @@ export class CanvasView {
       const drop = this.resolveEdgeDrop(gesture.from, rawTarget);
       this.actions.completeEdge(gesture.from, drop.targetNode, world, {
         droppedOnSource: rawTarget === gesture.from,
-        ghostTarget: this.expansionLayer?.isEmbedded(gesture.from) ? null : this.hitGhost(world),
+        ghostTarget: this.expansionLayer.isEmbedded(gesture.from) ? null : this.hitGhost(world),
         innerName: drop.innerDrop?.innerName,
         outerSource: drop.outerDrop ?? undefined,
         emptyDrop: this.emptyEdgeDropFor(gesture.from, rawTarget, drop.targetNode, world) ?? undefined,
@@ -1002,7 +972,7 @@ export class CanvasView {
   // a press on the host. With the node tool that space is the subgraph's drawing surface
   // instead — otherwise a frame could never be drawn into, only dragged around.
   private isFrameBackground(node: FlowNode, world: Point): boolean {
-    return this.expansionLayer?.frameAt(world)?.host === node;
+    return this.expansionLayer.frameAt(world)?.host === node;
   }
 
   // A drawn rectangle belongs to the graph its drag started in. Crossing a frame boundary
@@ -1010,8 +980,8 @@ export class CanvasView {
   // means something else in the graph it lands in — so such a drag creates nothing.
   private completeCreateGesture(gesture: Extract<Gesture, { type: 'create' }>, world: Point): void {
     if (!gesture.rect || !this.isBigEnoughToCreate(gesture.rect)) return;
-    const startFrame = this.expansionLayer?.frameAt(gesture.startWorld) ?? null;
-    const endFrame = this.expansionLayer?.frameAt(world) ?? null;
+    const startFrame = this.expansionLayer.frameAt(gesture.startWorld);
+    const endFrame = this.expansionLayer.frameAt(world);
     if ((startFrame?.host ?? null) !== (endFrame?.host ?? null)) return;
     const rect = startFrame ? inverseTransformRect(gesture.rect, startFrame.transform) : gesture.rect;
     this.actions.createNode(this.snapCreateRect(rect), startFrame?.host ?? null);
@@ -1023,7 +993,6 @@ export class CanvasView {
 
   private inSameModel(nodeA: FlowNode | null, nodeB: FlowNode | null): boolean {
     if (!nodeA || !nodeB) return false;
-    if (!this.expansionLayer) return true;
     return (this.expansionLayer.modelOf(nodeA) ?? this.model) === (this.expansionLayer.modelOf(nodeB) ?? this.model);
   }
 
@@ -1044,11 +1013,11 @@ export class CanvasView {
     if (this.inSameModel(from, rawTarget)) {
       return { hoverTarget: rawTarget, targetNode: rawTarget, innerDrop: null, outerDrop: null };
     }
-    if (this.expansionLayer?.isEmbedded(from)) {
+    if (this.expansionLayer.isEmbedded(from)) {
       // §5.8: an edge dragged out of a frame lands on a sibling of the frame's host and
       // becomes an `{Inner Source}` edge declared on the host. Single-level: the host must
       // share a graph with the drop target.
-      const host = this.expansionLayer?.hostOf(from) ?? null;
+      const host = this.expansionLayer.hostOf(from);
       if (!host || host === rawTarget || !this.inSameModel(host, rawTarget)) {
         return { hoverTarget: null, targetNode: null, innerDrop: null, outerDrop: null };
       }
@@ -1059,7 +1028,7 @@ export class CanvasView {
         outerDrop: { host, innerName: from.name },
       };
     }
-    const host = this.expansionLayer?.hostOf(rawTarget) ?? null;
+    const host = this.expansionLayer.hostOf(rawTarget);
     // Dropping from a host onto a node inside its own frame would be a self-edge; reject it.
     if (!host || host === from || !this.inSameModel(from, host)) {
       return { hoverTarget: null, targetNode: null, innerDrop: null, outerDrop: null };
@@ -1091,13 +1060,13 @@ export class CanvasView {
   // a node there, joined to the subgraph by an `{Inner Source}` edge on the host (§5.8).
   // Anything further out has no single-level form to express, so it creates nothing.
   private resolveEmptyEdgeDrop(from: FlowNode, world: Point): EmptyEdgeDrop | null {
-    const host = this.expansionLayer?.hostOf(from) ?? null;
+    const host = this.expansionLayer.hostOf(from);
     if (!host) return null;
-    const dropFrame = this.expansionLayer?.frameAt(world) ?? null;
+    const dropFrame = this.expansionLayer.frameAt(world);
     const dropHost = dropFrame?.host ?? null;
     const point = dropFrame ? inverseTransformPoint(world, dropFrame.transform) : world;
     if (dropHost === host) return { kind: 'inner', host, point };
-    if (dropHost === (this.expansionLayer?.hostOf(host) ?? null)) {
+    if (dropHost === this.expansionLayer.hostOf(host)) {
       return { kind: 'outer', host, innerName: from.name, point };
     }
     return null;
@@ -1106,7 +1075,7 @@ export class CanvasView {
   // Marquee reaches into unfolded frames, but a node is skipped when one of its host
   // frames is also caught — dragging a frame already carries its contents.
   private selectNodesInMarquee(rect: Rect): void {
-    const candidates = this.expansionLayer?.locus ? [...this.expansionLayer.locus.keys()] : this.model.nodes;
+    const candidates = this.expansionLayer.locus ? [...this.expansionLayer.locus.keys()] : this.model.nodes;
     for (const node of candidates) {
       if (rectsIntersect(rect, this.rect(node))) this.selection.add(node);
     }
@@ -1116,10 +1085,10 @@ export class CanvasView {
   }
 
   private hasSelectedAncestorFrame(node: FlowNode): boolean {
-    let host = this.expansionLayer?.hostOf(node);
+    let host = this.expansionLayer.hostOf(node);
     while (host) {
       if (this.selection.has(host)) return true;
-      host = this.expansionLayer?.hostOf(host);
+      host = this.expansionLayer.hostOf(host);
     }
     return false;
   }
@@ -1235,7 +1204,7 @@ export class CanvasView {
     if (!this.doubleClickOpensSubgraph) return null;
     const node = this.hitNode(world);
     if (!node) return null;
-    const owningModel = this.expansionLayer?.modelOf(node) ?? this.model;
+    const owningModel = this.expansionLayer.modelOf(node) ?? this.model;
     return owningModel.traits.get(node)?.expand ? node : null;
   }
 
@@ -1306,7 +1275,7 @@ export class CanvasView {
     if (!model.traits.get(node)?.expand) return [];
     const rect = this.rectOf(model, node);
     const slotCenter = (slot: number) => ({ x: rect.x + rect.w - 16 - slot * BADGE_SLOT_SPACING, y: rect.y + 15 });
-    if (this.expansionLayer?.isOpen(node.id)) {
+    if (this.expansionLayer.isOpen(node.id)) {
       return [
         { kind: 'open', ...slotCenter(0) },
         { kind: 'collapse', ...slotCenter(1) },
@@ -1359,7 +1328,7 @@ export class CanvasView {
     }
     const hitDistance = EDGE_HIT_DISTANCE / effectiveScale;
     for (const edge of model.edges) {
-      const geometry = edge.geometry;
+      const geometry = this.edgeGeometryOf(edge);
       if (!geometry) continue;
       if (geometry.labelRect && rectContains(geometry.labelRect, world)) return edge;
       if (distanceToEdgePath(world, geometry.path) <= hitDistance) return edge;
@@ -1390,6 +1359,7 @@ export class CanvasView {
 
   private render(): void {
     const { ctx } = this;
+    this.edgeGeometry.clear();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
@@ -1398,8 +1368,8 @@ export class CanvasView {
       return;
     }
 
-    const expansionState = this.expansionLayer?.layout(this.model, performance.now()) ?? { animating: false };
-    this.expansionLayer?.collectLoci(this.model);
+    const expansionState = this.expansionLayer.layout(this.model, performance.now());
+    this.expansionLayer.collectLoci(this.model);
     const dpr = this.devicePixelRatio;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.drawGridIfVisible(this.view);
@@ -1422,7 +1392,7 @@ export class CanvasView {
     const now = performance.now();
 
     if (transition.phase === 'hold') {
-      this.expansionLayer?.layout(transition.outgoing.model, now);
+      this.expansionLayer.layout(transition.outgoing.model, now);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       this.drawGridIfVisible(transition.outgoing.view);
       this.drawWorldScene(transition.outgoing.model, transition.outgoing.view, 1);
@@ -1437,8 +1407,8 @@ export class CanvasView {
 
     const parentModel = parentIsIncoming ? transition.incoming.model : transition.outgoing.model;
     const childModel = parentIsIncoming ? transition.outgoing.model : transition.incoming.model;
-    if (!transition.inlineAnchor) this.expansionLayer?.layout(parentModel, now);
-    this.expansionLayer?.layout(childModel, now);
+    if (!transition.inlineAnchor) this.expansionLayer.layout(parentModel, now);
+    this.expansionLayer.layout(childModel, now);
 
     this.view = { ...(parentIsIncoming ? parentView : childView) };
     const parentAlpha = parentIsIncoming ? eased : 1 - eased;
@@ -1526,11 +1496,11 @@ export class CanvasView {
     const pairCounts = new Map<string, number>();
     for (const edge of model.edges) {
       if (!edge.to?.pos || !edge.from?.pos) {
-        edge.geometry = null;
+        this.edgeGeometry.delete(edge);
         continue;
       }
       if (edge.to === edge.from) {
-        edge.geometry = this.selfLoopGeometry(model, edge.from);
+        this.edgeGeometry.set(edge, this.selfLoopGeometry(model, edge.from));
         continue;
       }
       let fromRect = this.rectOf(model, edge.from);
@@ -1557,7 +1527,7 @@ export class CanvasView {
         x: (a.x + b.x) / 2 + normal.x * bowMagnitude,
         y: (a.y + b.y) / 2 + normal.y * bowMagnitude,
       };
-      edge.geometry = createEdgeGeometry([a, mid, b]);
+      this.edgeGeometry.set(edge, createEdgeGeometry([a, mid, b]));
     }
   }
 
@@ -1581,7 +1551,7 @@ export class CanvasView {
     return transformRect(this.rectOf(expansion.subModel, innerNode), expansion.transform);
   }
 
-  private selfLoopGeometry(model: FlowModel, node: FlowNode): NonNullable<ModelEdge['geometry']> {
+  private selfLoopGeometry(model: FlowModel, node: FlowNode): EdgeGeometry {
     const { x, y, w } = this.rectOf(model, node);
     const a = { x: x + w - 30, y };
     const b = { x: x + w, y: y + 24 };
@@ -1599,7 +1569,7 @@ export class CanvasView {
   }
 
   private drawEdge(edge: ModelEdge): void {
-    const geometry = edge.geometry;
+    const geometry = this.edgeGeometryOf(edge);
     if (!geometry) return;
     const color = this.edgeColor(edge);
     const seed = seedFrom(`${edge.from.name}->${edge.spec.target}:${edge.spec.label ?? ''}`);
@@ -1621,7 +1591,7 @@ export class CanvasView {
   }
 
   private drawEdgeLabel(edge: ModelEdge): void {
-    const geometry = edge.geometry;
+    const geometry = this.edgeGeometryOf(edge);
     if (!geometry) return;
     const labelText = edge.spec.label ?? (edge.kind === 'error' ? 'on error' : null);
     const anchor = edgePathMidpoint(geometry.path);
@@ -1862,8 +1832,8 @@ export class CanvasView {
   // not currently visible. Unfolded frames title their host differently from a plain node,
   // so callers get the variant's font, alignment and colour alongside the band.
   titlePlacementOf(node: FlowNode): TitlePlacement | null {
-    const locus = this.expansionLayer?.locusOf(node) ?? null;
-    if (this.expansionLayer && !locus) return null;
+    const locus = this.expansionLayer.locusOf(node);
+    if (this.expansionLayer.hasLoci() && !locus) return null;
     const model = locus?.model ?? this.model;
     const expansion = model.display?.expansions.get(node);
     const localRect = this.rectOf(model, node);
@@ -1876,7 +1846,7 @@ export class CanvasView {
       fontPx: expansion ? FRAME_TITLE_FONT_PX : TITLE_FONT_PX,
       align: expansion ? 'left' : 'center',
       color: expansion ? canvasPalette.expandStroke : canvasPalette.ink,
-      screenScale: this.view.scale * (this.expansionLayer?.scaleOf(node) ?? 1),
+      screenScale: this.view.scale * this.expansionLayer.scaleOf(node),
     };
   }
 
@@ -1910,7 +1880,7 @@ export class CanvasView {
   }
 
   private descriptionText(model: FlowModel, node: FlowNode): string | null {
-    const expandDoc = this.expansionLayer?.expandDocumentFor(node, model.sourcePath) ?? null;
+    const expandDoc = this.expansionLayer.expandDocumentFor(node, model.sourcePath);
     const text = descriptionForNode(node, expandDoc);
     return text || null;
   }

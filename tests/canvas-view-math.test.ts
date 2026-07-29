@@ -8,8 +8,8 @@ import {
   transformFromCameraLink,
   type CameraLink,
   type View,
-} from '../src/client/camera-transition.js';
-import { composeTransforms } from '../src/client/expansion.js';
+} from '../src/client/canvas/camera-transition.js';
+import { composeTransforms } from '../src/client/canvas/expansion.js';
 
 const BOUNDS = { width: 1280, height: 800 };
 

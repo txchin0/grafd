@@ -6,9 +6,9 @@ import {
   type FlowDocument,
   type FlowNode,
   type Rect,
-} from '../shared/flow-format.js';
-import * as FlowDoc from './flow-doc.js';
-import type { FlowModel } from './flow-doc.js';
+} from '../../shared/flow-format.js';
+import * as FlowDoc from '../flow-doc.js';
+import type { FlowModel } from '../flow-doc.js';
 import type { View } from './canvas-view.js';
 import { fitTransformIntoRect } from './camera-transition.js';
 import { composeTransforms, transformRect, type FrameTransform } from './expansion.js';

@@ -6,7 +6,7 @@
 // a device-pixel multiplier, and the preview differs from the downloaded file in nothing but
 // that multiplier.
 
-import type { CanvasView, ViewportSize } from './canvas-view.js';
+import type { CanvasView, ViewportSize } from './canvas/canvas-view.js';
 import { downloadBlob } from './download.js';
 import { createModal, type Modal } from './modal.js';
 import { pageBackgroundColor } from './theme.js';

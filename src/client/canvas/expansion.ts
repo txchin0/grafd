@@ -19,10 +19,20 @@ import {
   type FlowDocument,
   type FlowNode,
   type Rect,
-} from '../shared/flow-format.js';
-import * as FlowDoc from './flow-doc.js';
-import type { EdgeSpec } from '../shared/flow-format.js';
-import type { FlowModel, ModelEdge, Point } from './flow-doc.js';
+} from '../../shared/flow-format.js';
+import * as FlowDoc from '../flow-doc.js';
+import type { EdgeSpec } from '../../shared/flow-format.js';
+import type { FlowModel, ModelEdge } from '../flow-doc.js';
+import {
+  boundsOfRects,
+  easeInOutCubic,
+  halfExtentAlong,
+  lerp,
+  padRect,
+  rectCenter,
+  rectContains,
+  type Point,
+} from '../geometry.js';
 
 export interface FrameTransform {
   scale: number;
@@ -131,28 +141,6 @@ const WARP_RIPPLE_STRENGTH = 0.5;
 const SEPARATION_MARGIN = 64;
 const SEPARATION_ITERATIONS = 10;
 
-function easeInOutCubic(t: number): number {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-}
-
-function lerp(from: number, to: number, t: number): number {
-  return from + (to - from) * t;
-}
-
-function rectCenter(rect: Rect): Point {
-  return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
-}
-
-function containsPoint(rect: Rect, point: Point): boolean {
-  return point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h;
-}
-
-// Half-extent of an axis-aligned rect along a unit direction (its support function), used
-// to measure clearance between rects without treating them as circles.
-function halfExtentAlong(rect: Rect, direction: Point): number {
-  return (Math.abs(direction.x) * rect.w + Math.abs(direction.y) * rect.h) / 2;
-}
-
 export class ExpansionLayer {
   private readonly entries = new Map<string, ToggleEntry>();
   private readonly subModels = new Map<string, FlowModel>();
@@ -242,13 +230,20 @@ export class ExpansionLayer {
   frameAt(world: Point): FrameTarget | null {
     for (let index = this.frames.length - 1; index >= 0; index -= 1) {
       const frame = this.frames[index];
-      if (containsPoint(frame.interior, world)) return frame;
+      if (rectContains(frame.interior, world)) return frame;
     }
     return null;
   }
 
   frameFor(host: FlowNode): FrameTarget | null {
     return this.frames.find((frame) => frame.host === host) ?? null;
+  }
+
+  // Loci are collected by the render loop. Before the first pass there is no visibility
+  // information at all — which is a different thing from "this node is not visible", and
+  // callers that hide unlocated nodes have to tell the two apart.
+  hasLoci(): boolean {
+    return this.locus != null;
   }
 
   locusOf(node: FlowNode): NodeLocus | null {
@@ -584,16 +579,9 @@ function emptyModel(doc: FlowDocument, scopeName: string | null): FlowModel {
 }
 
 export function subModelBounds(subModel: FlowModel): Rect {
-  const rects = [
-    ...subModel.nodes.map((node) => subModel.display?.rects.get(node) ?? node.pos),
-    ...subModel.ghosts.map((ghost) => ghost.pos),
-  ].filter((rect): rect is Rect => rect != null);
-  if (rects.length === 0) return { x: 0, y: 0, ...EMPTY_CONTENT_SIZE };
-  const minX = Math.min(...rects.map((rect) => rect.x)) - CONTENT_MARGIN;
-  const minY = Math.min(...rects.map((rect) => rect.y)) - CONTENT_MARGIN;
-  const maxX = Math.max(...rects.map((rect) => rect.x + rect.w)) + CONTENT_MARGIN;
-  const maxY = Math.max(...rects.map((rect) => rect.y + rect.h)) + CONTENT_MARGIN;
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  const bounds = boundsOfRects(FlowDoc.displayRects(subModel));
+  if (!bounds) return { x: 0, y: 0, ...EMPTY_CONTENT_SIZE };
+  return padRect(bounds, CONTENT_MARGIN);
 }
 
 // Soft far-field displacement from a growing frame: strength proportional to how much the

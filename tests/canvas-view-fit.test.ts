@@ -4,10 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { parseFlow } from '../src/shared/flow-format.js';
 import { buildModel } from '../src/client/flow-doc.js';
-import { ExpansionLayer } from '../src/client/expansion.js';
-import type { View } from '../src/client/canvas-view.js';
+import { ExpansionLayer } from '../src/client/canvas/expansion.js';
+import type { View } from '../src/client/canvas/canvas-view.js';
 import type { FlowNode, Rect } from '../src/shared/flow-format.js';
-import { VIEWPORT, createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
+import { VIEWPORT, createCanvasMock, createExpansionLayer, stubCanvasGlobals } from './canvas-mock.js';
 
 const DASHBOARD_FLOW = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '../flows/dashboard.flow'),
@@ -38,11 +38,11 @@ function worldRectVisibleInView(rect: Rect, view: View, bounds: { width: number;
   return rect.x + rect.w >= left && rect.x <= right && rect.y + rect.h >= top && rect.y <= bottom;
 }
 
-let CanvasView: typeof import('../src/client/canvas-view.js').CanvasView;
+let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
 beforeAll(async () => {
   stubCanvasGlobals();
-  ({ CanvasView } = await import('../src/client/canvas-view.js'));
+  ({ CanvasView } = await import('../src/client/canvas/canvas-view.js'));
   vi.spyOn(CanvasView.prototype, 'requestRender').mockImplementation(() => {});
 });
 
@@ -65,8 +65,7 @@ describe('CanvasView fit after subgraph navigation', () => {
 
     const canvas = createCanvasMock();
     // Fit-to-content never dispatches actions, so a bare stub is enough here.
-    const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1]);
-    view.expansionLayer = expansions;
+    const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1], expansions);
 
     view.setModel(parentModel);
     expansions.restoreOpen([host.id!]);
@@ -98,7 +97,7 @@ describe('CanvasView fit after subgraph navigation', () => {
     childModel.sourcePath = 'dashboard.flow';
 
     const canvas = createCanvasMock();
-    const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1]);
+    const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1], createExpansionLayer());
     view.setModel(parentModel);
     const reconstructed = view.fitViewForModel(childModel);
 

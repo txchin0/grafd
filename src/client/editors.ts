@@ -18,7 +18,7 @@ import {
 } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { ModelEdge } from './flow-doc.js';
-import type { CanvasView } from './canvas-view.js';
+import type { CanvasView } from './canvas/canvas-view.js';
 import { createTitleEditor } from './title-editor.js';
 import { createReferenceRows } from './reference-rows.js';
 import type { LinkContext } from './reference-link.js';
@@ -348,7 +348,7 @@ export function createEditors(context: EditorContext): Editors {
     const node = editingNode();
     if (node) positionBesideRect(elements.nodeEditor, context.view.worldRectToScreen(context.view.rect(node)));
     const edge = editingEdge();
-    if (edge?.geometry) {
+    if (edge && context.view.edgeGeometryOf(edge)) {
       const mid = context.view.worldToScreen(context.view.edgeAnchor(edge));
       positionBesideRect(elements.edgeEditor, { x: mid.x, y: mid.y, w: 0, h: 0 });
     }

@@ -43,8 +43,9 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
-import type { FlowModel, GhostNode, ModelEdge, Point } from './flow-doc.js';
-import { CanvasView, type ContextTarget, type EmptyEdgeDrop, type Tool, type View } from './canvas-view.js';
+import type { FlowModel, GhostNode, ModelEdge } from './flow-doc.js';
+import type { Point } from './geometry.js';
+import { CanvasView, type ContextTarget, type EmptyEdgeDrop, type Tool, type View } from './canvas/canvas-view.js';
 import { createContextMenu, type MenuItem } from './context-menu.js';
 import type { Modal } from './modal.js';
 import { createPreferencesDialog } from './preferences-dialog.js';
@@ -55,13 +56,13 @@ import {
   ExpansionLayer,
   TOGGLE_DURATION_MS,
   type DocumentOwner,
-} from './expansion.js';
+} from './canvas/expansion.js';
 import {
   backOutAnchorFor,
   divePathTo,
   type DiveTarget,
   type TrailEntry,
-} from './dive-navigation.js';
+} from './canvas/dive-navigation.js';
 import { createEditors, type Editors } from './editors.js';
 import { EditSession, type CommitTiming } from './edit-session.js';
 import { MANIFEST_FILE_NAME } from '../shared/manifest.js';
@@ -1164,6 +1165,17 @@ function completeEdge(
   }
 }
 
+// Declared before the view because the view owns it for its whole life. Both callbacks below
+// only dereference `view` and `editors` when something calls them, which never happens during
+// construction, so the forward references are safe.
+const expansions = new ExpansionLayer({
+  onNeedsRender: () => {
+    view.requestRender();
+    editors.refreshFromDoc();
+  },
+  readExternalFile: (path) => workspace?.readFile(path) ?? Promise.resolve(null),
+});
+
 const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   createNode: (rect, frameHost) => {
     if (openFlow) createNodeAndEdit(rect, frameHost);
@@ -1191,16 +1203,7 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
     editors.reposition();
     elements.zoomLevel.textContent = `${Math.round(view.view.scale * 100)}%`;
   },
-});
-
-const expansions = new ExpansionLayer({
-  onNeedsRender: () => {
-    view.requestRender();
-    editors.refreshFromDoc();
-  },
-  readExternalFile: (path) => workspace?.readFile(path) ?? Promise.resolve(null),
-});
-view.expansionLayer = expansions;
+}, expansions);
 
 const editors: Editors = createEditors({
   view,

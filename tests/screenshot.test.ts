@@ -11,7 +11,7 @@ import {
   pixelSizeForWidth,
   previewLayoutFor,
 } from '../src/client/screenshot.js';
-import { VIEWPORT, createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
+import { VIEWPORT, createCanvasMock, createExpansionLayer, stubCanvasGlobals } from './canvas-mock.js';
 
 const DASHBOARD_FLOW = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '../flows/dashboard.flow'),
@@ -71,11 +71,11 @@ describe('preview layout', () => {
 });
 
 describe('CanvasView.renderSnapshot', () => {
-  let CanvasView: typeof import('../src/client/canvas-view.js').CanvasView;
+  let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
   beforeAll(async () => {
     stubCanvasGlobals();
-    ({ CanvasView } = await import('../src/client/canvas-view.js'));
+    ({ CanvasView } = await import('../src/client/canvas/canvas-view.js'));
     vi.spyOn(CanvasView.prototype, 'requestRender').mockImplementation(() => {});
   });
 
@@ -87,6 +87,7 @@ describe('CanvasView.renderSnapshot', () => {
     const view = new CanvasView(
       createCanvasMock(),
       {} as unknown as ConstructorParameters<typeof CanvasView>[1],
+      createExpansionLayer(),
     );
     view.setModel(model);
     return view;

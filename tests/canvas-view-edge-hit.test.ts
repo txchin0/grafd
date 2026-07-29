@@ -3,16 +3,17 @@
 
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import rough from 'roughjs';
-import type { CanvasActions } from '../src/client/canvas-view.js';
+import type { CanvasActions } from '../src/client/canvas/canvas-view.js';
 import {
   createEdgeGeometry,
   distanceToEdgePath,
   edgePathMidpoint,
   flattenEdgePath,
-} from '../src/client/edge-path.js';
+} from '../src/client/canvas/edge-path.js';
 import { parseFlow } from '../src/shared/flow-format.js';
-import { assignMissingIds, buildModel, type Point } from '../src/client/flow-doc.js';
-import { createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
+import { assignMissingIds, buildModel } from '../src/client/flow-doc.js';
+import type { Point } from '../src/client/geometry.js';
+import { createCanvasMock, createExpansionLayer, stubCanvasGlobals } from './canvas-mock.js';
 
 // Far enough apart that the bow reaches its 34px cap, which is how an edge escapes the chord.
 const BOWED_FLOW = `---
@@ -97,11 +98,11 @@ describe('arbitrary waypoint counts', () => {
   });
 });
 
-let CanvasView: typeof import('../src/client/canvas-view.js').CanvasView;
+let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
 beforeAll(async () => {
   stubCanvasGlobals();
-  ({ CanvasView } = await import('../src/client/canvas-view.js'));
+  ({ CanvasView } = await import('../src/client/canvas/canvas-view.js'));
 });
 
 function stubActions(): CanvasActions {
@@ -132,12 +133,12 @@ function bowedCanvas() {
 
   const actions = stubActions();
   const canvas = createCanvasMock();
-  const view = new CanvasView(canvas, actions);
+  const view = new CanvasView(canvas, actions, createExpansionLayer());
   view.setModel(model);
   // Geometry is a by-product of drawing, so the scene has to be rendered before it can be hit.
   (view as unknown as { render(): void }).render();
 
-  return { canvas, actions, geometry: model.edges[0].geometry! };
+  return { canvas, actions, geometry: view.edgeGeometryOf(model.edges[0])! };
 }
 
 function doubleClickOnCanvas(canvas: HTMLCanvasElement, point: Point): void {
@@ -211,7 +212,7 @@ describe('the flattened path agrees with what rough.js draws', () => {
       assignMissingIds(doc);
       const model = buildModel(doc, null);
       model.sourceDoc = doc;
-      const view = new CanvasView(createCanvasMock(), stubActions());
+      const view = new CanvasView(createCanvasMock(), stubActions(), createExpansionLayer());
       view.setModel(model);
       (view as unknown as { render(): void }).render();
       expect(curveSpy).toHaveBeenCalled();

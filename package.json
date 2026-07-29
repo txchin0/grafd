@@ -6,6 +6,7 @@
   "scripts": {
     "start": "npm run build && node dist/server/server.js",
     "dev": "node scripts/dev.mjs",
+    "prebuild": "node scripts/clean.mjs",
     "build": "tsc -p tsconfig.build.json",
     "build:site": "npm run build && node scripts/build-site.mjs",
     "serve:site": "npm run build:site && node scripts/serve-site.mjs",

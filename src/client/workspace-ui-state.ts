@@ -17,7 +17,7 @@ import {
   serializeManifest,
   type WorkspaceManifest,
 } from '../shared/manifest.js';
-import type { View } from './canvas-view.js';
+import type { View } from './canvas/canvas-view.js';
 
 const SAVE_DEBOUNCE_MS = 800;
 

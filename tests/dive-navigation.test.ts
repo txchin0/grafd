@@ -4,14 +4,14 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { parseFlow } from '../src/shared/flow-format.js';
 import { allNodes, buildModel } from '../src/client/flow-doc.js';
-import { ExpansionLayer } from '../src/client/expansion.js';
+import { ExpansionLayer } from '../src/client/canvas/expansion.js';
 import {
   backOutAnchorFor,
   divePathTo,
   type DiveNavigationContext,
-} from '../src/client/dive-navigation.js';
+} from '../src/client/canvas/dive-navigation.js';
 import type { FlowModel } from '../src/client/flow-doc.js';
-import type { View } from '../src/client/canvas-view.js';
+import type { View } from '../src/client/canvas/canvas-view.js';
 import { createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
 
 const NESTED_FLOW = `graph: Deep
@@ -31,11 +31,11 @@ Host
   expand: Sub
 `;
 
-let CanvasView: typeof import('../src/client/canvas-view.js').CanvasView;
+let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
 beforeAll(async () => {
   stubCanvasGlobals();
-  ({ CanvasView } = await import('../src/client/canvas-view.js'));
+  ({ CanvasView } = await import('../src/client/canvas/canvas-view.js'));
   vi.spyOn(CanvasView.prototype, 'requestRender').mockImplementation(() => {});
 });
 
@@ -54,8 +54,7 @@ function nestedScene() {
   layer.collectLoci(model);
 
   const canvas = createCanvasMock();
-  const canvasView = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1]);
-  canvasView.expansionLayer = layer;
+  const canvasView = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1], layer);
 
   const liveView: View = { x: 40, y: -20, scale: 1.25 };
   const ctx: DiveNavigationContext = {

@@ -27,13 +27,8 @@ import {
   type Rect,
   type Reference,
 } from '../shared/flow-format.js';
-import type { DisplayGeometry } from './expansion.js';
-import type { EdgeGeometry } from './edge-path.js';
-
-export interface Point {
-  x: number;
-  y: number;
-}
+import type { DisplayGeometry } from './canvas/expansion.js';
+import type { Point } from './geometry.js';
 
 export interface GhostNode {
   name: string;
@@ -42,8 +37,6 @@ export interface GhostNode {
 }
 
 export type EdgeKind = 'flow' | 'error';
-
-export type { EdgeGeometry };
 
 /** Identity of a subgraph expansion that `{Inner}` names resolve against (spec §5.7). */
 export type ExpandIdentity =
@@ -60,7 +53,6 @@ export interface ModelEdge {
   spec: EdgeSpec;
   kind: EdgeKind;
   to?: FlowNode | GhostNode;
-  geometry?: EdgeGeometry | null;
 }
 
 export interface NodeTraits {
@@ -84,6 +76,16 @@ export interface FlowModel {
   sourceScope: string | null;
   display?: DisplayGeometry;
   embedded?: boolean;
+}
+
+// The rects a model currently occupies on screen: each node's display rect once a geometry
+// pass has attached one (an unfolded frame measures at its frame, not its collapsed `pos`),
+// otherwise its authored `pos`. Nodes still awaiting auto-layout have neither and drop out.
+export function displayRects(model: FlowModel): Rect[] {
+  return [
+    ...model.nodes.map((node) => model.display?.rects.get(node) ?? node.pos),
+    ...model.ghosts.map((ghost) => ghost.pos),
+  ].filter((rect): rect is Rect => rect != null);
 }
 
 export const DEFAULT_NODE_SIZE = { w: 200, h: 88 };

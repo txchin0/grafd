@@ -7,8 +7,8 @@
 
 import type { FlowNode } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
-import type { Point } from './flow-doc.js';
-import type { DocumentOwner } from './expansion.js';
+import type { Point } from './geometry.js';
+import type { DocumentOwner } from './canvas/expansion.js';
 import type { OpenFlow } from './open-flow.js';
 
 // How far a duplicate lands from its original, and where a paste with no pointer position goes.

@@ -7,7 +7,7 @@
 // file updates reparse the document and replace the node objects.
 
 import type { FlowNode } from '../shared/flow-format.js';
-import { HAND_FONT, type CanvasView } from './canvas-view.js';
+import { HAND_FONT, type CanvasView } from './canvas/canvas-view.js';
 
 export interface TitleEditorContext {
   view: CanvasView;

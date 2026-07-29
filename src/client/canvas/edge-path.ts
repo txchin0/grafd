@@ -5,8 +5,8 @@
 // Deriving each of them from the control points independently is how the clickable region drifts
 // away from the ink, so they all read `EdgeGeometry.path` instead.
 
-import type { Rect } from '../shared/flow-format.js';
-import type { Point } from './flow-doc.js';
+import type { Rect } from '../../shared/flow-format.js';
+import type { Point } from '../geometry.js';
 
 // rough.js renders `curve` as a cardinal spline: it pads the point list by repeating the first and
 // last entry, then chains one cubic Bézier per interior pair. Flattening mirrors that construction
