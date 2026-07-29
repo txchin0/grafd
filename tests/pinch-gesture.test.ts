@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { pinchCenter, pinchDistance, viewForPinch, type PinchAnchor } from '../src/client/canvas/pinch-gesture.js';
 import type { View } from '../src/client/canvas/camera-transition.js';
 
-const LIMITS = { min: 0.12, max: 3 };
+const LIMITS = { min: 0.12, max: 5 };
 
 function anchorFor(view: View, first: { x: number; y: number }, second: { x: number; y: number }): PinchAnchor {
   return { view, center: pinchCenter(first, second), distance: pinchDistance(first, second) };

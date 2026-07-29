@@ -197,7 +197,7 @@ export type ContextTarget =
 
 
 const MIN_SCALE = 0.12;
-const MAX_SCALE = 3;
+const MAX_SCALE = 5;
 const MAX_FIT_SCALE = 1.4;
 const MIN_NODE_WIDTH = 120;
 const MIN_NODE_HEIGHT = 64;
