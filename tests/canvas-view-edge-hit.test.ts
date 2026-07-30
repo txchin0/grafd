@@ -15,7 +15,8 @@ import { assignMissingIds, buildModel } from '../src/client/flow-doc.js';
 import type { Point } from '../src/client/geometry.js';
 import { createCanvasMock, createExpansionLayer, stubCanvasGlobals } from './canvas-mock.js';
 
-// Far enough apart that the bow reaches its 34px cap, which is how an edge escapes the chord.
+// A reciprocal pair, so both edges take an outward lane and bow; far enough apart that the bow
+// reaches its 34px cap, which is how an edge escapes the chord.
 const BOWED_FLOW = `---
 name: Bowed
 ---
@@ -28,6 +29,7 @@ Start
 End
   id: end-1
   pos: 800, 0, 200, 88
+  -> Start
 `;
 
 function bowedEdge(bow: number) {

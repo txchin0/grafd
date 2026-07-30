@@ -68,17 +68,48 @@ export function boundsOfRects(rects: Rect[]): Rect | null {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+/** The unit vector pointing from one point to another, or a zero vector if they coincide. */
+export function unitVectorBetween(from: Point, to: Point): Point {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (length === 0) return { x: 0, y: 0 };
+  return { x: dx / length, y: dy / length };
+}
+
+/** The direction turned a quarter turn, for measuring offsets across a direction of travel. */
+export function perpendicular(direction: Point): Point {
+  return { x: -direction.y, y: direction.x };
+}
+
+export function offsetAlong(point: Point, direction: Point, distance: number): Point {
+  return { x: point.x + direction.x * distance, y: point.y + direction.y * distance };
+}
+
+export function midpointOf(a: Point, b: Point): Point {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
 // Where an edge touching `rect` meets its border: the crossing point of the ray from the
 // rect's center toward `towardPoint`.
 export function rectBorderPointToward(rect: Rect, towardPoint: Point): Point {
   const center = rectCenter(rect);
-  const dx = towardPoint.x - center.x;
-  const dy = towardPoint.y - center.y;
-  if (dx === 0 && dy === 0) return center;
-  const scaleX = dx === 0 ? Infinity : (rect.w / 2) / Math.abs(dx);
-  const scaleY = dy === 0 ? Infinity : (rect.h / 2) / Math.abs(dy);
-  const t = Math.min(scaleX, scaleY);
-  return { x: center.x + dx * t, y: center.y + dy * t };
+  return rectBorderPointFrom(rect, center, unitVectorBetween(center, towardPoint));
+}
+
+// Where a ray leaves `rect`, cast from an origin inside it rather than from its center.
+// Offsetting the origin is what slides an edge's anchor along the border, which is how parallel
+// edges between one pair of nodes meet it at distinct points instead of stacking on the one.
+export function rectBorderPointFrom(rect: Rect, origin: Point, direction: Point): Point {
+  if (direction.x === 0 && direction.y === 0) return origin;
+  const toVerticalEdge = direction.x === 0
+    ? Infinity
+    : ((direction.x > 0 ? rect.x + rect.w : rect.x) - origin.x) / direction.x;
+  const toHorizontalEdge = direction.y === 0
+    ? Infinity
+    : ((direction.y > 0 ? rect.y + rect.h : rect.y) - origin.y) / direction.y;
+  const distance = Math.max(0, Math.min(toVerticalEdge, toHorizontalEdge));
+  return offsetAlong(origin, direction, distance);
 }
 
 // Half-extent of an axis-aligned rect along a unit direction (its support function), used to
