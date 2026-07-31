@@ -415,6 +415,38 @@ html, body {
   line-height: 1;
 }
 
+/* Names a region in place, over the label the canvas draws at its top-left corner. The reason
+   line only appears when a name is refused, so the box stays the size of what it edits. */
+#region-name-editor {
+  position: absolute;
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#region-name-input {
+  background: var(--field-bg);
+  border: 1px solid var(--canvas-region-stroke);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 2px 6px;
+  outline: none;
+}
+
+#region-name-error {
+  display: none;
+  max-width: 240px;
+  background: var(--panel-bg);
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  color: var(--danger);
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+#region-name-editor.rejected #region-name-error { display: block; }
+
 #node-editor { width: 264px; display: flex; flex-direction: column; gap: 8px; }
 
 #node-editor input[type="text"],
@@ -513,6 +545,42 @@ html, body {
 #ee-data-rows { display: flex; flex-direction: column; gap: 4px; width: 100%; }
 
 .field-caption { font-size: var(--text-caption); color: var(--muted); }
+
+/* Read-only lines in an editor: what the file already says, and why an edit was refused. */
+.field-note { font-size: var(--text-caption); color: var(--muted); margin: 0; }
+.field-error { font-size: var(--text-caption); color: var(--danger); margin: 0; }
+
+#region-editor { width: 264px; display: flex; flex-direction: column; gap: 8px; }
+#region-editor textarea {
+  width: 100%;
+  background: var(--field-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-body);
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+#re-name { color: var(--canvas-region-stroke); font-size: var(--text-body); margin: 0; }
+#re-members { display: flex; flex-direction: column; gap: 4px; }
+
+#re-member-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+#re-member-list li { display: flex; }
+/* Members are listed, not edited: the entry is a way back to the node, never a way to add one. */
+#re-member-list button {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--text-body);
+  padding: 1px 0;
+  text-align: left;
+}
+#re-member-list button:hover { color: var(--canvas-region-stroke); }
+#re-member-list .missing { color: var(--danger); cursor: default; }
 
 .data-row { display: flex; align-items: center; gap: 4px; }
 .data-row input { flex: 1 1 0; min-width: 0; }

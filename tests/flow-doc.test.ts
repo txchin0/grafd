@@ -18,7 +18,12 @@ import {
   buildModel,
   containingItems,
   contextBlockNamed,
+  contextNamesReadableBy,
+  referencesContext,
+  renameContextBlock,
+  renameContextReferences,
   displayRects,
+  inheritedContextNames,
   groupNodesByOwner,
   DEFAULT_NODE_SIZE,
   deleteContextBlock,
@@ -383,6 +388,115 @@ graph: Sub
     expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['A', 'B']);
     deleteNodes(block.items, nodesIn(block.items), doc);
     expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['A', 'B']);
+  });
+});
+
+describe('renaming a context', () => {
+  const DECLARING = `---
+name: Main
+---
+
+context: Auth
+  nodes:
+    - A
+
+A
+  updates: [Auth, Cart]
+
+B
+  updates: [Cart]
+
+graph: Sub
+  Inner
+    updates: [Auth]
+`;
+
+  // A provider is addressed by name, so every name that refers to it moves with it — including
+  // one inside a `graph:` block, whose nodes read through their host.
+  it('carries the `updates` entries naming it, in the same mutation', () => {
+    const doc = docFrom(DECLARING);
+    const block = contextBlockNamed(doc, 'Auth')!;
+    expect(renameContextBlock(doc, block, 'Session')).toBe('Session');
+    expect(block.name).toBe('Session');
+    expect(getProp(allNodes(doc)[0], 'updates')).toBe('[Session, Cart]');
+    expect(getProp(allNodes(doc)[1], 'updates')).toBe('[Cart]');
+    expect(getProp(allNodes(doc)[2], 'updates')).toBe('[Session]');
+  });
+
+  it('keeps the current name when the request is empty or unchanged', () => {
+    const doc = docFrom(DECLARING);
+    const block = contextBlockNamed(doc, 'Auth')!;
+    expect(renameContextBlock(doc, block, '   ')).toBe('Auth');
+    expect(renameContextBlock(doc, block, 'Auth')).toBe('Auth');
+  });
+
+  it('rewrites the generated `inherits` and the authored `updates` of a downstream file', () => {
+    const doc = docFrom(`---
+name: Child
+inherits: [Auth, Billing]
+---
+
+Leaf
+  updates: [Auth]
+`);
+    expect(renameContextReferences(doc, 'Auth', 'Session')).toBe(true);
+    expect(getPreambleField(doc, 'inherits')).toBe('[Session, Billing]');
+    expect(getProp(allNodes(doc)[0], 'updates')).toBe('[Session]');
+  });
+
+  it('reports a file that names the provider, so untouched files are never rewritten', () => {
+    expect(referencesContext(docFrom(`---
+name: C
+inherits: [Auth]
+---
+
+Leaf
+`), 'Auth')).toBe(true);
+    expect(referencesContext(docFrom(`Leaf
+  updates: [Auth]
+`), 'Auth')).toBe(true);
+    expect(referencesContext(docFrom(`Leaf
+  updates: [Cart]
+`), 'Auth')).toBe(false);
+    expect(renameContextReferences(docFrom(`Leaf
+`), 'Auth', 'Session')).toBe(false);
+  });
+});
+
+describe('contextNamesReadableBy', () => {
+  const DOC = `---
+name: T
+inherits: [Billing]
+---
+
+context: Session
+  nodes:
+    - A
+
+context: Cart
+  nodes:
+    - B
+
+A
+
+B
+`;
+
+  it('unions the blocks listing the node with what the file inherits', () => {
+    const doc = docFrom(DOC);
+    expect(contextNamesReadableBy(doc, 'A')).toEqual(['Billing', 'Session']);
+    expect(contextNamesReadableBy(doc, 'B')).toEqual(['Billing', 'Cart']);
+  });
+
+  // An inherited provider is graph-wide, so a node in no block still reads it.
+  it('gives a node in no block whatever the file inherits', () => {
+    expect(contextNamesReadableBy(docFrom(DOC), 'Nobody')).toEqual(['Billing']);
+    expect(contextNamesReadableBy(docFrom('context: Session\n  nodes:\n\nA\n'), 'A')).toEqual([]);
+  });
+
+  it('reads the preamble list the editor generates', () => {
+    expect(inheritedContextNames(docFrom(DOC))).toEqual(['Billing']);
+    expect(inheritedContextNames(docFrom('A\n'))).toEqual([]);
   });
 });
 

@@ -3,7 +3,7 @@
 // its live one, which follows the node being dragged.
 
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { parseFlow, type FlowNode } from '../src/shared/flow-format.js';
+import { parseFlow, type FlowNode, type Rect } from '../src/shared/flow-format.js';
 import {
   allNodes,
   assignMissingIds,
@@ -119,10 +119,12 @@ function stubActions(): CanvasActions {
     regionMoved: vi.fn(),
     regionResized: vi.fn(),
     deleteRegion: vi.fn(),
+    createRegion: vi.fn(),
+    regionClicked: vi.fn(),
   };
 }
 
-function openedCanvas(flowText: string) {
+function openedCanvas(flowText: string, tool: 'select' | 'node' | 'context' = 'select') {
   const doc = parseFlow(flowText);
   assignMissingIds(doc);
   const model = buildModel(doc, null);
@@ -133,6 +135,7 @@ function openedCanvas(flowText: string) {
   const canvas = createCanvasMock();
   const view = new CanvasView(canvas, actions, layer);
   view.setModel(model);
+  view.setTool(tool);
   view.refreshDisplayGeometry();
 
   return { doc, view, actions, canvas, nodeNamed: (name: string) => allNodes(doc).find((n) => n.name === name)! };
@@ -335,5 +338,39 @@ describe('resizing a region', () => {
     cancelledDrag(canvas, { x: 800, y: 600 }, { x: 300, y: 250 });
     expect(contextBlockNamed(doc, 'Zone')!.pos).toEqual({ x: 0, y: 0, w: 800, h: 600 });
     expect(actions.regionResized).not.toHaveBeenCalled();
+  });
+});
+
+describe('drawing a region with the context tool', () => {
+  it('takes in every node the rectangle encloses, and no node it merely overlaps (R9)', () => {
+    const { actions, canvas } = openedCanvas(ZONE_FLOW, 'context');
+    // Encloses Inside (200,200,200,88) whole; clips Far (1400,900) entirely out.
+    dragOnCanvas(canvas, { x: 150, y: 150 }, { x: 600, y: 400 });
+
+    const calls = (actions.createRegion as unknown as { mock: { calls: [Rect, FlowNode | null, string[]][] } }).mock.calls;
+    expect(calls.length).toBe(1);
+    expect(calls[0][2]).toEqual(['Inside']);
+    expect(calls[0][1]).toBeNull();
+  });
+
+  it('excludes a node the rectangle only cuts across', () => {
+    const { actions, canvas } = openedCanvas(ZONE_FLOW, 'context');
+    dragOnCanvas(canvas, { x: 150, y: 150 }, { x: 300, y: 400 });
+    const calls = (actions.createRegion as unknown as { mock: { calls: [Rect, FlowNode | null, string[]][] } }).mock.calls;
+    expect(calls[0][2]).toEqual([]);
+  });
+
+  it('creates nothing from a rectangle too small to be deliberate', () => {
+    const { actions, canvas } = openedCanvas(ZONE_FLOW, 'context');
+    dragOnCanvas(canvas, { x: 150, y: 150 }, { x: 156, y: 154 });
+    expect(actions.createRegion).not.toHaveBeenCalled();
+    expect(actions.createNode).not.toHaveBeenCalled();
+  });
+
+  it('still creates a node when the node tool drew the rectangle', () => {
+    const { actions, canvas } = openedCanvas(ZONE_FLOW, 'node');
+    dragOnCanvas(canvas, { x: 900, y: 100 }, { x: 1100, y: 300 });
+    expect(actions.createNode).toHaveBeenCalled();
+    expect(actions.createRegion).not.toHaveBeenCalled();
   });
 });

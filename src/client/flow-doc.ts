@@ -5,9 +5,11 @@
 import {
   collapseToSingleLine,
   emptyContextBlock,
+  formatListValue,
   emptyNode,
   getPreambleField,
   getProp,
+  setPreambleField,
   setProp,
   newUuid,
   parseEdgeExpression,
@@ -118,6 +120,21 @@ export function regionRectOf(model: FlowModel, context: ModelContext): Rect | nu
   if (!memberBounds) return context.block.pos;
   const padded = padRect(memberBounds, REGION_MEMBER_PADDING);
   return context.block.pos ? unionRect(context.block.pos, padded) : padded;
+}
+
+// Which providers a top-level node may read (spec §8.5): the blocks listing it, plus everything
+// the file inherits — an inherited provider is graph-wide in the file that receives it. The
+// linter answers the same question over its own scan; the two must agree, since this is what
+// generates the `inherits` the linter then checks.
+export function contextNamesReadableBy(doc: FlowDocument, nodeName: string): string[] {
+  const fromBlocks = contextBlocksIn(doc.items)
+    .filter((block) => block.members.includes(nodeName))
+    .map((block) => block.name);
+  return [...new Set([...inheritedContextNames(doc), ...fromBlocks])];
+}
+
+export function inheritedContextNames(doc: FlowDocument): string[] {
+  return parseListValue(getPreambleField(doc, 'inherits'));
 }
 
 /** One node joining or leaving one region, as a drag resolved it. */
@@ -524,6 +541,49 @@ export function addContextMember(block: ContextBlock, memberName: string): void 
 
 export function removeContextMember(block: ContextBlock, memberName: string): void {
   setContextMembers(block, block.members.filter((member) => member !== memberName));
+}
+
+// Renaming a provider renames every reference to it, because a provider is addressed by name and
+// nothing else: `updates` in the declaring file (spec §8.6), and `inherits`/`updates` in the files
+// its members expand into (§8.4). A name left behind would refer to a provider nobody declares.
+export function renameContextBlock(doc: FlowDocument, block: ContextBlock, requestedName: string): string {
+  const cleanName = sanitizeName(requestedName);
+  if (!cleanName || cleanName === block.name) return block.name;
+  const oldName = block.name;
+  block.name = cleanName;
+  renameUpdatedContext(doc, oldName, cleanName);
+  return cleanName;
+}
+
+/** The downstream half: a file that reads a provider it does not declare. */
+export function renameContextReferences(doc: FlowDocument, oldName: string, newName: string): boolean {
+  const inherited = renamedListValue(getPreambleField(doc, 'inherits'), oldName, newName);
+  if (inherited != null) setPreambleField(doc, 'inherits', inherited);
+  const updated = renameUpdatedContext(doc, oldName, newName);
+  return inherited != null || updated;
+}
+
+export function referencesContext(doc: FlowDocument, name: string): boolean {
+  return inheritedContextNames(doc).includes(name)
+    || allNodes(doc).some((node) => parseListValue(getProp(node, 'updates')).includes(name));
+}
+
+function renameUpdatedContext(doc: FlowDocument, oldName: string, newName: string): boolean {
+  let changed = false;
+  for (const node of allNodes(doc)) {
+    const updates = renamedListValue(getProp(node, 'updates'), oldName, newName);
+    if (updates == null) continue;
+    setProp(node, 'updates', updates);
+    changed = true;
+  }
+  return changed;
+}
+
+/** The rewritten list, or null when the name does not appear in it. */
+function renamedListValue(value: string | null, oldName: string, newName: string): string | null {
+  const names = parseListValue(value);
+  if (!names.includes(oldName)) return null;
+  return formatListValue([...new Set(names.map((name) => (name === oldName ? newName : name)))]);
 }
 
 export function renameMemberInContextBlocks(doc: FlowDocument, oldName: string, newName: string): void {

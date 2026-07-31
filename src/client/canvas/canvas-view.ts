@@ -35,6 +35,7 @@ import {
   rectBorderPointToward,
   pointNearRectBorder,
   rectCenter,
+  rectContainsRect,
   rectContains,
   rectsIntersect,
   type Point,
@@ -90,7 +91,7 @@ import {
 export type { CameraLink, View, ViewportSize } from './camera-transition.js';
 export { childViewLinkedTo, interpolateView, parentViewLinkedTo } from './camera-transition.js';
 
-export type Tool = 'select' | 'node';
+export type Tool = 'select' | 'node' | 'context';
 
 
 
@@ -125,7 +126,7 @@ type Gesture =
       moved: boolean;
     }
   | { type: 'region-resize'; context: ModelContext; corner: ResizeCorner; startRect: Rect; startWorld: Point }
-  | { type: 'create'; startWorld: Point; startScreen: Point; rect: Rect | null }
+  | { type: 'create'; tool: Tool; startWorld: Point; startScreen: Point; rect: Rect | null }
   | { type: 'marquee'; startWorld: Point; rect: Rect | null }
   | { type: 'pinch'; pointers: [number, number]; start: PinchAnchor };
 
@@ -204,6 +205,8 @@ export interface CanvasActions {
   regionMoved(region: RegionTarget, movedNodes: FlowNode[], membershipChanges: MembershipChange[]): void;
   regionResized(region: RegionTarget, membershipChanges: MembershipChange[]): void;
   deleteRegion(region: RegionTarget): void;
+  createRegion(rect: Rect, frameHost: FlowNode | null, memberNames: string[]): void;
+  regionClicked(region: RegionTarget): void;
   completeEdge(fromNode: FlowNode, drop: EdgeDrop): void;
   editEdge(edge: ModelEdge): void;
   editNodeTitle(node: FlowNode): void;
@@ -534,6 +537,19 @@ export class CanvasView {
     this.selectedEdge = null;
     this.selectedRegion = null;
     this.requestRender();
+  }
+
+  /** Selects a region of the open graph by name — the only handle a region has. */
+  selectRegion(name: string): void {
+    this.selection.clear();
+    this.selectedEdge = null;
+    this.selectedRegion = this.model.contexts.find((context) => context.block.name === name) ?? null;
+    this.requestRender();
+  }
+
+  regionRectOfBlock(block: ContextBlock): Rect | null {
+    const context = this.model.contexts.find((candidate) => candidate.block === block);
+    return context ? this.regionRectOfContext(context) : null;
   }
 
   /** The selected region as the document address a mutation needs, or null when none is selected. */
@@ -873,7 +889,7 @@ export class CanvasView {
       return;
     }
 
-    const wantsCreate = this.tool === 'node' && !event.shiftKey;
+    const wantsCreate = (this.tool === 'node' || this.tool === 'context') && !event.shiftKey;
     const node = this.hitNode(world);
     if (node && !(wantsCreate && this.isFrameBackground(node, world))) {
       if (event.shiftKey && this.selection.has(node)) {
@@ -946,7 +962,7 @@ export class CanvasView {
       this.actions.canvasClicked();
     }
     this.gesture = wantsCreate
-      ? { type: 'create', startWorld: world, startScreen: screen, rect: null }
+      ? { type: 'create', tool: this.tool, startWorld: world, startScreen: screen, rect: null }
       : { type: 'marquee', startWorld: world, rect: null };
     this.requestRender();
   }
@@ -1198,9 +1214,13 @@ export class CanvasView {
     this.requestRender();
   }
 
-  // A press that selected a region without dragging it has nothing to write.
+  // A press that selected a region without dragging it has nothing to write; it was a click, and
+  // a click on a region opens its editor the way a click on a node opens that node's.
   private commitRegionMove(gesture: Extract<Gesture, { type: 'region-move' }>): void {
-    if (!gesture.moved) return;
+    if (!gesture.moved) {
+      this.actions.regionClicked(this.regionTargetOf(gesture.context));
+      return;
+    }
     const frame = this.regionRectOfContext(gesture.context);
     const changes = frame
       ? membershipChangesForRegion(this.model, gesture.context, frame, { canRemove: false })
@@ -1235,8 +1255,16 @@ export class CanvasView {
     const startFrame = this.expansionLayer.frameAt(gesture.startWorld);
     const endFrame = this.expansionLayer.frameAt(world);
     if ((startFrame?.host ?? null) !== (endFrame?.host ?? null)) return;
-    const rect = startFrame ? inverseTransformRect(gesture.rect, startFrame.transform) : gesture.rect;
-    this.actions.createNode(this.snapCreateRect(rect), startFrame?.host ?? null);
+    const rect = this.snapCreateRect(startFrame ? inverseTransformRect(gesture.rect, startFrame.transform) : gesture.rect);
+    if (gesture.tool !== 'context') {
+      this.actions.createNode(rect, startFrame?.host ?? null);
+      return;
+    }
+    // Membership is what the drawing meant: every node the rectangle encloses joins, measured in
+    // the coordinates of the graph that will own the block (R9).
+    const model = startFrame?.model ?? this.model;
+    const enclosed = model.nodes.filter((node) => rectContainsRect(rect, displayRectOf(model, node)));
+    this.actions.createRegion(rect, startFrame?.host ?? null, enclosed.map((node) => node.name));
   }
 
   private isBigEnoughToCreate(rect: Rect): boolean {

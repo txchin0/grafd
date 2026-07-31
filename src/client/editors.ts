@@ -18,13 +18,22 @@ import {
 } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { ModelEdge } from './flow-doc.js';
-import type { CanvasView } from './canvas/canvas-view.js';
+import type { CanvasView, RegionTarget } from './canvas/canvas-view.js';
 import { createTitleEditor } from './title-editor.js';
 import { createReferenceRows } from './reference-rows.js';
 import type { LinkContext } from './reference-link.js';
 
 export interface EditorContext {
   view: CanvasView;
+  regionDescriptionOf(region: RegionTarget): string;
+  applyRegionDescriptionEdit(region: RegionTarget, text: string): void;
+  regionReferencesOf(region: RegionTarget): Reference[];
+  applyRegionReferencesEdit(region: RegionTarget, references: Reference[]): void;
+  // A member entry is a way back to the node on canvas, never a way to change the list (R17/R35).
+  selectMember(region: RegionTarget, memberName: string): void;
+  deleteRegion(region: RegionTarget): void;
+  // Every provider this node may read, and whether it arrives from the graph above (R37).
+  readableContexts(node: FlowNode): { name: string; inherited: boolean }[];
   findNode(nodeId: string): FlowNode | null;
   findEdge(spec: EdgeSpec): ModelEdge | null;
   renameNode(node: FlowNode, requestedName: string): string;
@@ -53,6 +62,7 @@ export interface EditorContext {
 export interface Editors {
   openNodeEditor(node: FlowNode, options?: { focusTitle?: boolean }): void;
   openEdgeEditor(edge: ModelEdge): void;
+  openRegionEditor(region: RegionTarget): void;
   openTitleEditor(node: FlowNode): void;
   closeAll(): void;
   reposition(): void;
@@ -82,6 +92,16 @@ export function createEditors(context: EditorContext): Editors {
     openExpand: elementById<HTMLButtonElement>('ne-open-expand'),
     inlineExpand: elementById<HTMLButtonElement>('ne-inline-expand'),
     deleteNode: elementById<HTMLButtonElement>('ne-delete'),
+    updatesOptions: elementById<HTMLDataListElement>('ne-updates-options'),
+    updatesError: elementById<HTMLParagraphElement>('ne-updates-error'),
+    nodeContexts: elementById<HTMLParagraphElement>('ne-contexts'),
+    regionEditor: elementById<HTMLDivElement>('region-editor'),
+    regionName: elementById<HTMLParagraphElement>('re-name'),
+    regionDescription: elementById<HTMLTextAreaElement>('re-description'),
+    regionReferenceRows: elementById<HTMLDivElement>('re-reference-rows'),
+    regionAddReference: elementById<HTMLButtonElement>('re-add-reference'),
+    regionMembers: elementById<HTMLUListElement>('re-member-list'),
+    regionDelete: elementById<HTMLButtonElement>('re-delete'),
     edgeEditor: elementById<HTMLDivElement>('edge-editor'),
     edgeLabel: elementById<HTMLInputElement>('ee-label'),
     edgeInnerSource: elementById<HTMLSelectElement>('ee-inner-source'),
@@ -105,8 +125,21 @@ export function createEditors(context: EditorContext): Editors {
     afterRowAdded: () => reposition(),
   });
 
+  const regionReferenceRows = createReferenceRows({
+    rows: elements.regionReferenceRows,
+    addButton: elements.regionAddReference,
+    linkContext: () => context.linkContext(),
+    commit: (references) => {
+      if (editingRegion) context.applyRegionReferencesEdit(editingRegion, references);
+    },
+    afterRowAdded: () => reposition(),
+  });
+
   let editingNodeId: string | null = null;
   let editingEdgeSpec: EdgeSpec | null = null;
+  // Held as the target it was opened with rather than by name: the block object survives the
+  // renders that replace the model, and a rename keeps editing the same block.
+  let editingRegion: RegionTarget | null = null;
 
   function editingNode(): FlowNode | null {
     return editingNodeId ? context.findNode(editingNodeId) : null;
@@ -119,12 +152,14 @@ export function createEditors(context: EditorContext): Editors {
   function openTitleEditor(node: FlowNode): void {
     closeNodeEditor();
     closeEdgeEditor();
+    closeRegionEditor();
     titleEditor.open(node);
   }
 
   function openNodeEditor(node: FlowNode, { focusTitle = false }: { focusTitle?: boolean } = {}): void {
     titleEditor.close();
     closeEdgeEditor();
+    closeRegionEditor();
     editingNodeId = node.id;
     elements.referenceRows.replaceChildren();
     fillNodeFields(node);
@@ -146,11 +181,44 @@ export function createEditors(context: EditorContext): Editors {
     fillExpandOptions(node);
     setUnlessFocused(elements.onError, getProp(node, 'on_error') ?? '');
     setUnlessFocused(elements.updates, parseListValue(getProp(node, 'updates')).join(', '));
+    fillReadableContexts(node);
     elements.entrypoint.checked = getProp(node, 'entrypoint') === 'true';
     referenceRows.fill(context.referencesOf(node));
     const lacksExpand = !getProp(node, 'expand');
     elements.openExpand.classList.toggle('hidden', lacksExpand);
     elements.inlineExpand.classList.toggle('hidden', lacksExpand);
+  }
+
+  // Read access is implicit and not editable here: the regions listing this node, plus whatever
+  // the file inherits (R37). An inherited provider is marked, since a member carrying `expand`
+  // passes what it reads into its own expansion (R39).
+  function fillReadableContexts(node: FlowNode): void {
+    const readable = context.readableContexts(node);
+    const named = readable.map((entry) => (entry.inherited ? `${entry.name} (inherited)` : entry.name));
+    const passesDown = readable.length > 0 && getProp(node, 'expand') != null;
+    elements.nodeContexts.textContent = readable.length === 0
+      ? 'reads no context'
+      : `reads ${named.join(', ')}${passesDown ? ' — its expansion inherits them' : ''}`;
+    elements.updatesOptions.replaceChildren(...readable.map((entry) => {
+      const option = document.createElement('option');
+      option.value = entry.name;
+      return option;
+    }));
+    reportUnreadableUpdates(node, readable.map((entry) => entry.name));
+  }
+
+  // A node may only update what it can read (spec §8.6). A value already in the file that names
+  // something else is shown as the error it is, and the fix is membership — never widened here.
+  function reportUnreadableUpdates(node: FlowNode, readableNames: string[]): void {
+    const unreadable = parseListValue(getProp(node, 'updates')).filter((name) => !readableNames.includes(name));
+    showUpdatesError(unreadable.length === 0
+      ? null
+      : `${unreadable.join(', ')} is not readable by "${node.name}". Drag the node into that region to give it access.`);
+  }
+
+  function showUpdatesError(message: string | null): void {
+    elements.updatesError.textContent = message ?? '';
+    elements.updatesError.classList.toggle('hidden', message == null);
   }
 
   function setUnlessFocused(field: HTMLInputElement | HTMLTextAreaElement, value: string): void {
@@ -169,9 +237,60 @@ export function createEditors(context: EditorContext): Editors {
     );
   }
 
+  // A region has no title of its own here: the name is edited in place on the canvas, and `pos`
+  // is not a field at all — an area is what the user drew, not a number to type (R36).
+  function openRegionEditor(region: RegionTarget): void {
+    titleEditor.close();
+    closeNodeEditor();
+    closeEdgeEditor();
+    editingRegion = region;
+    elements.regionReferenceRows.replaceChildren();
+    fillRegionFields(region);
+    elements.regionEditor.classList.remove('hidden');
+    reposition();
+  }
+
+  function fillRegionFields(region: RegionTarget): void {
+    elements.regionName.textContent = `context: ${region.block.name}`;
+    setUnlessFocused(elements.regionDescription, context.regionDescriptionOf(region));
+    regionReferenceRows.fill(context.regionReferencesOf(region));
+    fillRegionMembers(region);
+  }
+
+  // A member naming a node that is not in the file is shown as the dangling entry it is rather
+  // than hidden: the file says the provider reaches it, and only the file can say otherwise.
+  function fillRegionMembers(region: RegionTarget): void {
+    elements.regionMembers.replaceChildren(...region.block.members.map((memberName) => {
+      const entry = document.createElement('li');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = memberName;
+      const exists = FlowDoc.nodesIn(region.doc.items).some((node) => node.name === memberName);
+      if (exists) button.addEventListener('click', () => context.selectMember(region, memberName));
+      else {
+        button.classList.add('missing');
+        button.title = 'No node of this name is declared in this file';
+      }
+      entry.appendChild(button);
+      return entry;
+    }));
+    if (region.block.members.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'field-note';
+      empty.textContent = 'No nodes yet — nothing can read this context.';
+      elements.regionMembers.appendChild(empty);
+    }
+  }
+
+  function closeRegionEditor(): void {
+    editingRegion = null;
+    elements.regionEditor.classList.add('hidden');
+  }
+
   function openEdgeEditor(edge: ModelEdge): void {
     titleEditor.close();
     closeNodeEditor();
+    closeRegionEditor();
     editingEdgeSpec = edge.spec;
     elements.edgeLabel.value = edge.spec.label ?? '';
     elements.edgeDataRows.replaceChildren();
@@ -341,10 +460,16 @@ export function createEditors(context: EditorContext): Editors {
     titleEditor.close();
     closeNodeEditor();
     closeEdgeEditor();
+    closeRegionEditor();
   }
 
   function reposition(): void {
     titleEditor.reposition();
+    if (editingRegion) {
+      const rect = context.view.regionRectOfBlock(editingRegion.block);
+      if (rect) positionBesideRect(elements.regionEditor, context.view.worldRectToScreen(rect));
+      else closeRegionEditor();
+    }
     const node = editingNode();
     if (node) positionBesideRect(elements.nodeEditor, context.view.worldRectToScreen(context.view.rect(node)));
     const edge = editingEdge();
@@ -371,6 +496,7 @@ export function createEditors(context: EditorContext): Editors {
 
   function refreshFromDoc(): void {
     titleEditor.refreshFromDoc();
+    if (editingRegion) fillRegionFields(editingRegion);
     const node = editingNode();
     if (editingNodeId && !node) {
       closeNodeEditor();
@@ -421,11 +547,20 @@ export function createEditors(context: EditorContext): Editors {
     applyToNode((node) => setProp(node, 'on_error', elements.onError.value.trim() || null));
   });
 
+  // Typing a provider the node cannot read would be a claim the file cannot back, and membership
+  // is the only thing that grants access — so the entry is refused and the fix is named (R38).
   elements.updates.addEventListener('change', () => {
-    applyToNode((node) => {
-      const entries = elements.updates.value.split(',').map((entry) => entry.trim()).filter(Boolean);
-      setProp(node, 'updates', entries.length ? formatListValue(entries) : null);
-    });
+    const node = editingNode();
+    if (!node) return;
+    const readableNames = context.readableContexts(node).map((entry) => entry.name);
+    const entries = elements.updates.value.split(',').map((entry) => entry.trim()).filter(Boolean);
+    const kept = entries.filter((name) => readableNames.includes(name));
+    const refused = entries.filter((name) => !readableNames.includes(name));
+    context.applyEdit(node, () => setProp(node, 'updates', kept.length ? formatListValue(kept) : null));
+    elements.updates.value = kept.join(', ');
+    showUpdatesError(refused.length === 0
+      ? null
+      : `${refused.join(', ')} is not readable by "${node.name}". Drag the node into that region to give it access.`);
   });
 
   elements.entrypoint.addEventListener('change', () => {
@@ -498,5 +633,18 @@ export function createEditors(context: EditorContext): Editors {
     });
   }
 
-  return { openNodeEditor, openEdgeEditor, openTitleEditor, closeAll, reposition, refreshFromDoc, editingNode };
+  elements.regionDescription.addEventListener('input', () => {
+    if (editingRegion) {
+      context.applyRegionDescriptionEdit(editingRegion, collapseToSingleLine(elements.regionDescription.value));
+    }
+  });
+
+  elements.regionDelete.addEventListener('click', () => {
+    const region = editingRegion;
+    if (!region) return;
+    closeRegionEditor();
+    context.deleteRegion(region);
+  });
+
+  return { openNodeEditor, openEdgeEditor, openRegionEditor, openTitleEditor, closeAll, reposition, refreshFromDoc, editingNode };
 }

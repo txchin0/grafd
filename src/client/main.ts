@@ -23,6 +23,8 @@ import {
   parseFlow,
   serializeFlow,
   setPreambleField,
+  formatListValue,
+  getPreambleField,
   getProp,
   setProp,
   quoteValue,
@@ -35,6 +37,8 @@ import {
   setPreambleReferences,
   parseListValue,
   sanitizeName,
+  unquote,
+  type ContextBlock,
   type EdgeSpec,
   type ExpandLink,
   type FlowDocument,
@@ -65,6 +69,7 @@ import {
   type TrailEntry,
 } from './canvas/dive-navigation.js';
 import { createEditors, type Editors } from './editors.js';
+import { createRegionNameEditor } from './region-name-editor.js';
 import { EditSession, type CommitTiming } from './edit-session.js';
 import { MANIFEST_FILE_NAME } from '../shared/manifest.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
@@ -129,6 +134,7 @@ const elements = {
   helpOverlay: elementById<HTMLDivElement>('help-overlay'),
   toolSelectButton: elementById<HTMLButtonElement>('tool-select-button'),
   toolNodeButton: elementById<HTMLButtonElement>('tool-node-button'),
+  toolContextButton: elementById<HTMLButtonElement>('tool-context-button'),
   zoomIn: elementById<HTMLButtonElement>('zoom-in-button'),
   zoomOut: elementById<HTMLButtonElement>('zoom-out-button'),
   zoomLevel: elementById<HTMLButtonElement>('zoom-level-button'),
@@ -153,6 +159,10 @@ const uiState = createWorkspaceUiState({
 });
 
 const contextMenu = createContextMenu();
+
+// A region drawn or grouped into being is named on the spot; a provider with a placeholder name
+// helps nobody, and the name is what every other file refers to it by.
+const NEW_REGION_NAME = 'Context';
 
 // Copy/cut/paste/duplicate. Built here rather than beside the canvas because everything it
 // needs — the selection, the owning document of a node, the routed mutation — is reached
@@ -652,18 +662,183 @@ function ownerOfRegion(region: RegionTarget): DocumentOwner {
   return { doc: openFlow.doc, path: openFlow.path };
 }
 
+// A region is written into the body of the document the drawing landed in — a `graph:` block has
+// no body of its own, so nothing is created while the canvas is scoped to one or inside a local
+// frame (R45/R5). Drawn inside an unfolded external frame, it belongs to that file.
+function createRegionAndName(rect: Rect, frameHost: FlowNode | null, memberNames: string[]): void {
+  const target = creationTargetFor(frameHost);
+  if (!target || target.scope != null) return;
+  const owner = target.owner;
+  let block: ContextBlock | null = null;
+  applyToDoc(owner, () => {
+    block = FlowDoc.addContextBlock(owner.doc.items, NEW_REGION_NAME, rect, memberNames);
+  }, { commit: 'now' });
+  if (!block) return;
+  syncInheritsForMembers(owner, memberNames);
+  openRegionName({ block, doc: owner.doc, path: owner.path });
+}
+
+// Only a selection that is entirely top-level in one document can become a block: membership
+// lists name nodes declared at column 0 in the file the block lives in (spec §8.2 rule 6).
+function canGroupSelectionIntoContext(): boolean {
+  const target = extractionTargetForSelection();
+  return target != null && target.items === target.owner.doc.items;
+}
+
+// The user expressed membership, not an area, so the block gets no `pos`: its region is the
+// bounding box of the nodes they picked, and stays so as they move (R3, R10).
+function groupSelectionIntoContext(): void {
+  const target = extractionTargetForSelection();
+  if (!target || target.items !== target.owner.doc.items) return;
+  const owner = target.owner;
+  const memberNames = target.nodes.map((node) => node.name);
+  let block: ContextBlock | null = null;
+  applyToDoc(owner, () => {
+    block = FlowDoc.addContextBlock(owner.doc.items, NEW_REGION_NAME, null, memberNames);
+  }, { commit: 'now' });
+  if (!block) return;
+  syncInheritsForMembers(owner, memberNames);
+  openRegionName({ block, doc: owner.doc, path: owner.path });
+}
+
+function openRegionName(region: RegionTarget): void {
+  view.selectRegion(region.block.name);
+  regionNameEditor.open(region);
+}
+
+// A provider is declared in exactly one place, so a name already taken in this file names another
+// provider — suffixing it the way a node name is uniquified would silently declare a second one.
+function renameRegion(region: RegionTarget, requestedName: string): { rejected: string } | null {
+  const name = sanitizeName(requestedName);
+  if (!name) return { rejected: 'A context needs a name.' };
+  if (name === region.block.name) return null;
+  if (FlowDoc.contextBlocksIn(region.doc.items).some((other) => other !== region.block && other.name === name)) {
+    return { rejected: `This file already declares a context called "${name}".` };
+  }
+  if (parseListValue(getPreambleField(region.doc, 'inherits')).includes(name)) {
+    return { rejected: `"${name}" is inherited from the graph above, and is already readable here.` };
+  }
+  const owner = ownerOfRegion(region);
+  const oldName = region.block.name;
+  applyToDoc(owner, () => FlowDoc.renameContextBlock(owner.doc, region.block, name), { commit: 'now' });
+  rippleContextRenameAcrossWorkspace(owner, oldName, name);
+  syncInheritsForMembers(owner, region.block.members);
+  view.selectRegion(name);
+  return null;
+}
+
+// A provider's name is how every other file refers to it: downstream files carry it in the
+// `inherits` the editor generates and in the `updates` their nodes declare (spec §8.4, §8.6), so
+// a rename that stopped at this file would leave them naming a provider nobody declares.
+//
+// Every write of the ripple is made here, so making the whole rename one undo step later is a
+// matter of wrapping this call rather than reworking it.
+function rippleContextRenameAcrossWorkspace(declaring: DocumentOwner, oldName: string, newName: string): void {
+  void renameContextAcrossWorkspace(declaring, oldName, newName);
+}
+
+async function renameContextAcrossWorkspace(
+  declaring: DocumentOwner,
+  oldName: string,
+  newName: string,
+): Promise<void> {
+  // Loading the workspace resumes in a later turn, by which time an undo or a watcher push may
+  // have re-parsed the documents. The rename would then describe a state that no longer exists.
+  const generation = session.documentGeneration;
+  await loadEveryWorkspaceDocument();
+  if (generation !== session.documentGeneration) return;
+
+  for (const entry of knownDocuments()) {
+    if (entry.doc === declaring.doc) continue;
+    // A file that declares a provider of this name declares its own; the names collide but the
+    // providers do not, and rewriting its references would point them at ours.
+    if (FlowDoc.contextBlockNamed(entry.doc, oldName)) continue;
+    if (!FlowDoc.referencesContext(entry.doc, oldName)) continue;
+    applyToDoc(entry, () => FlowDoc.renameContextReferences(entry.doc, oldName, newName), { commit: 'now' });
+  }
+}
+
+// R40a: a child graph's `inherits` is generated by the editor, never authored. Membership is what
+// propagates (spec §8.4), so every write that changes who reads a provider has to reconsider what
+// the members' expansions inherit — which is why this is called from each of them rather than
+// from the editor that happens to be open.
+//
+// The child file may not be loaded yet, so this finishes asynchronously and commits on its own.
+// It is maintenance rather than an edit the user made, and undoing the gesture that triggered it
+// re-runs it from the restored membership.
+function syncInheritsForMembers(owner: DocumentOwner, memberNames: Iterable<string>): void {
+  for (const memberName of new Set(memberNames)) void syncInheritsForMember(owner, memberName);
+}
+
+async function syncInheritsForMember(owner: DocumentOwner, memberName: string): Promise<void> {
+  const node = FlowDoc.nodesIn(owner.doc.items).find((candidate) => candidate.name === memberName);
+  if (!node) return;
+  // A local `graph:` block has no preamble to carry `inherits`; its nodes read through this host.
+  const path = resolvedExpandPath(getProp(node, 'expand'), owner.path);
+  if (!path) return;
+  const doc = expandTargetDoc(path) ?? await expansions.ensureDocument(path);
+  if (!doc) return;
+
+  const readable = FlowDoc.contextNamesReadableBy(owner.doc, memberName);
+  if (sameNameSet(FlowDoc.inheritedContextNames(doc), readable)) return;
+  applyToDoc(
+    { doc, path },
+    () => setPreambleField(doc, 'inherits', readable.length > 0 ? formatListValue(readable) : null),
+    { commit: 'now' },
+  );
+}
+
+function sameNameSet(current: string[], next: string[]): boolean {
+  return current.length === next.length && current.every((name) => next.includes(name));
+}
+
+// A block carries the same free-form properties a node does, so `description` is read and written
+// the same way — through its own property list rather than the node helpers.
+function getBlockProp(block: ContextBlock, key: string): string | null {
+  return block.props.find((prop) => prop.key === key)?.value ?? null;
+}
+
+function setBlockProp(block: ContextBlock, key: string, value: string | null): void {
+  if (value == null || value === '') {
+    block.props = block.props.filter((prop) => prop.key !== key);
+    return;
+  }
+  const existing = block.props.find((prop) => prop.key === key);
+  if (existing) existing.value = value;
+  else block.props.push({ key, value });
+}
+
+// What the node editor shows and what its `updates` field accepts: the regions listing this node
+// plus everything its file inherits, which is exactly what the linter resolves for the same node.
+function readableContexts(node: FlowNode): { name: string; inherited: boolean }[] {
+  const owner = ownerOf(node);
+  const inherited = new Set(FlowDoc.inheritedContextNames(owner.doc));
+  return FlowDoc.contextNamesReadableBy(owner.doc, node.name)
+    .map((name) => ({ name, inherited: inherited.has(name) }));
+}
+
 // Deleting a region removes the provider and nothing else: its members are ordinary nodes that
 // happened to be listed by it (R32).
 function deleteRegionAction(region: RegionTarget): void {
   const owner = ownerOfRegion(region);
+  const orphanedMembers = [...region.block.members];
   view.clearSelection();
   applyToDoc(owner, () => FlowDoc.deleteContextBlock(owner.doc.items, region.block), { commit: 'now' });
+  syncInheritsForMembers(owner, orphanedMembers);
 }
 
 // A member declaring `updates:` on this provider would be left naming a context nothing declares,
 // so that deletion asks twice and says why (R33) — the same two-step the sidebar deletes with,
 // rather than a dialog box.
 function regionMenuItems(region: RegionTarget, at: Point): MenuItem[] {
+  const items: MenuItem[] = [
+    { label: 'Edit', onSelect: () => editors.openRegionEditor(region) },
+    { label: 'Rename', onSelect: () => openRegionName(region) },
+  ];
+  return [...items, ...deleteRegionMenuItems(region, at)];
+}
+
+function deleteRegionMenuItems(region: RegionTarget, at: Point): MenuItem[] {
   const writers = membersUpdatingRegion(region);
   if (writers.length === 0) {
     return [{ label: 'Delete context (keeps its nodes)', danger: true, onSelect: () => deleteRegionAction(region) }];
@@ -1122,16 +1297,19 @@ function commitMovesFor(
   // Membership joins the same batch rather than committing on its own, so dropping a node into a
   // region is one undo step with the move that carried it there (R19). A block always lives in
   // the file its members do, so the node's owner is the document to write.
+  const membersByOwner = new Map<DocumentOwner, string[]>();
   for (const change of membershipChanges) {
     const owner = ownerOf(change.node);
     session.trackWithoutBaseline(owner.path, owner.doc);
     paths.add(owner.path);
     if (change.joins) FlowDoc.addContextMember(change.block, change.node.name);
     else FlowDoc.removeContextMember(change.block, change.node.name);
+    membersByOwner.set(owner, [...(membersByOwner.get(owner) ?? []), change.node.name]);
   }
   if (membershipChanges.length > 0) expansions.invalidateSubModels();
   refresh();
   for (const path of paths) session.commit(path);
+  for (const [owner, memberNames] of membersByOwner) syncInheritsForMembers(owner, memberNames);
 }
 
 // An edge dragged from inside a frame onto empty canvas. Released inside the same frame it
@@ -1263,6 +1441,8 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
     commitMovesFor(movedNodes, membershipChanges, [ownerOfRegion(region)]),
   regionResized: (region, membershipChanges) => commitMovesFor([], membershipChanges, [ownerOfRegion(region)]),
   deleteRegion: deleteRegionAction,
+  createRegion: createRegionAndName,
+  regionClicked: (region) => editors.openRegionEditor(region),
   completeEdge,
   editEdge: (edge) => editors.openEdgeEditor(edge),
   editNodeTitle: (node) => editors.openTitleEditor(node),
@@ -1274,16 +1454,42 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   contextMenu: openCanvasContextMenu,
   viewChanged: () => {
     editors.reposition();
+    regionNameEditor.reposition();
     if (openFlow) scheduleManifestSave();
   },
   afterRender: () => {
     editors.reposition();
+    regionNameEditor.reposition();
     elements.zoomLevel.textContent = `${Math.round(view.view.scale * 100)}%`;
   },
 }, expansions);
 
+// Names a region over the label the canvas draws for it. Built beside the node editors and, like
+// them, reaching the document only through callbacks defined here.
+const regionNameEditor = createRegionNameEditor({
+  view,
+  rectOf: (region) => view.regionRectOfBlock(region.block),
+  renameRegion,
+});
+
 const editors: Editors = createEditors({
   view,
+  regionDescriptionOf: (region) => unquote(getBlockProp(region.block, 'description')),
+  applyRegionDescriptionEdit: (region, text) => {
+    const owner = ownerOfRegion(region);
+    applyToDoc(owner, () => setBlockProp(region.block, 'description', text ? quoteValue(text) : null));
+  },
+  regionReferencesOf: (region) => region.block.references,
+  applyRegionReferencesEdit: (region, references) => {
+    const owner = ownerOfRegion(region);
+    applyToDoc(owner, () => { region.block.references = FlowDoc.normalizeReferences(references); });
+  },
+  selectMember: (region, memberName) => {
+    const node = FlowDoc.nodesIn(region.doc.items).find((candidate) => candidate.name === memberName);
+    if (node) view.select(node);
+  },
+  deleteRegion: deleteRegionAction,
+  readableContexts,
   findNode,
   findEdge,
   renameNode: renameNodeAction,
@@ -1376,6 +1582,11 @@ function nodeMenuItems(node: FlowNode): MenuItem[] {
       disabled: extractionTargetForSelection() === null,
       onSelect: convertSelectionToSubgraph,
     });
+    items.push({
+      label: `Group ${selectionCount} nodes into a context`,
+      disabled: !canGroupSelectionIntoContext(),
+      onSelect: groupSelectionIntoContext,
+    });
   }
   items.push({ label: 'Copy', onSelect: clipboard.copy });
   items.push({ label: 'Cut', onSelect: clipboard.cut });
@@ -1429,11 +1640,13 @@ function setTool(tool: Tool): void {
   view.setTool(tool);
   elements.toolSelectButton.classList.toggle('active', tool === 'select');
   elements.toolNodeButton.classList.toggle('active', tool === 'node');
+  elements.toolContextButton.classList.toggle('active', tool === 'context');
 }
 
 function wireViewControls(): void {
   elements.toolSelectButton.addEventListener('click', () => setTool('select'));
   elements.toolNodeButton.addEventListener('click', () => setTool('node'));
+  elements.toolContextButton.addEventListener('click', () => setTool('context'));
   elements.zoomIn.addEventListener('click', () => view.stepZoom(1));
   elements.zoomOut.addEventListener('click', () => view.stepZoom(-1));
   elements.zoomLevel.addEventListener('click', () => view.setZoom(1));
@@ -1549,6 +1762,8 @@ function wireKeyboard(): void {
       setTool('select');
     } else if (!ctrl && event.key.toLowerCase() === 'n') {
       setTool('node');
+    } else if (!ctrl && event.key.toLowerCase() === 'c') {
+      setTool('context');
     } else if (event.key === 'Escape') {
       contextMenu.close();
       editors.closeAll();

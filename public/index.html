@@ -57,6 +57,7 @@
           <div id="toolbar">
             <button id="tool-select-button" type="button" title="Select tool (V) — drag to multi-select">⬚ Select</button>
             <button id="tool-node-button" type="button" title="Add-node tool (N) — drag to create a node">▢ Node</button>
+            <button id="tool-context-button" type="button" title="Context tool (C) — drag to enclose nodes in a context region">◇ Context</button>
           </div>
           <div id="view-controls">
             <button id="zoom-out-button" type="button" title="Zoom out">−</button>
@@ -88,14 +89,36 @@
             <label>expand <input id="ne-expand" list="ne-expand-options" placeholder="Graph name or [Label](path.flow)" spellcheck="false" /></label>
             <datalist id="ne-expand-options"></datalist>
             <label>on_error <input id="ne-on-error" placeholder='-&gt; Handler : "label"' spellcheck="false" /></label>
-            <label>updates <input id="ne-updates" placeholder="Auth, Cart" spellcheck="false" /></label>
+            <label>updates <input id="ne-updates" list="ne-updates-options" placeholder="Auth, Cart" spellcheck="false" /></label>
+            <datalist id="ne-updates-options"></datalist>
+            <p id="ne-updates-error" class="field-error hidden"></p>
             <label class="check-row"><input type="checkbox" id="ne-entrypoint" /> entrypoint</label>
           </details>
+          <p id="ne-contexts" class="field-note"></p>
           <div class="editor-actions">
             <button id="ne-open-expand" type="button" class="quiet-button hidden">Open ⤢</button>
             <button id="ne-inline-expand" type="button" class="quiet-button hidden">Expand ⊞</button>
             <span class="spacer"></span>
             <button id="ne-delete" type="button" class="danger-button">Delete</button>
+          </div>
+        </div>
+
+        <div id="region-editor" class="floating hidden">
+          <p id="re-name" class="field-caption"></p>
+          <textarea id="re-description" rows="3" placeholder="Description — what this context holds" spellcheck="false"></textarea>
+          <div id="re-references">
+            <span class="field-caption">references</span>
+            <div id="re-reference-rows"></div>
+            <button id="re-add-reference" type="button" class="quiet-button">+ reference</button>
+          </div>
+          <div id="re-members">
+            <span class="field-caption">nodes that can read it</span>
+            <ul id="re-member-list"></ul>
+            <p class="field-note">Membership follows the canvas: drag a node into the region to add it.</p>
+          </div>
+          <div class="editor-actions">
+            <span class="spacer"></span>
+            <button id="re-delete" type="button" class="danger-button">Delete context</button>
           </div>
         </div>
 
@@ -115,6 +138,11 @@
 
         <input id="title-editor" class="hidden" spellcheck="false" autocomplete="off" />
 
+        <div id="region-name-editor" class="hidden">
+          <input id="region-name-input" spellcheck="false" autocomplete="off" placeholder="Context name" />
+          <span id="region-name-error"></span>
+        </div>
+
         <div id="graph-panel" class="floating collapsed">
           <button id="gp-toggle" type="button">graph info</button>
           <div id="gp-body">
@@ -133,7 +161,9 @@
         <div id="help-overlay" class="hidden">
           <h2>Shortcuts</h2>
           <table>
-            <tr><td>V / N</td><td>switch between Select and Add-node tools</td></tr>
+            <tr><td>V / N / C</td><td>switch between the Select, Add-node and Context tools</td></tr>
+            <tr><td>Drag empty canvas (C)</td><td>draw a context region around the nodes it encloses</td></tr>
+            <tr><td>Drag a region's frame / corners</td><td>move / resize it (its interior still multi-selects)</td></tr>
             <tr><td>Drag empty canvas</td><td>multi-select (Select tool) / create a node (Add-node tool)</td></tr>
             <tr><td>Click a node</td><td>edit title &amp; description</td></tr>
             <tr><td>Drag a node / its corners</td><td>move / resize</td></tr>

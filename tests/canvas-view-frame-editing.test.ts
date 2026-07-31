@@ -106,6 +106,8 @@ function stubActions(): CanvasActions {
     regionMoved: vi.fn(),
     regionResized: vi.fn(),
     deleteRegion: vi.fn(),
+    createRegion: vi.fn(),
+    regionClicked: vi.fn(),
   };
 }
 
