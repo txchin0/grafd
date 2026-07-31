@@ -9,16 +9,20 @@
 import type { Rect } from '../shared/flow-format.js';
 import type { CanvasView, RegionTarget } from './canvas/canvas-view.js';
 
+/** Applies the name, or reports in one sentence why it cannot be used. */
+export type RenameRegion = (region: RegionTarget, requestedName: string) => { rejected: string } | null;
+
 export interface RegionNameEditorContext {
   view: CanvasView;
   /** The region's rectangle in world coordinates, or null once it is gone from the canvas. */
   rectOf(region: RegionTarget): Rect | null;
-  /** Applies the name, or reports in one sentence why it cannot be used. */
-  renameRegion(region: RegionTarget, requestedName: string): { rejected: string } | null;
+  renameRegion: RenameRegion;
 }
 
 export interface RegionNameEditor {
-  open(region: RegionTarget): void;
+  // A caller that opened this as part of a wider gesture passes its own `rename`, which keeps
+  // the name it takes inside that gesture's undo step (R12).
+  open(region: RegionTarget, rename?: RenameRegion): void;
   close(options?: { commit?: boolean; insist?: boolean }): void;
   reposition(): void;
   isOpen(): boolean;
@@ -33,14 +37,16 @@ export function createRegionNameEditor(context: RegionNameEditorContext): Region
   const input = document.getElementById('region-name-input') as HTMLInputElement;
   const error = document.getElementById('region-name-error') as HTMLSpanElement;
   let editing: RegionTarget | null = null;
+  let applyName: RenameRegion = context.renameRegion;
 
   function isOpen(): boolean {
     return editing != null;
   }
 
-  function open(region: RegionTarget): void {
+  function open(region: RegionTarget, rename: RenameRegion = context.renameRegion): void {
     close({ commit: false });
     editing = region;
+    applyName = rename;
     input.value = region.block.name;
     panel.classList.remove('hidden');
     showRejection(null);
@@ -55,17 +61,20 @@ export function createRegionNameEditor(context: RegionNameEditorContext): Region
   // the box by clicking elsewhere does not: reopening under a stray click would trap the focus.
   function close({ commit = true, insist = false }: { commit?: boolean; insist?: boolean } = {}): void {
     const region = editing;
+    const rename = applyName;
     editing = null;
     panel.classList.add('hidden');
     showRejection(null);
     if (!region || !commit) return;
-    const outcome = context.renameRegion(region, input.value);
-    if (outcome && insist) reopenWithRejection(region, outcome.rejected);
+    const outcome = rename(region, input.value);
+    if (outcome && insist) reopenWithRejection(region, rename, outcome.rejected);
   }
 
-  function reopenWithRejection(region: RegionTarget, reason: string): void {
+  // The second attempt at a refused name is still the same naming, so it keeps the caller's
+  // `rename` rather than falling back to the standalone one.
+  function reopenWithRejection(region: RegionTarget, rename: RenameRegion, reason: string): void {
     const typed = input.value;
-    open(region);
+    open(region, rename);
     input.value = typed;
     showRejection(reason);
   }

@@ -199,6 +199,7 @@ const graphPanel = createGraphPanel({
   openFlow: () => openFlow,
   edit: mutate,
   linkContext,
+  runAction: (body) => session.runAction(body),
   hostRenamed: rippleInnerRefsAcrossWorkspace,
 });
 
@@ -538,15 +539,17 @@ function convertSelectionToSubgraph(): void {
     if (node.id) expansions.discardToggle(node.id);
   }
   let host: FlowNode | null = null;
-  applyToDoc(owner, () => {
-    host = FlowDoc.extractSubgraph(items, nodes, owner.doc).host;
+  session.runAction(() => {
+    applyToDoc(owner, () => {
+      host = FlowDoc.extractSubgraph(items, nodes, owner.doc).host;
+      for (const { identity, name } of retargets) {
+        FlowDoc.retargetInnerRefs([{ doc: owner.doc, path: owner.path }], identity, name, host.name);
+      }
+    }, { commit: 'now' });
     for (const { identity, name } of retargets) {
-      FlowDoc.retargetInnerRefs([{ doc: owner.doc, path: owner.path }], identity, name, host.name);
+      void retargetInnersAcrossWorkspace(identity, name, host!.name, owner.doc);
     }
-  }, { commit: 'now' });
-  for (const { identity, name } of retargets) {
-    void retargetInnersAcrossWorkspace(identity, name, host!.name, owner.doc);
-  }
+  });
   expansions.collapseFrom(host!);
   view.setSelection([host!]);
   setTimeout(() => editors.openNodeEditor(host!, { focusTitle: true }), TOGGLE_DURATION_MS);
@@ -597,6 +600,8 @@ function extractSubgraphIntoFile(node: FlowNode): void {
   const path = extractedFlowPath(workspaceFiles, owner.path, graphName);
   const linkPath = path.split('/').pop()!;
 
+  // The extracted file is new, so it has no prior text to restore and takes no part in the undo
+  // step: the parent document's rewrite is the whole of what this action can put back.
   let extracted: FlowDocument | null = null;
   applyToDoc(owner, () => {
     extracted = FlowDoc.extractGraphBlockToDocument(owner.doc, blockName, linkPath, graphName);
@@ -612,19 +617,23 @@ function extractSubgraphIntoFile(node: FlowNode): void {
   refresh();
 }
 
+// One delete, however many documents own the selection and however many others name what it
+// removed — in `{Inner}` refinements or in a `nodes:` list (R42).
 function deleteNodesAction(nodes: FlowNode[]): void {
-  for (const { owner, itemGroups } of FlowDoc.groupNodesByOwner(nodes, ownerOf)) {
-    // Captured before the delete, while the nodes are still resolvable in their document.
-    const clears = expansionIdentitiesOf(owner, itemGroups);
-    applyToDoc(owner, () => {
-      for (const { items, nodes: group } of itemGroups) {
-        FlowDoc.deleteNodes(items, group, owner.doc, { path: owner.path });
+  session.runAction(() => {
+    for (const { owner, itemGroups } of FlowDoc.groupNodesByOwner(nodes, ownerOf)) {
+      // Captured before the delete, while the nodes are still resolvable in their document.
+      const clears = expansionIdentitiesOf(owner, itemGroups);
+      applyToDoc(owner, () => {
+        for (const { items, nodes: group } of itemGroups) {
+          FlowDoc.deleteNodes(items, group, owner.doc, { path: owner.path });
+        }
+      }, { commit: 'now' });
+      for (const { identity, name } of clears) {
+        void retargetInnersAcrossWorkspace(identity, name, null, owner.doc);
       }
-    }, { commit: 'now' });
-    for (const { identity, name } of clears) {
-      void retargetInnersAcrossWorkspace(identity, name, null, owner.doc);
     }
-  }
+  });
 }
 
 // The expansions the given nodes host, paired with the names those expansions are reached by —
@@ -954,22 +963,23 @@ async function retargetInnersAcrossWorkspace(
   alreadyUpdated: FlowDocument,
 ): Promise<void> {
   if (!identity) return;
-  // A ripple that has to load the workspace resumes in a later turn, by which time an undo or
-  // a watcher push may have re-parsed the documents into fresh objects. The rename it carries
-  // then describes a state that no longer exists, and applying it would rewrite names the
+  // A ripple that has to load the workspace resumes in a later turn, as the rest of the rename
+  // that started it: it belongs to that undo step, and it is dropped if an undo or a watcher
+  // push has re-parsed the documents in the meantime — applying it then would rewrite names the
   // restore just put back.
-  const generation = session.documentGeneration;
+  const continuation = session.suspendAction();
   // A local `graph:` block is only referenceable from its own file, so its inner names cannot
   // be spelled anywhere else and the workspace-wide load would be wasted.
   if (identity.kind === 'external-path') await loadEveryWorkspaceDocument();
-  if (generation !== session.documentGeneration) return;
-  for (const entry of knownDocuments()) {
-    if (entry.doc === alreadyUpdated) continue;
-    if (!FlowDoc.hasInnerRefs([entry], identity, oldName)) continue;
-    applyToDoc(entry, () => {
-      FlowDoc.retargetInnerRefs([entry], identity, oldName, newName);
-    }, { commit: 'now' });
-  }
+  continuation.resume(() => {
+    for (const entry of knownDocuments()) {
+      if (entry.doc === alreadyUpdated) continue;
+      if (!FlowDoc.hasInnerRefs([entry], identity, oldName)) continue;
+      applyToDoc(entry, () => {
+        FlowDoc.retargetInnerRefs([entry], identity, oldName, newName);
+      }, { commit: 'now' });
+    }
+  });
 }
 
 // Renaming within the owning document is only half the job: `{Inner}` refinements that name
@@ -984,12 +994,18 @@ function rippleInnerRefsAcrossWorkspace(node: FlowNode, oldName: string): void {
   );
 }
 
+// Renaming a block renames its sole host with it, and that host's name can be spelled in
+// `{Inner}` refinements anywhere in the workspace — one edit, one undo step.
+function applyExpandEditAction(node: FlowNode, requestedValue: string): string {
+  return session.runAction(() => repointOrRenameExpansion(node, requestedValue));
+}
+
 // An edit to a node's `expand` carries one of two intents. Naming an existing `graph:` block —
 // or any `[Label](path)` link — repoints the node. Typing an unused name renames the block when
 // this node is its only host, so the block the node just had is never left orphaned; a block
 // with other hosts is not renamed out from under them, and the new name gets a block of its own
 // so the value still resolves (spec §10.3).
-function applyExpandEditAction(node: FlowNode, requestedValue: string): string {
+function repointOrRenameExpansion(node: FlowNode, requestedValue: string): string {
   const owner = ownerOf(node);
   const requested = collapseToSingleLine(requestedValue).trim();
   const repointing = !requested || parseExpandLink(requested) != null
@@ -1018,20 +1034,24 @@ function applyExpandEditAction(node: FlowNode, requestedValue: string): string {
   return getProp(node, 'expand') ?? '';
 }
 
+// The node's own document, the `{Inner}` refinements naming it elsewhere, and the `nodes:` lists
+// it appears in are one rename, however many files that reaches (R41).
 function renameNodeAction(node: FlowNode, requestedName: string): string {
   const owner = ownerOf(node);
   const oldName = node.name;
   let finalName = oldName;
-  applyToDoc(owner, () => {
-    finalName = FlowDoc.renameNode(
-      FlowDoc.containingItems(owner.doc, node),
-      node,
-      requestedName,
-      owner.doc,
-      { path: owner.path },
-    );
+  session.runAction(() => {
+    applyToDoc(owner, () => {
+      finalName = FlowDoc.renameNode(
+        FlowDoc.containingItems(owner.doc, node),
+        node,
+        requestedName,
+        owner.doc,
+        { path: owner.path },
+      );
+    });
+    if (finalName !== oldName) rippleInnerRefsAcrossWorkspace(node, oldName);
   });
-  if (finalName !== oldName) rippleInnerRefsAcrossWorkspace(node, oldName);
   return finalName;
 }
 
@@ -1072,10 +1092,20 @@ async function ensureInnerDocument(edge: ModelEdge, end: RefinedEnd): Promise<vo
   if (path) await expansions.ensureDocument(path);
 }
 
+// One gesture is one undo step, whatever it moved and wherever that landed: the nodes, the
+// regions they joined or left, and the `inherits` of what those members expand into (R19).
 function commitMovesFor(
   nodes: FlowNode[],
   membershipChanges: MembershipChange[] = [],
   alsoTouched: DocumentOwner[] = [],
+): void {
+  session.runAction(() => writeMovesAndMembership(nodes, membershipChanges, alsoTouched));
+}
+
+function writeMovesAndMembership(
+  nodes: FlowNode[],
+  membershipChanges: MembershipChange[],
+  alsoTouched: DocumentOwner[],
 ): void {
   const paths = new Set<string>();
   if (openFlow) paths.add(openFlow.path);
@@ -1318,19 +1348,21 @@ contextOps = createContextOrchestration({
   creationTargetFor,
   extractionTargetForSelection,
   applyToDoc,
+  runAction: (body) => session.runAction(body),
+  suspendAction: () => session.suspendAction(),
   selectRegion: (name) => view.selectRegion(name),
   clearSelection: () => view.clearSelection(),
-  openRegionNameEditor: (region) => regionNameEditor.open(region),
+  openRegionNameEditor: (region, rename) => regionNameEditor.open(region, rename),
   openRegionEditor: (region) => editors.openRegionEditor(region),
   openConfirmMenu: (items, at) => contextMenu.open(items, at),
   inherits: {
-    documentGeneration: () => session.documentGeneration,
+    suspendAction: () => session.suspendAction(),
     expandTargetDoc,
     ensureDocument: (path) => expansions.ensureDocument(path),
     applyToDoc,
   },
   workspaceRename: {
-    documentGeneration: () => session.documentGeneration,
+    suspendAction: () => session.suspendAction(),
     loadEveryWorkspaceDocument,
     knownDocuments,
     applyToDoc,

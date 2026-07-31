@@ -55,6 +55,8 @@ export interface GraphPanelOptions {
   // Runs a mutation against the open document and commits it. `now` skips the typing debounce.
   edit(mutation: () => void, options?: { commit?: 'debounce' | 'now' }): void;
   linkContext(): LinkContext;
+  // Groups the writes inside it into one undo step, however many documents they reach.
+  runAction<T>(body: () => T): T;
   // A renamed block renames its sole host node with it; that node's name can be spelled in
   // `{Inner}` refinements anywhere in the workspace.
   hostRenamed(host: FlowNode, oldName: string): void;
@@ -133,12 +135,14 @@ export function createGraphPanel(options: GraphPanelOptions): GraphPanel {
     if (!graphItem) return;
     const mirroredHost = FlowDoc.mirroredHostOfGraphBlock(flow.doc, graphItem);
     const hostOldName = mirroredHost?.name ?? null;
-    options.edit(() => {
-      flow.scope = FlowDoc.renameGraphBlock(flow.doc, graphItem, elements.name.value, { path: flow.path });
-    }, { commit: 'now' });
-    if (mirroredHost && hostOldName && mirroredHost.name !== hostOldName) {
-      options.hostRenamed(mirroredHost, hostOldName);
-    }
+    options.runAction(() => {
+      options.edit(() => {
+        flow.scope = FlowDoc.renameGraphBlock(flow.doc, graphItem, elements.name.value, { path: flow.path });
+      }, { commit: 'now' });
+      if (mirroredHost && hostOldName && mirroredHost.name !== hostOldName) {
+        options.hostRenamed(mirroredHost, hostOldName);
+      }
+    });
   }
 
   elements.toggle.addEventListener('click', () => {

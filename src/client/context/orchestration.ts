@@ -19,7 +19,8 @@ import type { Point } from '../geometry.js';
 import type { DocumentOwner } from '../canvas/expansion.js';
 import type { RegionTarget } from '../canvas/canvas-view.js';
 import type { MenuItem } from '../context-menu.js';
-import type { CommitTiming } from '../edit-session.js';
+import type { ActionContinuation, CommitTiming } from '../edit-session.js';
+import type { RenameRegion } from '../region-name-editor.js';
 import { syncInheritsForMembers, type InheritsSyncDeps } from './inherits.js';
 import { renameContextAcrossWorkspace, type WorkspaceRenameDeps } from './workspace-rename.js';
 
@@ -44,9 +45,13 @@ export interface ContextOrchestrationOptions {
   creationTargetFor(frameHost: FlowNode | null): CreationTarget | null;
   extractionTargetForSelection(): ExtractionTarget | null;
   applyToDoc(owner: DocumentOwner, mutation: () => void, options?: { commit?: CommitTiming }): void;
+  runAction<T>(body: () => T): T;
+  suspendAction(): ActionContinuation;
   selectRegion(name: string): void;
   clearSelection(): void;
-  openRegionNameEditor(region: RegionTarget): void;
+  // `rename` is passed when the naming still belongs to an action already under way — the
+  // creation gesture that opened the editor (R12).
+  openRegionNameEditor(region: RegionTarget, rename?: RenameRegion): void;
   openRegionEditor(region: RegionTarget): void;
   openConfirmMenu(items: MenuItem[], at: Point): void;
   inherits: InheritsSyncDeps;
@@ -73,9 +78,9 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     return { doc: open.doc, path: open.path };
   }
 
-  function openRegionName(region: RegionTarget): void {
+  function openRegionName(region: RegionTarget, rename?: RenameRegion): void {
     options.selectRegion(region.block.name);
-    options.openRegionNameEditor(region);
+    options.openRegionNameEditor(region, rename);
   }
 
   function syncMembers(owner: DocumentOwner, memberNames: Iterable<string>): void {
@@ -106,18 +111,27 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     createContextBlockAndPromptName(target.owner, null, target.nodes.map((node) => node.name));
   }
 
+  // Naming is the second half of the creation gesture rather than an edit of what it produced,
+  // so the action stays open across the name box and the two land in one undo step (R12).
   function createContextBlockAndPromptName(
     owner: DocumentOwner,
     rect: Rect | null,
     memberNames: string[],
   ): void {
     let block: ContextBlock | null = null;
-    options.applyToDoc(owner, () => {
-      block = FlowDoc.addContextBlock(owner.doc.items, NEW_REGION_NAME, rect, memberNames);
-    }, { commit: 'now' });
-    if (!block) return;
-    syncMembers(owner, memberNames);
-    openRegionName({ block, doc: owner.doc, path: owner.path });
+    const naming = options.runAction(() => {
+      options.applyToDoc(owner, () => {
+        block = FlowDoc.addContextBlock(owner.doc.items, NEW_REGION_NAME, rect, memberNames);
+      }, { commit: 'now' });
+      if (!block) return null;
+      syncMembers(owner, memberNames);
+      return options.suspendAction();
+    });
+    if (!block || !naming) return;
+    openRegionName(
+      { block, doc: owner.doc, path: owner.path },
+      (region, requestedName) => naming.resume(() => renameRegion(region, requestedName)) ?? null,
+    );
   }
 
   // A provider is declared in exactly one place, so a name already taken in this file names
@@ -135,9 +149,13 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     }
     const owner = ownerOfRegion(region);
     const oldName = region.block.name;
-    options.applyToDoc(owner, () => FlowDoc.renameContextBlock(owner.doc, region.block, name), { commit: 'now' });
-    void renameContextAcrossWorkspace(options.workspaceRename, owner, oldName, name);
-    syncMembers(owner, region.block.members);
+    // The declaring file, every file that names the provider, and the `inherits` of everything
+    // the members expand into are one rename (R43, R44a).
+    options.runAction(() => {
+      options.applyToDoc(owner, () => FlowDoc.renameContextBlock(owner.doc, region.block, name), { commit: 'now' });
+      void renameContextAcrossWorkspace(options.workspaceRename, owner, oldName, name);
+      syncMembers(owner, region.block.members);
+    });
     options.selectRegion(name);
     return null;
   }
@@ -148,8 +166,10 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     const owner = ownerOfRegion(region);
     const orphanedMembers = [...region.block.members];
     options.clearSelection();
-    options.applyToDoc(owner, () => FlowDoc.deleteContextBlock(owner.doc.items, region.block), { commit: 'now' });
-    syncMembers(owner, orphanedMembers);
+    options.runAction(() => {
+      options.applyToDoc(owner, () => FlowDoc.deleteContextBlock(owner.doc.items, region.block), { commit: 'now' });
+      syncMembers(owner, orphanedMembers);
+    });
   }
 
   // What the node editor shows and what its `updates` field accepts: the regions listing this

@@ -16,17 +16,42 @@
 //   registry when the timer fires, and registering a replacement cancels the timer outright,
 //   so a document replaced by a watcher push, an undo, or a file switch can never be
 //   serialized back over the content that replaced it.
+//
+//   One action, one undo step — the unit of undo is the action the user took, not the commit.
+//   A rename ripples into every file that names the node; a region gesture writes the block, the
+//   members and the `inherits` of what they expand into. Undoing those one document at a time
+//   would walk through states no user asked for, where one file has been renamed and the rest
+//   still name what it used to be called. `runAction` marks the boundary and every commit inside
+//   it records into one step.
+//
+// A step holds the pre-action text of exactly the documents that action changed, recorded as
+// each one is first written rather than snapshotted up front. An action that loads a file it
+// has never seen — the workspace-wide rename does — would otherwise leave that file out of the
+// step that has to restore it.
 
 import { parseFlow, serializeFlow, type FlowDocument } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 
 export type CommitTiming = 'debounce' | 'now';
 
-// The committed text of every tracked document at one point in time — one undo step.
-export type WorkspaceSnapshot = { path: string; text: string }[];
-
 export const COMMIT_DEBOUNCE_MS = 300;
 const UNDO_LIMIT = 100;
+
+type ActionId = number;
+
+// One undo step: the text each document the action changed had before it ran.
+interface HistoryStep {
+  action: ActionId;
+  before: Map<string, string>;
+}
+
+// The rest of an action, carried across an await. A ripple resolves in a later turn, by which
+// time an undo or a watcher push may have re-parsed the documents it set out to rewrite; the
+// work it carries then describes a state that no longer exists.
+export interface ActionContinuation {
+  /** Runs `body` in the action that opened it, or not at all if that state is gone. */
+  resume<T>(body: () => T): T | undefined;
+}
 
 interface TrackedDocument {
   doc: FlowDocument;
@@ -35,6 +60,9 @@ interface TrackedDocument {
   // against and its next commit must write unconditionally.
   committedText: string | null;
   timer?: ReturnType<typeof setTimeout>;
+  // The action a debounced commit was scheduled by, so the write it makes 300ms later still
+  // lands in that action's step rather than in one of its own.
+  pendingAction?: ActionId | null;
 }
 
 export interface EditSessionOptions {
@@ -47,12 +75,16 @@ export interface EditSessionOptions {
 
 export class EditSession {
   private readonly tracked = new Map<string, TrackedDocument>();
-  private readonly undoStack: WorkspaceSnapshot[] = [];
-  private readonly redoStack: WorkspaceSnapshot[] = [];
+  private readonly undoStack: HistoryStep[] = [];
+  private readonly redoStack: HistoryStep[] = [];
   private readonly writeFile: (path: string, text: string) => void;
   private readonly adoptDocument: (path: string, doc: FlowDocument) => void;
   private readonly debounceMs: number;
+  // Every wholesale replacement of a tracked document bumps this, so a continuation that finds
+  // it moved knows the documents it described are gone.
   private replacements = 0;
+  private nextActionId = 1;
+  private currentAction: ActionId | null = null;
 
   constructor({ writeFile, adoptDocument, debounceMs = COMMIT_DEBOUNCE_MS }: EditSessionOptions) {
     this.writeFile = writeFile;
@@ -60,11 +92,25 @@ export class EditSession {
     this.debounceMs = debounceMs;
   }
 
-  // Work carried across an await — a workspace-wide rename ripple — describes the documents
-  // that were live when it started. Every wholesale replacement bumps this, so a ripple that
-  // finds it moved knows its subject no longer exists and abandons the rest of its work.
-  get documentGeneration(): number {
-    return this.replacements;
+  // Marks one user action. Every commit made while it runs — in this document and in every
+  // other one the action reaches — records into a single undo step. Nesting joins the action
+  // already running, so an action assembled from smaller ones stays one step.
+  runAction<T>(body: () => T): T {
+    if (this.currentAction != null) return body();
+    return this.runInAction(this.nextActionId++, body);
+  }
+
+  // Hands the rest of the current action to work that finishes in a later turn. Called outside
+  // an action it opens one, so a continuation's own writes still coalesce.
+  suspendAction(): ActionContinuation {
+    const action = this.currentAction ?? this.nextActionId++;
+    const generation = this.replacements;
+    return {
+      resume: <T>(body: () => T): T | undefined => {
+        if (generation !== this.replacements) return undefined;
+        return this.runInAction(action, body);
+      },
+    };
   }
 
   documentAt(path: string): FlowDocument | null {
@@ -96,9 +142,9 @@ export class EditSession {
   }
 
   // Register a document that has already been mutated in place, where no pre-edit text can be
-  // recovered. Its next commit always writes. Paths with no baseline are omitted from
-  // snapshot(), so that first commit is not undoable — the usual entry is a drag on a frame
-  // document the session has not tracked yet (commitMovesFor).
+  // recovered. Its next commit always writes, and records nothing into the step: there is no
+  // prior state to put back, so that first commit is not undoable — the usual entry is a drag
+  // on a frame document the session has not tracked yet (commitMovesFor).
   trackWithoutBaseline(path: string, doc: FlowDocument): void {
     if (this.tracked.has(path)) return;
     this.tracked.set(path, { doc, committedText: null });
@@ -122,7 +168,8 @@ export class EditSession {
     const entry = this.tracked.get(path);
     if (!entry) return;
     clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => this.commit(path), this.debounceMs);
+    entry.pendingAction = this.currentAction;
+    entry.timer = setTimeout(() => this.commitPending(path), this.debounceMs);
   }
 
   commit(path: string): void {
@@ -130,33 +177,35 @@ export class EditSession {
     if (!entry) return;
     clearTimeout(entry.timer);
     entry.timer = undefined;
+    entry.pendingAction = null;
     FlowDoc.ensureLayoutEverywhere(entry.doc);
     const text = serializeFlow(entry.doc);
     if (text === entry.committedText) return;
-    this.pushHistory(this.snapshot());
+    if (entry.committedText != null) this.recordPreActionText(path, entry.committedText);
     entry.committedText = text;
     this.writeFile(path, text);
   }
 
-  flush(): void {
-    for (const path of [...this.tracked.keys()]) this.commit(path);
-  }
-
-  // Paths tracked with committedText === null are omitted — there is no restorable prior
-  // state, so a commit that follows trackWithoutBaseline cannot be undone for that path.
-  snapshot(): WorkspaceSnapshot {
-    const snapshot: WorkspaceSnapshot = [];
-    for (const [path, entry] of this.tracked) {
-      if (entry.committedText != null) snapshot.push({ path, text: entry.committedText });
+  // A commit that was scheduled belongs to the action that scheduled it whatever makes it land —
+  // its own timer, or a flush from an undo pressed before that timer fired.
+  private commitPending(path: string): void {
+    const action = this.tracked.get(path)?.pendingAction;
+    if (action == null) {
+      this.commit(path);
+      return;
     }
-    return snapshot;
+    this.runInAction(action, () => this.commit(path));
   }
 
-  // Reinstate each document in a snapshot that differs from its current text, writing every
-  // one back so other tools see the reverted state. Returns the paths that changed.
-  restore(snapshot: WorkspaceSnapshot): string[] {
+  flush(): void {
+    for (const path of [...this.tracked.keys()]) this.commitPending(path);
+  }
+
+  // Reinstate each document in a step that differs from its current text, writing every one
+  // back so other tools see the reverted state. Returns the paths that changed.
+  private restore(step: HistoryStep): string[] {
     const changed: string[] = [];
-    for (const { path, text } of snapshot) {
+    for (const [path, text] of step.before) {
       if (this.committedTextAt(path) === text) continue;
       this.adoptText(path, text);
       this.writeFile(path, text);
@@ -167,16 +216,30 @@ export class EditSession {
 
   undo(): string[] {
     this.flush();
-    if (this.undoStack.length === 0) return [];
-    this.redoStack.push(this.snapshot());
-    return this.restore(this.undoStack.pop()!);
+    const step = this.undoStack.pop();
+    if (!step) return [];
+    this.redoStack.push(this.counterStep(step));
+    return this.restore(step);
   }
 
   redo(): string[] {
     this.flush();
-    if (this.redoStack.length === 0) return [];
-    this.undoStack.push(this.snapshot());
-    return this.restore(this.redoStack.pop()!);
+    const step = this.redoStack.pop();
+    if (!step) return [];
+    this.undoStack.push(this.counterStep(step));
+    return this.restore(step);
+  }
+
+  // The step that undoes the one about to be restored: the same documents, at the text they
+  // currently hold. Built before restoring, and only from documents still tracked — a path
+  // whose file is gone has no state to come back to.
+  private counterStep(step: HistoryStep): HistoryStep {
+    const before = new Map<string, string>();
+    for (const path of step.before.keys()) {
+      const text = this.committedTextAt(path);
+      if (text != null) before.set(path, text);
+    }
+    return { action: step.action, before };
   }
 
   // Forgets every document and the whole history — the paths mean different files after a
@@ -198,9 +261,37 @@ export class EditSession {
     this.tracked.set(path, entry);
   }
 
-  private pushHistory(snapshot: WorkspaceSnapshot): void {
-    this.undoStack.push(snapshot);
+  private runInAction<T>(action: ActionId, body: () => T): T {
+    const outer = this.currentAction;
+    this.currentAction = action;
+    try {
+      return body();
+    } finally {
+      this.currentAction = outer;
+    }
+  }
+
+  // Only the first write to a document within an action is its pre-action text; later ones in
+  // the same action would record what the action itself put there.
+  private recordPreActionText(path: string, text: string): void {
+    const step = this.stepForCurrentAction();
+    if (!step.before.has(path)) step.before.set(path, text);
+  }
+
+  // An action extends the step it is already building. A step left on top by some other action
+  // is never extended: an unrelated edit that landed between an action and the continuation it
+  // is still waiting on would otherwise be undone along with it.
+  private stepForCurrentAction(): HistoryStep {
+    const top = this.undoStack[this.undoStack.length - 1];
+    if (this.currentAction != null && top?.action === this.currentAction) return top;
+    return this.pushStep(this.currentAction ?? this.nextActionId++);
+  }
+
+  private pushStep(action: ActionId): HistoryStep {
+    const step: HistoryStep = { action, before: new Map() };
+    this.undoStack.push(step);
     if (this.undoStack.length > UNDO_LIMIT) this.undoStack.shift();
     this.redoStack.length = 0;
+    return step;
   }
 }

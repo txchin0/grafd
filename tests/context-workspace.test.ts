@@ -1,6 +1,6 @@
 // Workspace-wide context rename and inherits sync — the async paths that used to live only
-// inside main.ts. Exercised here with injected deps so a generation bump or multi-host expand
-// can be asserted without standing up the full app shell.
+// inside main.ts. Exercised here with injected deps so a re-parse mid-flight or a multi-host
+// expand can be asserted without standing up the full app shell.
 
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -12,6 +12,7 @@ import {
 } from '../src/shared/flow-format.js';
 import * as FlowDoc from '../src/client/flow-doc.js';
 import type { DocumentOwner } from '../src/client/canvas/expansion.js';
+import type { ActionContinuation } from '../src/client/edit-session.js';
 import {
   readableContextsForChildPath,
   renameContextAcrossWorkspace,
@@ -22,6 +23,17 @@ import {
 
 function owner(path: string, text: string): DocumentOwner {
   return { path, doc: parseFlow(text) };
+}
+
+// Stands in for the session's continuation: work that resumes after the documents it described
+// were replaced is abandoned. Which undo step the writes land in is EditSession's own test.
+function continuationFrom(generation: () => number): ActionContinuation {
+  const captured = generation();
+  return { resume: (body) => (generation() === captured ? body() : undefined) };
+}
+
+function liveContinuation(): ActionContinuation {
+  return continuationFrom(() => 1);
 }
 
 function inheritsOf(doc: FlowDocument): string[] {
@@ -57,7 +69,7 @@ Validate
     const docs = [declaring, child];
     let generation = 1;
     const deps: WorkspaceRenameDeps = {
-      documentGeneration: () => generation,
+      suspendAction: () => continuationFrom(() => generation),
       loadEveryWorkspaceDocument: async () => {},
       knownDocuments: () => docs,
       applyToDoc: (_entry, mutation) => { mutation(); },
@@ -70,7 +82,7 @@ Validate
     expect(updatesOf(child.doc, 'Validate')).toEqual(['Session']);
   });
 
-  it('aborts when documentGeneration changes during the workspace load', async () => {
+  it('abandons the rewrite when the documents are replaced during the workspace load', async () => {
     const declaring = owner('main.flow', `---
 name: Main
 ---
@@ -92,7 +104,7 @@ Validate
     const docs = [declaring, child];
     let generation = 1;
     const deps: WorkspaceRenameDeps = {
-      documentGeneration: () => generation,
+      suspendAction: () => continuationFrom(() => generation),
       loadEveryWorkspaceDocument: async () => { generation += 1; },
       knownDocuments: () => docs,
       applyToDoc: (_entry, mutation) => { mutation(); },
@@ -126,7 +138,7 @@ Local
 `);
     const docs = [declaring, other];
     const deps: WorkspaceRenameDeps = {
-      documentGeneration: () => 1,
+      suspendAction: liveContinuation,
       loadEveryWorkspaceDocument: async () => {},
       knownDocuments: () => docs,
       applyToDoc: (_entry, mutation) => { mutation(); },
@@ -169,7 +181,7 @@ Validate
       [child.path, child.doc],
     ]);
     const deps: InheritsSyncDeps = {
-      documentGeneration: () => 1,
+      suspendAction: liveContinuation,
       expandTargetDoc: (path) => docs.get(path) ?? null,
       ensureDocument: async (path) => docs.get(path) ?? null,
       applyToDoc: (_entry, mutation) => { mutation(); },
@@ -179,7 +191,7 @@ Validate
     expect(inheritsOf(child.doc).sort()).toEqual(['Auth', 'Cart']);
   });
 
-  it('aborts the write when documentGeneration changes during ensureDocument', async () => {
+  it('abandons the write when the documents are replaced during ensureDocument', async () => {
     const parent = owner('main.flow', `---
 name: Main
 ---
@@ -199,7 +211,7 @@ Validate
 `);
     let generation = 1;
     const deps: InheritsSyncDeps = {
-      documentGeneration: () => generation,
+      suspendAction: () => continuationFrom(() => generation),
       expandTargetDoc: () => null,
       ensureDocument: async () => {
         generation += 1;
@@ -229,7 +241,7 @@ inherits: [Auth]
 Validate
 `);
     const deps: InheritsSyncDeps = {
-      documentGeneration: () => 1,
+      suspendAction: liveContinuation,
       expandTargetDoc: () => child.doc,
       ensureDocument: async () => child.doc,
       applyToDoc: (_entry, mutation) => { mutation(); },

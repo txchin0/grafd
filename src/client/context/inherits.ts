@@ -15,10 +15,10 @@ import {
 } from '../../shared/flow-format.js';
 import * as FlowDoc from '../flow-doc.js';
 import type { DocumentOwner } from '../canvas/expansion.js';
-import type { CommitTiming } from '../edit-session.js';
+import type { ActionContinuation, CommitTiming } from '../edit-session.js';
 
 export interface InheritsSyncDeps {
-  documentGeneration(): number;
+  suspendAction(): ActionContinuation;
   expandTargetDoc(path: string): FlowDocument | null;
   ensureDocument(path: string): Promise<FlowDocument | null>;
   applyToDoc(owner: DocumentOwner, mutation: () => void, options?: { commit?: CommitTiming }): void;
@@ -43,18 +43,21 @@ export async function syncInheritsForMember(
   const path = resolvedExpandPath(getProp(node, 'expand'), owner.path);
   if (!path) return;
 
-  const generation = deps.documentGeneration();
+  // Fetching the child resumes in a later turn when it was not already loaded, so the write
+  // belongs to the action that changed the membership rather than to a step of its own.
+  const continuation = deps.suspendAction();
   const doc = deps.expandTargetDoc(path) ?? await deps.ensureDocument(path);
   if (!doc) return;
-  if (generation !== deps.documentGeneration()) return;
 
-  const readable = readableContextsForChildPath(owner, path);
-  if (sameNameSet(FlowDoc.inheritedContextNames(doc), readable)) return;
-  deps.applyToDoc(
-    { doc, path },
-    () => setPreambleField(doc, 'inherits', readable.length > 0 ? formatListValue(readable) : null),
-    { commit: 'now' },
-  );
+  continuation.resume(() => {
+    const readable = readableContextsForChildPath(owner, path);
+    if (sameNameSet(FlowDoc.inheritedContextNames(doc), readable)) return;
+    deps.applyToDoc(
+      { doc, path },
+      () => setPreambleField(doc, 'inherits', readable.length > 0 ? formatListValue(readable) : null),
+      { commit: 'now' },
+    );
+  });
 }
 
 /** Union of contexts readable by every host in `owner` that expands to `childPath`. */

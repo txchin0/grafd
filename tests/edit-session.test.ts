@@ -129,27 +129,196 @@ describe('a document replaced while a commit is pending', () => {
   });
 });
 
-describe('documentGeneration', () => {
-  it('moves whenever a tracked document is replaced or dropped', () => {
+describe('continuations', () => {
+  it('drops work whose documents were replaced while it was in flight', () => {
     const { session } = createHarness();
     session.adoptText('main.flow', flowText('Start'));
-    const afterFirstAdopt = session.documentGeneration;
+    const continuation = session.suspendAction();
 
-    session.adoptText('main.flow', flowText('Second'));
-    expect(session.documentGeneration).not.toBe(afterFirstAdopt);
+    session.adoptText('main.flow', flowText('FromWatcher'));
 
-    const afterReplace = session.documentGeneration;
-    session.forget('main.flow');
-    expect(session.documentGeneration).not.toBe(afterReplace);
+    const resumed = vi.fn();
+    continuation.resume(resumed);
+    expect(resumed).not.toHaveBeenCalled();
   });
 
-  it('holds still while a document is only edited', () => {
+  it('drops work whose documents were dropped while it was in flight', () => {
+    const { session } = createHarness();
+    session.adoptText('doomed.flow', flowText('Start'));
+    const continuation = session.suspendAction();
+
+    session.forget('doomed.flow');
+
+    const resumed = vi.fn();
+    continuation.resume(resumed);
+    expect(resumed).not.toHaveBeenCalled();
+  });
+
+  it('runs work that only outlived edits to those documents', () => {
     const { session } = createHarness();
     const doc = session.adoptText('main.flow', flowText('Start'));
-    const before = session.documentGeneration;
+    const continuation = session.suspendAction();
+
     renameFirstNode(doc, 'Renamed');
     session.commit('main.flow');
-    expect(session.documentGeneration).toBe(before);
+
+    expect(continuation.resume(() => 'ran')).toBe('ran');
+  });
+});
+
+// One action is one undo step, whatever it reaches: the documents it writes are not known when
+// it starts — a ripple loads files nobody had opened — and it can finish in a later turn.
+describe('an action spanning several documents', () => {
+  it('undoes every document it wrote in one step', () => {
+    const { session, lastWriteTo } = createHarness();
+    const open = session.adoptText('main.flow', flowText('Start'));
+    const frame = session.adoptText('frame.flow', flowText('Inner'));
+
+    session.runAction(() => {
+      renameFirstNode(open, 'StartEdited');
+      session.commit('main.flow');
+      renameFirstNode(frame, 'InnerEdited');
+      session.commit('frame.flow');
+    });
+
+    expect(session.undo().sort()).toEqual(['frame.flow', 'main.flow']);
+    expect(lastWriteTo('main.flow')).toContain('Start:');
+    expect(lastWriteTo('frame.flow')).toContain('Inner:');
+    expect(session.undo()).toEqual([]);
+  });
+
+  it('redoes every document it wrote in one step', () => {
+    const { session, lastWriteTo } = createHarness();
+    const open = session.adoptText('main.flow', flowText('Start'));
+    const frame = session.adoptText('frame.flow', flowText('Inner'));
+
+    session.runAction(() => {
+      renameFirstNode(open, 'StartEdited');
+      session.commit('main.flow');
+      renameFirstNode(frame, 'InnerEdited');
+      session.commit('frame.flow');
+    });
+    session.undo();
+
+    expect(session.redo().sort()).toEqual(['frame.flow', 'main.flow']);
+    expect(lastWriteTo('main.flow')).toContain('StartEdited');
+    expect(lastWriteTo('frame.flow')).toContain('InnerEdited');
+  });
+
+  it('restores a document it only reached after it had started', () => {
+    const { session, lastWriteTo } = createHarness();
+    const open = session.adoptText('main.flow', flowText('Start'));
+    const loadedByTheRipple = parseFlow(flowText('Elsewhere'));
+
+    session.runAction(() => {
+      renameFirstNode(open, 'StartEdited');
+      session.commit('main.flow');
+      session.trackWithBaseline('other.flow', loadedByTheRipple);
+      renameFirstNode(loadedByTheRipple, 'ElsewhereEdited');
+      session.commit('other.flow');
+    });
+
+    expect(session.undo().sort()).toEqual(['main.flow', 'other.flow']);
+    expect(lastWriteTo('other.flow')).toContain('Elsewhere:');
+  });
+
+  it('keeps a continuation that resumes in a later turn in the same step', () => {
+    const { session, lastWriteTo } = createHarness();
+    const open = session.adoptText('main.flow', flowText('Start'));
+    const other = session.adoptText('other.flow', flowText('Elsewhere'));
+
+    const continuation = session.runAction(() => {
+      renameFirstNode(open, 'StartEdited');
+      session.commit('main.flow');
+      return session.suspendAction();
+    });
+    continuation.resume(() => {
+      renameFirstNode(other, 'ElsewhereEdited');
+      session.commit('other.flow');
+    });
+
+    expect(session.undo().sort()).toEqual(['main.flow', 'other.flow']);
+    expect(lastWriteTo('other.flow')).toContain('Elsewhere:');
+    expect(session.undo()).toEqual([]);
+  });
+
+  // The window between an action and the continuation it is waiting on belongs to the user like
+  // any other: an edit made in it is theirs to undo on its own.
+  it('leaves an edit made while it waited out of its step', () => {
+    const { session, lastWriteTo } = createHarness();
+    const open = session.adoptText('main.flow', flowText('Start'));
+    const other = session.adoptText('other.flow', flowText('Elsewhere'));
+    const unrelated = session.adoptText('unrelated.flow', flowText('Aside'));
+
+    const continuation = session.runAction(() => {
+      renameFirstNode(open, 'StartEdited');
+      session.commit('main.flow');
+      return session.suspendAction();
+    });
+    renameFirstNode(unrelated, 'AsideEdited');
+    session.commit('unrelated.flow');
+    continuation.resume(() => {
+      renameFirstNode(other, 'ElsewhereEdited');
+      session.commit('other.flow');
+    });
+
+    expect(session.undo()).toEqual(['other.flow']);
+    expect(lastWriteTo('unrelated.flow')).toContain('AsideEdited');
+    expect(session.undo()).toEqual(['unrelated.flow']);
+  });
+
+  it('lands a debounced commit in the action that scheduled it', () => {
+    const { session } = createHarness();
+    const open = session.adoptText('main.flow', flowText('Start'));
+    const frame = session.adoptText('frame.flow', flowText('Inner'));
+
+    session.runAction(() => {
+      renameFirstNode(open, 'StartEdited');
+      session.commitAfter('main.flow', 'debounce');
+      renameFirstNode(frame, 'InnerEdited');
+      session.commit('frame.flow');
+    });
+    vi.advanceTimersByTime(COMMIT_DEBOUNCE_MS);
+
+    expect(session.undo().sort()).toEqual(['frame.flow', 'main.flow']);
+    expect(session.undo()).toEqual([]);
+  });
+
+  // Undo flushes first. A rename debounces its own document while its ripple writes the rest
+  // immediately, so an undo pressed inside that window has to land on the whole rename.
+  it('lands a debounced commit flushed by an undo in the action that scheduled it', () => {
+    const { session, lastWriteTo } = createHarness();
+    const open = session.adoptText('main.flow', flowText('Start'));
+    const frame = session.adoptText('frame.flow', flowText('Inner'));
+
+    session.runAction(() => {
+      renameFirstNode(open, 'StartEdited');
+      session.commitAfter('main.flow', 'debounce');
+      renameFirstNode(frame, 'InnerEdited');
+      session.commit('frame.flow');
+    });
+    session.undo();
+
+    expect(lastWriteTo('main.flow')).toContain('Start:');
+    expect(lastWriteTo('frame.flow')).toContain('Inner:');
+  });
+
+  it('keeps an action assembled from smaller ones to one step', () => {
+    const { session } = createHarness();
+    const open = session.adoptText('main.flow', flowText('Start'));
+    const frame = session.adoptText('frame.flow', flowText('Inner'));
+
+    session.runAction(() => {
+      session.runAction(() => {
+        renameFirstNode(open, 'StartEdited');
+        session.commit('main.flow');
+      });
+      renameFirstNode(frame, 'InnerEdited');
+      session.commit('frame.flow');
+    });
+
+    expect(session.undo().sort()).toEqual(['frame.flow', 'main.flow']);
+    expect(session.undo()).toEqual([]);
   });
 });
 
@@ -175,7 +344,8 @@ describe('documents mutated in place before they are tracked', () => {
 });
 
 describe('undo across every document an edit can reach', () => {
-  it('restores the open file and a frame document from one history entry', () => {
+  // Two edits, so two steps. Grouping them takes an action; see the suite above.
+  it('restores the open file and a frame document, each on its own step', () => {
     const { session, lastWriteTo } = createHarness();
     const open = session.adoptText('main.flow', flowText('Start'));
     const frame = session.adoptText('frame.flow', flowText('Inner'));

@@ -112,6 +112,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
     through here or the overlay drifts off the ink.
   - `node-badges.ts` — where the expand/collapse affordances sit and what they show. The
     contract between painting and hit-testing, so neither owns it.
+  - `region-hit-test.ts` / `region-gestures.ts` / `resize-handles.ts` — what a press lands on in
+    a context region (border band and name label only — the interior belongs to the marquee) and
+    the move/resize math once it has. Pure, so the view stays the only thing holding a gesture.
   - `wheel-intent.ts` — whether a wheel event means zoom or pan. A touchpad two-finger swipe
     and a mouse-wheel notch arrive as the same event, so the device is inferred from the delta
     shape and latched for the rest of a streak; ctrl+wheel (what a touchpad pinch sends) is
@@ -132,7 +135,16 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   displacement of surrounding nodes (view-only; never written to disk), and the loci map
   that lets nodes inside frames be edited in place (mutations are routed to the .flow file
   that owns them).
-- `src/client/editors.ts` — floating DOM overlays for node and edge editing.
+- `src/client/edit-session.ts` — the edit pipeline every document goes through: tracked
+  documents and their committed text, the commit debounce, the writes, and the undo history.
+  The unit of undo is the *action*, not the commit: `runAction` groups every write an action
+  makes into one step, and `suspendAction` hands the rest of an action to work that resumes
+  after an await (see `docs/undo-atomicity.md`).
+- `src/client/context/` — context-block (region) lifecycle behind the canvas's regions:
+  create/group/rename/delete (`orchestration.ts`), the `inherits` the editor generates for a
+  member's expansion (`inherits.ts`), and the workspace-wide rename a provider's name forces
+  (`workspace-rename.ts`). Regions are specified in `docs/context-ui.md`.
+- `src/client/editors.ts` — floating DOM overlays for node, edge and region editing.
 - `src/client/reference-rows.ts` / `reference-link.ts` — the editable `references:` list shared by
   the node editor and the graph panel, plus target classification (URL vs project-root-relative
   path with an optional line range) and the editor deep link it opens.
@@ -146,7 +158,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   block per theme; DOM chrome reads the tokens directly, and `resolveCanvasPalette` resolves
   the `--canvas-*` ones into the palette `scene-painter.ts` draws from, refilled on each theme
   change. Adding a theme means a new block plus one entry in `THEMES` — nothing else.
-- `src/client/main.ts` — app state, WebSocket sync, undo/redo, sidebar, keyboard shortcuts.
+- `src/client/main.ts` — app state, WebSocket sync, sidebar, keyboard shortcuts, and the action
+  boundaries around edits that reach more than one document (`edit-session.ts` owns the history
+  itself).
 - `tests/` — Vitest unit tests for the parser/serializer, document mutations, server file
   logic, expansion geometry, and camera math.
 
