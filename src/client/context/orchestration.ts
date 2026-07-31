@@ -130,7 +130,7 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     if (!block || !naming) return;
     openRegionName(
       { block, doc: owner.doc, path: owner.path },
-      (region, requestedName) => naming.resume(() => renameRegion(region, requestedName)) ?? null,
+      (region, requestedName) => naming.resume(() => renameRegion(region, requestedName)),
     );
   }
 

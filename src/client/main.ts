@@ -603,9 +603,11 @@ function extractSubgraphIntoFile(node: FlowNode): void {
   // The extracted file is new, so it has no prior text to restore and takes no part in the undo
   // step: the parent document's rewrite is the whole of what this action can put back.
   let extracted: FlowDocument | null = null;
-  applyToDoc(owner, () => {
-    extracted = FlowDoc.extractGraphBlockToDocument(owner.doc, blockName, linkPath, graphName);
-  }, { commit: 'now' });
+  session.runAction(() => {
+    applyToDoc(owner, () => {
+      extracted = FlowDoc.extractGraphBlockToDocument(owner.doc, blockName, linkPath, graphName);
+    }, { commit: 'now' });
+  });
   if (!extracted) return;
 
   FlowDoc.ensureLayoutEverywhere(extracted);

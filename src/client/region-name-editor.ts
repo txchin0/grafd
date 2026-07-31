@@ -9,8 +9,11 @@
 import type { Rect } from '../shared/flow-format.js';
 import type { CanvasView, RegionTarget } from './canvas/canvas-view.js';
 
-/** Applies the name, or reports in one sentence why it cannot be used. */
-export type RenameRegion = (region: RegionTarget, requestedName: string) => { rejected: string } | null;
+/** Applies the name, reports why it cannot be used, or `undefined` when the edit was abandoned. */
+export type RenameRegion = (
+  region: RegionTarget,
+  requestedName: string,
+) => { rejected: string } | null | undefined;
 
 export interface RegionNameEditorContext {
   view: CanvasView;
@@ -67,6 +70,10 @@ export function createRegionNameEditor(context: RegionNameEditorContext): Region
     showRejection(null);
     if (!region || !commit) return;
     const outcome = rename(region, input.value);
+    if (outcome === undefined) {
+      open(region, rename);
+      return;
+    }
     if (outcome && insist) reopenWithRejection(region, rename, outcome.rejected);
   }
 
