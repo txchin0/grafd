@@ -121,6 +121,9 @@ function stubActions(): CanvasActions {
     toggleExpand: vi.fn(),
     materializeGhost: vi.fn(),
     contextMenu: vi.fn(),
+    regionMoved: vi.fn(),
+    regionResized: vi.fn(),
+    deleteRegion: vi.fn(),
   };
 }
 

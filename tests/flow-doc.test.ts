@@ -18,6 +18,7 @@ import {
   buildModel,
   containingItems,
   contextBlockNamed,
+  displayRects,
   groupNodesByOwner,
   DEFAULT_NODE_SIZE,
   deleteContextBlock,
@@ -34,6 +35,8 @@ import {
   graphBlockNames,
   hostsOfExpansion,
   nodesIn,
+  REGION_MEMBER_PADDING,
+  regionRectOf,
   renameGraphBlock,
   renameNode,
   retargetInnerRefs,
@@ -43,6 +46,7 @@ import {
   setNodeReferences,
   type ModelEdge,
 } from '../src/client/flow-doc.js';
+import { boundsOfRects } from '../src/client/geometry.js';
 
 const PLACED = (x: number, y: number) => `pos: ${x}, ${y}, 200, 88`;
 
@@ -329,6 +333,28 @@ graph: Sub
     expect(addContextBlock(doc.items, 'Auth', null, ['A', ' A ', '  ']).members).toEqual(['A']);
   });
 
+  it('resolves members into the model and marks them on the node', () => {
+    const doc = docFrom(`---\nname: T\ninherits: [Session]\n---\n\n${MEMBERSHIP}`);
+    const model = buildModel(doc, null);
+    const [a, b] = model.nodes;
+    expect(model.contexts).toHaveLength(1);
+    expect(model.contexts[0].members).toEqual([a, b]);
+    expect(model.traits.get(a)).toMatchObject({ contexts: ['Auth'], inheritsContexts: true });
+  });
+
+  // The file is authoritative about membership: an entry naming a node that is not here is a
+  // linter matter, and no render pass repairs it.
+  it('leaves a member naming a node that is not in the model out of the model', () => {
+    const doc = docFrom('context: Auth\n  nodes:\n    - Nowhere\n    - A\n\nA\n');
+    expect(buildModel(doc, null).contexts[0].members.map((node) => node.name)).toEqual(['A']);
+  });
+
+  // A `graph:` block has no body of its own, so it declares no regions (spec §8.2).
+  it('carries no regions in a model scoped to a graph block', () => {
+    const doc = docFrom(MEMBERSHIP);
+    expect(buildModel(doc, 'Sub').contexts).toEqual([]);
+  });
+
   it('deletes a block without touching its members', () => {
     const doc = docFrom(MEMBERSHIP);
     deleteContextBlock(doc.items, contextBlockNamed(doc, 'Auth')!);
@@ -357,6 +383,49 @@ graph: Sub
     expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['A', 'B']);
     deleteNodes(block.items, nodesIn(block.items), doc);
     expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['A', 'B']);
+  });
+});
+
+describe('regionRectOf', () => {
+  const PADDING = REGION_MEMBER_PADDING;
+
+  function regionOf(text: string) {
+    const model = buildModel(docFrom(text), null);
+    return { model, rect: regionRectOf(model, model.contexts[0]) };
+  }
+
+  it('encloses its members with a standoff', () => {
+    const { rect } = regionOf(`context: Auth\n  nodes:\n    - A\n    - B\n\nA\n  ${PLACED(100, 100)}\n\nB\n  ${PLACED(400, 300)}\n`);
+    expect(rect).toEqual({
+      x: 100 - PADDING,
+      y: 100 - PADDING,
+      w: 500 + 2 * PADDING,
+      h: 288 + 2 * PADDING,
+    });
+  });
+
+  // The drawn area is a floor, not a fence: a member can never fall outside the region, so the
+  // picture can never contradict the file (spec §8.3).
+  it('unions the area the user drew with its members rather than clipping to it', () => {
+    const { rect } = regionOf(`context: Auth\n  pos: 0, 0, 60, 60\n  nodes:\n    - A\n\nA\n  ${PLACED(400, 300)}\n`);
+    expect(rect).toEqual({ x: 0, y: 0, w: 400 + 200 + PADDING, h: 300 + 88 + PADDING });
+  });
+
+  it('draws an area the user reserved before populating it', () => {
+    const { rect } = regionOf('context: Auth\n  pos: 10, 20, 300, 200\n  nodes:\n\nA\n');
+    expect(rect).toEqual({ x: 10, y: 20, w: 300, h: 200 });
+  });
+
+  it('has no geometry with neither an area nor members, and the editor invents none', () => {
+    expect(regionOf('context: Auth\n  nodes:\n\nA\n').rect).toBeNull();
+  });
+
+  // Fit-to-content and PNG export both measure through displayRects, so a region the user drew
+  // before populating it would otherwise be cropped out of both.
+  it('is measured by displayRects, including when no node accounts for it', () => {
+    const { model } = regionOf(`context: Auth\n  pos: -400, -400, 100, 100\n  nodes:\n\nA\n  ${PLACED(0, 0)}\n`);
+    expect(displayRects(model)).toContainEqual({ x: -400, y: -400, w: 100, h: 100 });
+    expect(boundsOfRects(displayRects(model))).toMatchObject({ x: -400, y: -400 });
   });
 });
 

@@ -33,6 +33,7 @@ import {
   descriptionForNode,
   referencesForNode,
   setPreambleReferences,
+  parseListValue,
   sanitizeName,
   type EdgeSpec,
   type ExpandLink,
@@ -43,9 +44,9 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
-import type { FlowModel, ModelEdge } from './flow-doc.js';
+import type { FlowModel, MembershipChange, ModelEdge } from './flow-doc.js';
 import type { Point } from './geometry.js';
-import { CanvasView, type ContextTarget, type EdgeDrop, type Tool, type View } from './canvas/canvas-view.js';
+import { CanvasView, type ContextTarget, type EdgeDrop, type RegionTarget, type Tool, type View } from './canvas/canvas-view.js';
 import { createContextMenu, type MenuItem } from './context-menu.js';
 import type { Modal } from './modal.js';
 import { createPreferencesDialog } from './preferences-dialog.js';
@@ -633,13 +634,56 @@ function expansionIdentitiesOf(
 function deleteSelection(): void {
   const nodes = [...view.selection];
   const edge = view.selectedEdge;
+  const region = view.selectedRegionTarget();
   if (nodes.length > 0) {
     editors.closeAll();
     deleteNodesAction(nodes);
   } else if (edge) {
     editors.closeAll();
     applyEdit(edge.from, () => FlowDoc.deleteEdge(edge), { commit: 'now' });
+  } else if (region) {
+    deleteRegionAction(region);
   }
+}
+
+function ownerOfRegion(region: RegionTarget): DocumentOwner {
+  if (region.path != null) return { doc: region.doc, path: region.path };
+  if (!openFlow) throw new Error('ownerOfRegion: no flow is open');
+  return { doc: openFlow.doc, path: openFlow.path };
+}
+
+// Deleting a region removes the provider and nothing else: its members are ordinary nodes that
+// happened to be listed by it (R32).
+function deleteRegionAction(region: RegionTarget): void {
+  const owner = ownerOfRegion(region);
+  view.clearSelection();
+  applyToDoc(owner, () => FlowDoc.deleteContextBlock(owner.doc.items, region.block), { commit: 'now' });
+}
+
+// A member declaring `updates:` on this provider would be left naming a context nothing declares,
+// so that deletion asks twice and says why (R33) — the same two-step the sidebar deletes with,
+// rather than a dialog box.
+function regionMenuItems(region: RegionTarget, at: Point): MenuItem[] {
+  const writers = membersUpdatingRegion(region);
+  if (writers.length === 0) {
+    return [{ label: 'Delete context (keeps its nodes)', danger: true, onSelect: () => deleteRegionAction(region) }];
+  }
+  return [{
+    label: 'Delete context (keeps its nodes)',
+    danger: true,
+    onSelect: () => contextMenu.open([
+      { label: `${writers.join(', ')} still updates ${region.block.name} — delete anyway?`, danger: true, onSelect: () => deleteRegionAction(region) },
+      { label: 'Cancel', onSelect: () => {} },
+    ], at),
+  }];
+}
+
+function membersUpdatingRegion(region: RegionTarget): string[] {
+  const byName = new Map(FlowDoc.allNodes(region.doc).map((node) => [node.name, node]));
+  return region.block.members.filter((name) => {
+    const node = byName.get(name);
+    return node != null && parseListValue(getProp(node, 'updates')).includes(region.block.name);
+  });
 }
 
 // Opening a subgraph plays a seamless dive-in: the outgoing scene is held on screen while
@@ -1056,9 +1100,17 @@ async function ensureInnerDocument(edge: ModelEdge, end: RefinedEnd): Promise<vo
   if (path) await expansions.ensureDocument(path);
 }
 
-function commitMovesFor(nodes: FlowNode[]): void {
+function commitMovesFor(
+  nodes: FlowNode[],
+  membershipChanges: MembershipChange[] = [],
+  alsoTouched: DocumentOwner[] = [],
+): void {
   const paths = new Set<string>();
   if (openFlow) paths.add(openFlow.path);
+  for (const owner of alsoTouched) {
+    session.trackWithoutBaseline(owner.path, owner.doc);
+    paths.add(owner.path);
+  }
   for (const node of nodes) {
     const owner = ownerOf(node);
     // A drag mutates `pos` in place and only reports the move once it is over, so a frame
@@ -1067,6 +1119,17 @@ function commitMovesFor(nodes: FlowNode[]): void {
     session.trackWithoutBaseline(owner.path, owner.doc);
     paths.add(owner.path);
   }
+  // Membership joins the same batch rather than committing on its own, so dropping a node into a
+  // region is one undo step with the move that carried it there (R19). A block always lives in
+  // the file its members do, so the node's owner is the document to write.
+  for (const change of membershipChanges) {
+    const owner = ownerOf(change.node);
+    session.trackWithoutBaseline(owner.path, owner.doc);
+    paths.add(owner.path);
+    if (change.joins) FlowDoc.addContextMember(change.block, change.node.name);
+    else FlowDoc.removeContextMember(change.block, change.node.name);
+  }
+  if (membershipChanges.length > 0) expansions.invalidateSubModels();
   refresh();
   for (const path of paths) session.commit(path);
 }
@@ -1195,7 +1258,11 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   },
   nodeClicked: (node) => editors.openNodeEditor(node),
   canvasClicked: () => editors.closeAll(),
-  moveCommitted: (nodes) => commitMovesFor(nodes ?? []),
+  moveCommitted: (nodes, membershipChanges) => commitMovesFor(nodes ?? [], membershipChanges ?? []),
+  regionMoved: (region, movedNodes, membershipChanges) =>
+    commitMovesFor(movedNodes, membershipChanges, [ownerOfRegion(region)]),
+  regionResized: (region, membershipChanges) => commitMovesFor([], membershipChanges, [ownerOfRegion(region)]),
+  deleteRegion: deleteRegionAction,
   completeEdge,
   editEdge: (edge) => editors.openEdgeEditor(edge),
   editNodeTitle: (node) => editors.openTitleEditor(node),
@@ -1293,6 +1360,7 @@ function openCanvasContextMenu(target: ContextTarget, screenPoint: Point): void 
   const items =
     target.kind === 'node' ? nodeMenuItems(target.node)
     : target.kind === 'edge' ? edgeMenuItems(target.edge)
+    : target.kind === 'region' ? regionMenuItems(target.region, screenPoint)
     : canvasMenuItems(target.world);
   contextMenu.open(items, screenPoint);
 }

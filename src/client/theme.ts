@@ -31,6 +31,8 @@ export interface CanvasPalette {
   entryStroke: string;
   decisionStroke: string;
   expandStroke: string;
+  regionStroke: string;
+  regionFill: string;
   ghost: string;
   edge: string;
   edgeLabel: string;
@@ -51,6 +53,8 @@ export const CANVAS_COLOR_TOKENS: Record<keyof CanvasPalette, string> = {
   entryStroke: '--canvas-entry-stroke',
   decisionStroke: '--canvas-decision-stroke',
   expandStroke: '--canvas-expand-stroke',
+  regionStroke: '--canvas-region-stroke',
+  regionFill: '--canvas-region-fill',
   ghost: '--canvas-ghost',
   edge: '--canvas-edge',
   edgeLabel: '--canvas-edge-label',
@@ -77,6 +81,8 @@ export const DEFAULT_CANVAS_PALETTE: CanvasPalette = {
   entryStroke: '#7fc48a',
   decisionStroke: '#d9b96a',
   expandStroke: '#b48ad9',
+  regionStroke: '#6fb5a8',
+  regionFill: 'rgba(111, 181, 168, 0.13)',
   ghost: 'rgba(155, 168, 184, 0.45)',
   edge: '#8fa1b3',
   edgeLabel: '#b9c2cc',

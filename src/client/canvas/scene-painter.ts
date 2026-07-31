@@ -9,8 +9,15 @@
 // Resolved by the import map in index.html to the served copy of rough.esm.js.
 import rough from 'roughjs';
 import type { Options as RoughOptions } from 'roughjs/bin/core';
-import type { EdgeDataField, FlowNode, Rect } from '../../shared/flow-format.js';
-import { displayRectOf, type FlowModel, type GhostNode, type ModelEdge, type NodeTraits } from '../flow-doc.js';
+import type { ContextBlock, EdgeDataField, FlowNode, Rect } from '../../shared/flow-format.js';
+import {
+  displayRectOf,
+  regionRectOf,
+  type FlowModel,
+  type GhostNode,
+  type ModelEdge,
+  type NodeTraits,
+} from '../flow-doc.js';
 import { unionRect, type Point } from '../geometry.js';
 import { canvasPalette } from '../theme.js';
 import { edgeEnd, edgePathApproach, edgePathMidpoint } from './edge-path.js';
@@ -29,6 +36,7 @@ import {
   TITLE_FONT,
   TITLE_LINE_HEIGHT,
   layOutNodeText,
+  regionLabelBand,
 } from './node-metrics.js';
 
 type RoughCanvas = ReturnType<typeof rough.canvas>;
@@ -39,6 +47,18 @@ const NODE_ROUGHNESS = 1.4;
 const FRAME_ROUGHNESS = 1.1;
 const EDGE_ROUGHNESS = 1.1;
 const BADGE_ROUGHNESS = 0.9;
+const REGION_ROUGHNESS = 1.2;
+
+const REGION_DASH = [11, 7];
+const REGION_HACHURE_GAP = 11;
+// Hatch angle and dash phase are picked from the region's name, so two overlapping regions differ
+// in a channel that is not colour and a region keeps its look across sessions and themes.
+const REGION_HACHURE_ANGLES = [-70, -35, 20, 55];
+const REGION_DASH_PHASES = 12;
+
+function regionHachureAngle(seed: number): number {
+  return REGION_HACHURE_ANGLES[seed % REGION_HACHURE_ANGLES.length];
+}
 
 const ARROWHEAD_TANGENT_BACKOFF = 12;
 const EDGE_DATA_LINE_HEIGHT = 13;
@@ -58,6 +78,10 @@ export interface ScenePainterOptions {
   hiddenTitleNodeId: string | null;
   edgeGeometry: EdgeGeometryMap;
   expansions: ExpansionLayer;
+  // Where each region draws, when the caller has settled that itself. A node drag freezes every
+  // region's frame at its start so dragging a member does not stretch the frame under the cursor
+  // (R18); everything else leaves this empty and the region is derived per pass.
+  regionRects?: ReadonlyMap<ContextBlock, Rect>;
 }
 
 function seedFrom(text: string): number {
@@ -76,6 +100,7 @@ export class ScenePainter {
   private readonly hiddenTitleNodeId: string | null;
   private readonly edgeGeometry: EdgeGeometryMap;
   private readonly expansions: ExpansionLayer;
+  private readonly regionRects: ReadonlyMap<ContextBlock, Rect> | null;
 
   constructor(options: ScenePainterOptions) {
     this.ctx = options.ctx;
@@ -85,12 +110,17 @@ export class ScenePainter {
     this.hiddenTitleNodeId = options.hiddenTitleNodeId;
     this.edgeGeometry = options.edgeGeometry;
     this.expansions = options.expansions;
+    this.regionRects = options.regionRects ?? null;
   }
 
   // Labels get their own pass after nodes so they stay readable even where an edge dives under
   // a node or an expanded frame. Edges that reach inside an open frame are drawn after nodes so
   // the frame fill does not occlude them (spec §5.7 expanded display).
   drawScene(model: FlowModel): void {
+    // First, so a region sits behind everything in its own graph (R20). Recursing into drawScene
+    // for an unfolded frame therefore places that file's regions above the host frame and below
+    // the inner nodes (R20a) with no special casing.
+    this.drawRegions(model);
     layOutModelEdges(model, this.edgeGeometry);
     const redirected: ModelEdge[] = [];
     for (const edge of model.edges) {
@@ -101,6 +131,44 @@ export class ScenePainter {
     for (const edge of redirected) this.drawEdge(edge);
     for (const edge of model.edges) this.drawEdgeLabel(edge);
     for (const ghost of model.ghosts) this.drawGhost(ghost, { clickable: !model.embedded });
+  }
+
+  // A region is an enclosure, not a container: hachure fill and a dashed outline, so it reads as
+  // an area rather than as the solid-filled surface an expansion frame is (R47). Two regions
+  // overlapping stay legible because each keeps its own hatch angle and dash phase (R24, R26) —
+  // channels that survive one hue and a viewer who cannot separate colours.
+  private drawRegions(model: FlowModel): void {
+    for (const context of model.contexts) {
+      const rect = this.regionRects?.get(context.block) ?? regionRectOf(model, context);
+      // A block with neither an area nor members has no geometry, and the editor invents none (R23).
+      if (!rect) continue;
+      const seed = seedFrom(context.block.name);
+      this.rough.rectangle(rect.x, rect.y, rect.w, rect.h, {
+        seed,
+        roughness: this.roughnessFor(REGION_ROUGHNESS),
+        bowing: 0.6,
+        stroke: canvasPalette.regionStroke,
+        strokeWidth: 1.4,
+        strokeLineDash: REGION_DASH,
+        strokeLineDashOffset: seed % REGION_DASH_PHASES,
+        fill: canvasPalette.regionFill,
+        fillStyle: 'hachure',
+        hachureAngle: regionHachureAngle(seed),
+        hachureGap: REGION_HACHURE_GAP,
+        fillWeight: 1,
+      });
+      this.drawRegionLabel(context.block.name, rect);
+    }
+  }
+
+  private drawRegionLabel(name: string, rect: Rect): void {
+    const { ctx } = this;
+    const band = regionLabelBand(ctx, name, rect);
+    ctx.font = FRAME_TITLE_FONT;
+    ctx.fillStyle = canvasPalette.regionStroke;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(name, rect.x + FRAME_TITLE_LEFT, rect.y + FRAME_TITLE_MIDDLE_Y, band.w);
   }
 
   // The gesture overlay draws its own in-flight edge, so this primitive is shared with the view.
@@ -360,6 +428,26 @@ export class ScenePainter {
       ctx.textAlign = 'left';
       ctx.fillText(`↺ ${traits.updates.join(', ')}`, x + 8, y + h - 12, w - 30);
     }
+    this.drawContextMark(traits, rect);
+  }
+
+  // Membership is carried by the node itself, because containment cannot say it: a non-member may
+  // overlap a region and a member of two regions can only sit inside one of them (R21, R24). The
+  // suffix marks a member whose expansion inherits what it reads, which is otherwise invisible (R39).
+  private drawContextMark(traits: NodeTraits | undefined, rect: Rect): void {
+    if (!traits?.contexts.length) return;
+    const { ctx } = this;
+    const passesDown = traits.expand != null;
+    ctx.font = `10.5px ${HAND_FONT}`;
+    ctx.fillStyle = canvasPalette.regionStroke;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(
+      `${traits.contexts.join(', ')} ◇${passesDown ? '↓' : ''}`,
+      rect.x + rect.w - 8,
+      rect.y + 14,
+      rect.w - 30,
+    );
   }
 
   private drawExpandBadges(model: FlowModel, node: FlowNode): void {

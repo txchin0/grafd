@@ -62,6 +62,9 @@ function createSurface() {
     toggleExpand: vi.fn(),
     materializeGhost: vi.fn(),
     contextMenu: vi.fn(),
+    regionMoved: vi.fn(),
+    regionResized: vi.fn(),
+    deleteRegion: vi.fn(),
     viewChanged: vi.fn(),
   } satisfies CanvasActions;
   const view = new CanvasView(canvas, actions, createExpansionLayer());

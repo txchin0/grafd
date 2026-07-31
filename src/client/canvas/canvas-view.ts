@@ -13,15 +13,27 @@
 
 // Resolved by the import map in index.html to the served copy of rough.esm.js.
 import rough from 'roughjs';
-import type { FlowNode, Rect } from '../../shared/flow-format.js';
+import type { ContextBlock, FlowDocument, FlowNode, Rect } from '../../shared/flow-format.js';
 import { DEFAULT_ROUGHNESS } from '../../shared/manifest.js';
-import { displayRectOf, displayRects, type FlowModel, type GhostNode, type ModelEdge } from '../flow-doc.js';
+import {
+  displayRectOf,
+  displayRects,
+  membershipChangesForMove,
+  membershipChangesForRegion,
+  regionRectOf,
+  type FlowModel,
+  type GhostNode,
+  type MembershipChange,
+  type ModelContext,
+  type ModelEdge,
+} from '../flow-doc.js';
 import {
   boundsOfRects,
   easeInOutCubic,
   normalizedRect,
   padRect,
   rectBorderPointToward,
+  pointNearRectBorder,
   rectCenter,
   rectContains,
   rectsIntersect,
@@ -40,6 +52,7 @@ import {
   TITLE_FONT_PX,
   frameTitleBand,
   layOutNodeText,
+  regionLabelBand,
   titleBandOf,
   type NodeTextLayout,
 } from './node-metrics.js';
@@ -65,6 +78,7 @@ import {
 import { WheelIntentReader, ZOOM_STEP_FACTOR } from './wheel-intent.js';
 import {
   inverseTransformPoint,
+  modelsOnScreen,
   inverseTransformRect,
   transformPoint,
   transformRect,
@@ -91,6 +105,10 @@ type Gesture =
       type: 'move';
       nodes: FlowNode[];
       startPositions: Map<FlowNode, Point>;
+      // Every visible region's frame as it stood when the drag began. It is both what the painter
+      // draws while the gesture runs and what membership is measured against on release, so the
+      // frame the user drops into is the one they aimed at (R13, R18).
+      regionRects: Map<ContextBlock, Rect>;
       scales: Map<FlowNode, number>;
       startWorld: Point;
       startScreen: Point;
@@ -98,6 +116,15 @@ type Gesture =
       pressedNode: FlowNode;
       pressedBadge: BadgeHit | null;
     }
+  | {
+      type: 'region-move';
+      context: ModelContext;
+      startRect: Rect;
+      startPositions: Map<FlowNode, Point>;
+      startWorld: Point;
+      moved: boolean;
+    }
+  | { type: 'region-resize'; context: ModelContext; corner: ResizeCorner; startRect: Rect; startWorld: Point }
   | { type: 'create'; startWorld: Point; startScreen: Point; rect: Rect | null }
   | { type: 'marquee'; startWorld: Point; rect: Rect | null }
   | { type: 'pinch'; pointers: [number, number]; start: PinchAnchor };
@@ -169,7 +196,14 @@ export interface CanvasActions {
   quickCreateNode(point: Point, frameHost: FlowNode | null): void;
   nodeClicked(node: FlowNode): void;
   canvasClicked(): void;
-  moveCommitted(nodes: FlowNode[]): void;
+  // Membership changes travel with the move so the whole drag lands as one undo step (R19). A
+  // resize reports none: it changes a node's size, never which region it was dropped into.
+  moveCommitted(nodes: FlowNode[], membershipChanges?: MembershipChange[]): void;
+  // A region gesture writes the block's own rectangle in place, the positions of the members it
+  // carried, and whatever membership it swept up — one action, so one undo step.
+  regionMoved(region: RegionTarget, movedNodes: FlowNode[], membershipChanges: MembershipChange[]): void;
+  regionResized(region: RegionTarget, membershipChanges: MembershipChange[]): void;
+  deleteRegion(region: RegionTarget): void;
   completeEdge(fromNode: FlowNode, drop: EdgeDrop): void;
   editEdge(edge: ModelEdge): void;
   editNodeTitle(node: FlowNode): void;
@@ -193,12 +227,25 @@ export interface TitlePlacement {
 export type ContextTarget =
   | { kind: 'node'; node: FlowNode }
   | { kind: 'edge'; edge: ModelEdge }
+  | { kind: 'region'; region: RegionTarget }
   | { kind: 'canvas'; world: Point };
+
+// A region names the document it lives in rather than a node, because it has no id and nothing
+// else identifies it: a provider is addressed by name within the file that declares it.
+export interface RegionTarget {
+  block: ContextBlock;
+  doc: FlowDocument;
+  path: string | null;
+}
 
 
 const MIN_SCALE = 0.12;
 const MAX_SCALE = 5;
 const MAX_FIT_SCALE = 1.4;
+const HANDLE_HIT_RADIUS_PX = 9;
+// A frame is grabbed by its outline; wide enough to catch with a mouse, narrow enough that the
+// interior still belongs to the marquee.
+const REGION_BORDER_BAND_PX = 7;
 const MIN_NODE_WIDTH = 120;
 const MIN_NODE_HEIGHT = 64;
 const DRAG_THRESHOLD_PX = 4;
@@ -287,6 +334,9 @@ export class CanvasView {
   model: FlowModel;
   selection = new Set<FlowNode>();
   selectedEdge: ModelEdge | null = null;
+  // Regions are selected one at a time and never alongside nodes: the two answer different
+  // gestures, and a region's frame encloses nodes it does not own.
+  selectedRegion: ModelContext | null = null;
   readonly expansionLayer: ExpansionLayer;
   gridIsVisible = true;
   doubleClickOpensSubgraph = true;
@@ -324,6 +374,7 @@ export class CanvasView {
       nodes: [],
       edges: [],
       ghosts: [],
+      contexts: [],
       nodesByName: new Map(),
       traits: new Map(),
       sourceDoc: { leading: [], preamble: null, items: [] },
@@ -399,6 +450,12 @@ export class CanvasView {
     );
     this.selectedEdge = model.edges.find((edge) => edge.spec === selectedEdgeSpec)
       ?? (this.selectedEdge && this.expansionLayer.isEmbedded(this.selectedEdge.from) ? this.selectedEdge : null);
+    // By name, not by identity: a region has no id, and rebuilding the model makes a fresh
+    // ModelContext for the same block.
+    const selectedRegionName = this.selectedRegion?.block.name ?? null;
+    this.selectedRegion = selectedRegionName == null
+      ? null
+      : model.contexts.find((context) => context.block.name === selectedRegionName) ?? null;
     if (this.hoverNode) {
       const previousHoverId = this.hoverNode.id;
       this.hoverNode = model.nodes.find((node) => node.id === previousHoverId)
@@ -461,19 +518,31 @@ export class CanvasView {
   select(node: FlowNode): void {
     this.selection = new Set([node]);
     this.selectedEdge = null;
+    this.selectedRegion = null;
     this.requestRender();
   }
 
   setSelection(nodes: FlowNode[]): void {
     this.selection = new Set(nodes);
     this.selectedEdge = null;
+    this.selectedRegion = null;
     this.requestRender();
   }
 
   clearSelection(): void {
     this.selection.clear();
     this.selectedEdge = null;
+    this.selectedRegion = null;
     this.requestRender();
+  }
+
+  /** The selected region as the document address a mutation needs, or null when none is selected. */
+  selectedRegionTarget(): RegionTarget | null {
+    return this.selectedRegion ? this.regionTargetOf(this.selectedRegion) : null;
+  }
+
+  private regionTargetOf(context: ModelContext): RegionTarget {
+    return { block: context.block, doc: this.model.sourceDoc, path: this.model.sourcePath };
   }
 
   worldToScreen(point: Point): Point {
@@ -789,6 +858,21 @@ export class CanvasView {
       return;
     }
 
+    const regionHandle = this.hitRegionHandle(world);
+    if (regionHandle) {
+      this.gesture = {
+        type: 'region-resize',
+        context: regionHandle.context,
+        corner: regionHandle.corner,
+        startRect: { ...this.regionRectOfContext(regionHandle.context)! },
+        startWorld: world,
+      };
+      // A region with no drawn area acquires one the moment it is resized: the user is reserving
+      // space, which is the only thing that ever authors a block's `pos`.
+      regionHandle.context.block.pos = { ...this.regionRectOfContext(regionHandle.context)! };
+      return;
+    }
+
     const wantsCreate = this.tool === 'node' && !event.shiftKey;
     const node = this.hitNode(world);
     if (node && !(wantsCreate && this.isFrameBackground(node, world))) {
@@ -802,10 +886,12 @@ export class CanvasView {
         this.selection.add(node);
         this.selectedEdge = null;
       }
+      this.selectedRegion = null;
       this.gesture = {
         type: 'move',
         nodes: [...this.selection],
         startPositions: new Map([...this.selection].map((n) => [n, { x: n.pos!.x, y: n.pos!.y }])),
+        regionRects: this.freezeRegionRects(),
         // World-space drag deltas are divided by each node's locus scale so nodes inside
         // scaled-down frames track the cursor instead of racing ahead of it.
         scales: new Map([...this.selection].map((n) => [n, this.expansionLayer.scaleOf(n)])),
@@ -829,7 +915,26 @@ export class CanvasView {
     if (edge) {
       this.selectedEdge = edge;
       this.selection.clear();
+      this.selectedRegion = null;
       this.actions.canvasClicked();
+      this.requestRender();
+      return;
+    }
+
+    const region = this.hitRegion(world);
+    if (region) {
+      this.selection.clear();
+      this.selectedEdge = null;
+      this.selectedRegion = region;
+      this.actions.canvasClicked();
+      this.gesture = {
+        type: 'region-move',
+        context: region,
+        startRect: { ...this.regionRectOfContext(region)! },
+        startPositions: new Map(region.members.map((member) => [member, { x: member.pos!.x, y: member.pos!.y }])),
+        startWorld: world,
+        moved: false,
+      };
       this.requestRender();
       return;
     }
@@ -837,6 +942,7 @@ export class CanvasView {
     if (!event.shiftKey) {
       this.selection.clear();
       this.selectedEdge = null;
+      this.selectedRegion = null;
       this.actions.canvasClicked();
     }
     this.gesture = wantsCreate
@@ -879,6 +985,25 @@ export class CanvasView {
     ));
   }
 
+  // Regions in an unfolded external frame belong to that file's model and are measured in its
+  // coordinates, the same ones its nodes are dragged in, so every model on screen contributes.
+  private freezeRegionRects(): Map<ContextBlock, Rect> {
+    const frozen = new Map<ContextBlock, Rect>();
+    for (const model of modelsOnScreen(this.model)) {
+      for (const context of model.contexts) {
+        const rect = regionRectOf(model, context);
+        if (rect) frozen.set(context.block, rect);
+      }
+    }
+    return frozen;
+  }
+
+  private membershipChangesFor(gesture: Extract<Gesture, { type: 'move' }>): MembershipChange[] {
+    return modelsOnScreen(this.model).flatMap((model) =>
+      membershipChangesForMove(model, gesture.nodes, gesture.regionRects),
+    );
+  }
+
   private abandonGesture(): void {
     const gesture = this.gesture;
     this.gesture = null;
@@ -889,6 +1014,11 @@ export class CanvasView {
       }
     } else if (gesture?.type === 'resize') {
       Object.assign(gesture.node.pos!, gesture.startRect);
+    } else if (gesture?.type === 'region-move') {
+      for (const [member, start] of gesture.startPositions) Object.assign(member.pos!, start);
+      if (gesture.context.block.pos) Object.assign(gesture.context.block.pos, gesture.startRect);
+    } else if (gesture?.type === 'region-resize') {
+      Object.assign(gesture.context.block.pos!, gesture.startRect);
     }
   }
 
@@ -948,6 +1078,14 @@ export class CanvasView {
       this.applyResize(gesture, world);
       this.requestRender();
       this.actions.viewChanged?.();
+    } else if (gesture.type === 'region-move') {
+      this.applyRegionMove(gesture, world);
+      this.requestRender();
+      this.actions.viewChanged?.();
+    } else if (gesture.type === 'region-resize') {
+      this.applyRegionResize(gesture, world);
+      this.requestRender();
+      this.actions.viewChanged?.();
     } else if (gesture.type === 'edge') {
       gesture.toWorld = world;
       const rawTarget = this.hitNode(world);
@@ -982,6 +1120,42 @@ export class CanvasView {
     }
   }
 
+  // The members travel with the frame, so the picture the user grabbed moves as one piece. Only
+  // a block that already had a drawn area keeps one: moving a region derived purely from its
+  // members must not invent a `pos` the file would then carry forever (R3).
+  private applyRegionMove(gesture: Extract<Gesture, { type: 'region-move' }>, world: Point): void {
+    gesture.moved = true;
+    const dx = world.x - gesture.startWorld.x;
+    const dy = world.y - gesture.startWorld.y;
+    for (const [member, start] of gesture.startPositions) {
+      member.pos!.x = snap(start.x + dx);
+      member.pos!.y = snap(start.y + dy);
+    }
+    const drawn = gesture.context.block.pos;
+    if (drawn) {
+      drawn.x = snap(gesture.startRect.x + dx);
+      drawn.y = snap(gesture.startRect.y + dy);
+    }
+  }
+
+  // No minimum size: a region is an area the user reserved, and nothing about it needs to stay
+  // big enough to hold anything (R31). Its members do not move, so shrinking past one shuts it out.
+  private applyRegionResize(gesture: Extract<Gesture, { type: 'region-resize' }>, world: Point): void {
+    const dx = world.x - gesture.startWorld.x;
+    const dy = world.y - gesture.startWorld.y;
+    const start = gesture.startRect;
+    const corner = gesture.context.block.pos!;
+    const opposite = {
+      x: gesture.corner[1] === 'w' ? start.x + start.w : start.x,
+      y: gesture.corner[0] === 'n' ? start.y + start.h : start.y,
+    };
+    const dragged = {
+      x: snap((gesture.corner[1] === 'w' ? start.x : start.x + start.w) + dx),
+      y: snap((gesture.corner[0] === 'n' ? start.y : start.y + start.h) + dy),
+    };
+    Object.assign(corner, normalizedRect(opposite, dragged));
+  }
+
   private onPointerCancel(event: PointerEvent): void {
     this.activePointers.delete(event.pointerId);
     if (this.releaseMultiTouch()) return;
@@ -1004,12 +1178,16 @@ export class CanvasView {
 
     if (gesture.type === 'move') {
       if (gesture.moved) {
-        this.actions.moveCommitted(gesture.nodes);
+        this.actions.moveCommitted(gesture.nodes, this.membershipChangesFor(gesture));
       } else {
         this.dispatchNodePress(gesture, world, event.detail);
       }
     } else if (gesture.type === 'resize') {
       this.actions.moveCommitted([gesture.node]);
+    } else if (gesture.type === 'region-move') {
+      this.commitRegionMove(gesture);
+    } else if (gesture.type === 'region-resize') {
+      this.commitRegionResize(gesture);
     } else if (gesture.type === 'edge') {
       this.actions.completeEdge(gesture.from, this.resolveEdgeDrop(gesture.from, this.hitNode(world), world));
     } else if (gesture.type === 'create') {
@@ -1018,6 +1196,28 @@ export class CanvasView {
       this.selectNodesInMarquee(gesture.rect);
     }
     this.requestRender();
+  }
+
+  // A press that selected a region without dragging it has nothing to write.
+  private commitRegionMove(gesture: Extract<Gesture, { type: 'region-move' }>): void {
+    if (!gesture.moved) return;
+    const frame = this.regionRectOfContext(gesture.context);
+    const changes = frame
+      ? membershipChangesForRegion(this.model, gesture.context, frame, { canRemove: false })
+      : [];
+    this.actions.regionMoved(this.regionTargetOf(gesture.context), [...gesture.startPositions.keys()], changes);
+  }
+
+  private commitRegionResize(gesture: Extract<Gesture, { type: 'region-resize' }>): void {
+    // Measured against the rectangle the user dragged rather than the drawn union, so shrinking
+    // past a member is what shuts it out even though the region still encloses it.
+    const changes = membershipChangesForRegion(
+      this.model,
+      gesture.context,
+      gesture.context.block.pos!,
+      { canRemove: true },
+    );
+    this.actions.regionResized(this.regionTargetOf(gesture.context), changes);
   }
 
   // An unfolded frame answers hit-tests over its whole interior, so its empty space reads as
@@ -1191,6 +1391,15 @@ export class CanvasView {
       this.actions.contextMenu({ kind: 'edge', edge }, screenPoint);
       return;
     }
+    const region = this.hitRegion(world);
+    if (region) {
+      this.selection.clear();
+      this.selectedEdge = null;
+      this.selectedRegion = region;
+      this.requestRender();
+      this.actions.contextMenu({ kind: 'region', region: this.regionTargetOf(region) }, screenPoint);
+      return;
+    }
     this.actions.contextMenu({ kind: 'canvas', world }, screenPoint);
   }
 
@@ -1305,6 +1514,49 @@ export class CanvasView {
     return null;
   }
 
+  // Regions answer gestures only in the graph the canvas is showing: one inside an unfolded
+  // frame belongs to that file's own picture, and is edited by opening it.
+  private regionRectOfContext(context: ModelContext): Rect | null {
+    return regionRectOf(this.model, context);
+  }
+
+  private hitRegionHandle(world: Point): { context: ModelContext; corner: ResizeCorner } | null {
+    if (!this.selectedRegion) return null;
+    const rect = this.regionRectOfContext(this.selectedRegion);
+    if (!rect) return null;
+    const corner = this.cornerNear(rect, world);
+    return corner ? { context: this.selectedRegion, corner } : null;
+  }
+
+  private cornerNear(rect: Rect, world: Point): ResizeCorner | null {
+    const hitRadius = HANDLE_HIT_RADIUS_PX / this.view.scale;
+    const corners: Array<{ corner: ResizeCorner; x: number; y: number }> = [
+      { corner: 'nw', x: rect.x, y: rect.y },
+      { corner: 'ne', x: rect.x + rect.w, y: rect.y },
+      { corner: 'sw', x: rect.x, y: rect.y + rect.h },
+      { corner: 'se', x: rect.x + rect.w, y: rect.y + rect.h },
+    ];
+    for (const candidate of corners) {
+      if (Math.hypot(world.x - candidate.x, world.y - candidate.y) <= hitRadius) return candidate.corner;
+    }
+    return null;
+  }
+
+  // The frame and the name label, never the interior: a region encloses nodes it does not own, so
+  // a press inside it has to fall through to the marquee (R27). Topmost first, so the region drawn
+  // last wins where two frames overlap.
+  private hitRegion(world: Point): ModelContext | null {
+    const band = REGION_BORDER_BAND_PX / this.view.scale;
+    for (let index = this.model.contexts.length - 1; index >= 0; index -= 1) {
+      const context = this.model.contexts[index];
+      const rect = this.regionRectOfContext(context);
+      if (!rect) continue;
+      if (pointNearRectBorder(rect, world, band)) return context;
+      if (rectContains(regionLabelBand(this.ctx, context.block.name, rect), world)) return context;
+    }
+    return null;
+  }
+
   private hitBadge(world: Point): BadgeHit | null {
     return this.hitBadgeIn(this.model, world);
   }
@@ -1356,8 +1608,9 @@ export class CanvasView {
     else if (world) {
       if (this.hitBadge(world)) cursor = 'pointer';
       else if (this.hitPort(world)) cursor = 'crosshair';
-      else if (this.hitResizeHandle(world)) cursor = 'nwse-resize';
+      else if (this.hitResizeHandle(world) || this.hitRegionHandle(world)) cursor = 'nwse-resize';
       else if (this.hitNode(world) || this.hitGhost(world)) cursor = 'move';
+      else if (this.hitRegion(world)) cursor = 'move';
     }
     this.canvas.style.cursor = cursor;
   }
@@ -1373,6 +1626,7 @@ export class CanvasView {
 
   private scenePainter(hiddenTitleNodeId: string | null): ScenePainter {
     return new ScenePainter({
+      regionRects: this.gesture?.type === 'move' ? this.gesture.regionRects : undefined,
       ctx: this.ctx,
       rough: this.rough,
       baseRoughness: this.baseRoughness,
@@ -1533,6 +1787,7 @@ export class CanvasView {
   }
 
   private drawSelectionDecorations(): void {
+    this.drawSelectedRegionDecorations();
     const { ctx } = this;
     const inflate = 5;
     ctx.save();
@@ -1555,6 +1810,27 @@ export class CanvasView {
       for (const corner of [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]) {
         ctx.fillRect(corner[0] - handleSize / 2, corner[1] - handleSize / 2, handleSize, handleSize);
       }
+    }
+  }
+
+  // The selected region gets the same dashed outline and corner handles a node does, drawn on its
+  // frame rather than inside it, so the thing under the pointer is the thing that will move.
+  private drawSelectedRegionDecorations(): void {
+    if (!this.selectedRegion) return;
+    const rect = this.regionRectOfContext(this.selectedRegion);
+    if (!rect) return;
+    const { ctx } = this;
+    ctx.save();
+    ctx.strokeStyle = canvasPalette.select;
+    ctx.lineWidth = 1.4 / this.view.scale;
+    ctx.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
+    ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.restore();
+
+    const handleSize = 8 / this.view.scale;
+    ctx.fillStyle = canvasPalette.select;
+    for (const corner of [[rect.x, rect.y], [rect.x + rect.w, rect.y], [rect.x, rect.y + rect.h], [rect.x + rect.w, rect.y + rect.h]]) {
+      ctx.fillRect(corner[0] - handleSize / 2, corner[1] - handleSize / 2, handleSize, handleSize);
     }
   }
 

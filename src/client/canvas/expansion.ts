@@ -577,12 +577,23 @@ function emptyModel(doc: FlowDocument, scopeName: string | null): FlowModel {
     nodes: [],
     edges: [],
     ghosts: [],
+    contexts: [],
     nodesByName: new Map(),
     traits: new Map(),
     sourceDoc: doc,
     sourcePath: null,
     sourceScope: scopeName,
   };
+}
+
+// A model and every sub-model unfolded inside it, outermost first. Each keeps its own
+// coordinates, so a caller measuring geometry must stay within one model at a time.
+export function modelsOnScreen(model: FlowModel): FlowModel[] {
+  const models = [model];
+  for (const expansion of model.display?.expansions.values() ?? []) {
+    models.push(...modelsOnScreen(expansion.subModel));
+  }
+  return models;
 }
 
 export function subModelBounds(subModel: FlowModel): Rect {

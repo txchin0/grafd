@@ -6,6 +6,7 @@ import {
   collapseToSingleLine,
   emptyContextBlock,
   emptyNode,
+  getPreambleField,
   getProp,
   setProp,
   newUuid,
@@ -31,7 +32,7 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import type { DisplayGeometry } from './canvas/expansion.js';
-import type { Point } from './geometry.js';
+import { boundsOfRects, padRect, rectContainsRect, unionRect, type Point } from './geometry.js';
 
 export interface GhostNode {
   name: string;
@@ -64,12 +65,24 @@ export interface NodeTraits {
   expand: string | null;
   updates: string[];
   hasErrorHandler: boolean;
+  /** Names of the regions listing this node, so membership shows on the node and not only by containment. */
+  contexts: string[];
+  /** Whether the file grants every node context from above, which a member's expansion inherits. */
+  inheritsContexts: boolean;
+}
+
+/** One `context:` block with its membership resolved against the nodes actually in the model. */
+export interface ModelContext {
+  block: ContextBlock;
+  members: FlowNode[];
 }
 
 export interface FlowModel {
   nodes: FlowNode[];
   edges: ModelEdge[];
   ghosts: GhostNode[];
+  // Empty for a `graph:` block: a block has no body of its own, so it declares no regions.
+  contexts: ModelContext[];
   nodesByName: Map<string, FlowNode>;
   traits: Map<FlowNode, NodeTraits>;
   sourceDoc: FlowDocument;
@@ -88,7 +101,74 @@ export function displayRects(model: FlowModel): Rect[] {
   return [
     ...model.nodes.map((node) => displayRectOf(model, node)),
     ...model.ghosts.map((ghost) => ghost.pos),
+    // A region the user drew before populating it occupies space no node accounts for, so it has
+    // to be measured here or it would be cropped out of fit-to-content and out of exports.
+    ...model.contexts.map((context) => regionRectOf(model, context)),
   ].filter((rect): rect is Rect => rect != null);
+}
+
+// Where a region draws (spec §8.3): the union of the area the user drew, if any, with its
+// members' bounds — which is what makes every member contained by construction. Null when there
+// is neither, since the editor never invents geometry for a region and never writes one back.
+export function regionRectOf(model: FlowModel, context: ModelContext): Rect | null {
+  const memberRects = context.members
+    .map((member) => displayRectOf(model, member))
+    .filter((rect): rect is Rect => rect != null);
+  const memberBounds = boundsOfRects(memberRects);
+  if (!memberBounds) return context.block.pos;
+  const padded = padRect(memberBounds, REGION_MEMBER_PADDING);
+  return context.block.pos ? unionRect(context.block.pos, padded) : padded;
+}
+
+/** One node joining or leaving one region, as a drag resolved it. */
+export interface MembershipChange {
+  block: ContextBlock;
+  node: FlowNode;
+  joins: boolean;
+}
+
+// What a finished node drag did to membership (R13). Containment is measured against the frame
+// each region had when the drag began, not its live one: a region with no `pos` is the bounds of
+// its members, so a live frame would follow the node being dragged and no member could ever leave
+// it. Every moved node is tested against every region, so a multi-node drag carries all of them
+// and a node inside overlapping regions joins or leaves each independently (R15, R16).
+export function membershipChangesForMove(
+  model: FlowModel,
+  movedNodes: FlowNode[],
+  frozenRegionRects: ReadonlyMap<ContextBlock, Rect>,
+): MembershipChange[] {
+  const changes: MembershipChange[] = [];
+  const nodesHere = movedNodes.filter((node) => model.nodes.includes(node));
+  for (const context of model.contexts) {
+    const frame = frozenRegionRects.get(context.block);
+    if (!frame) continue;
+    for (const node of nodesHere) {
+      const inside = rectContainsRect(frame, displayRectOf(model, node));
+      const isMember = context.members.includes(node);
+      if (inside !== isMember) changes.push({ block: context.block, node, joins: inside });
+    }
+  }
+  return changes;
+}
+
+// What a region's own gesture did to its membership. Every node in the graph is tested against
+// the frame the gesture left behind: a move sweeps non-members in but can never drop one, since
+// its members travelled with it (R29), while a resize measures against the rectangle the user
+// dragged and so can shut a member out (R31).
+export function membershipChangesForRegion(
+  model: FlowModel,
+  context: ModelContext,
+  frame: Rect,
+  { canRemove }: { canRemove: boolean },
+): MembershipChange[] {
+  const changes: MembershipChange[] = [];
+  for (const node of model.nodes) {
+    const inside = rectContainsRect(frame, displayRectOf(model, node));
+    const isMember = context.members.includes(node);
+    if (inside && !isMember) changes.push({ block: context.block, node, joins: true });
+    else if (!inside && isMember && canRemove) changes.push({ block: context.block, node, joins: false });
+  }
+  return changes;
 }
 
 // One node's rect in its own model's coordinates. Callers must prefer this over reading `pos`
@@ -98,6 +178,9 @@ export function displayRectOf(model: FlowModel, node: FlowNode): Rect {
 }
 
 export const DEFAULT_NODE_SIZE = { w: 200, h: 88 };
+// How far a region's frame stands off its members, so the enclosure reads as one and a member's
+// own outline never touches it.
+export const REGION_MEMBER_PADDING = 26;
 const EXTRACTED_SUBGRAPH_NAME = 'Subgraph';
 const LAYOUT_COLUMN_WIDTH = 280;
 const LAYOUT_ROW_HEIGHT = 140;
@@ -240,8 +323,31 @@ export function buildModel(doc: FlowDocument, scopeName: string | null): FlowMod
   autoLayout(nodes, edges);
 
   const ghosts = resolveEdgeTargets(edges, nodesByName);
-  const traits = inferTraits(nodes, edges);
-  return { nodes, edges, ghosts, nodesByName, traits, sourceDoc: doc, sourcePath: null, sourceScope: scopeName };
+  // Regions live in the document body (spec §8.2), so a model scoped to a `graph:` block has none.
+  const contexts = scopeName == null ? modelContextsOf(doc, nodesByName) : [];
+  const traits = inferTraits(doc, nodes, edges, contexts);
+  return {
+    nodes,
+    edges,
+    ghosts,
+    contexts,
+    nodesByName,
+    traits,
+    sourceDoc: doc,
+    sourcePath: null,
+    sourceScope: scopeName,
+  };
+}
+
+// A member naming a node that is not here is simply absent from the model: the file is
+// authoritative about membership, and no render pass repairs it (spec §8.3). The linter reports it.
+function modelContextsOf(doc: FlowDocument, nodesByName: Map<string, FlowNode>): ModelContext[] {
+  return contextBlocksIn(doc.items).map((block) => ({
+    block,
+    members: block.members
+      .map((memberName) => nodesByName.get(memberName))
+      .filter((member): member is FlowNode => member != null),
+  }));
 }
 
 function resolveEdgeTargets(edges: ModelEdge[], nodesByName: Map<string, FlowNode>): GhostNode[] {
@@ -274,10 +380,17 @@ function makeGhost(edge: ModelEdge, ghostIndex: number): GhostNode {
   };
 }
 
-function inferTraits(nodes: FlowNode[], edges: ModelEdge[]): Map<FlowNode, NodeTraits> {
+function inferTraits(
+  doc: FlowDocument,
+  nodes: FlowNode[],
+  edges: ModelEdge[],
+  contexts: ModelContext[],
+): Map<FlowNode, NodeTraits> {
   const namesWithIncoming = new Set(
     edges.filter((edge) => edge.kind === 'flow').map((edge) => edge.spec.target),
   );
+  const contextNamesByMember = contextNamesByNode(contexts);
+  const inheritsContexts = parseListValue(getPreambleField(doc, 'inherits')).length > 0;
   const traits = new Map<FlowNode, NodeTraits>();
   for (const node of nodes) {
     const labeledOutgoing = node.edges.filter((edge) => edge.label).length;
@@ -287,9 +400,21 @@ function inferTraits(nodes: FlowNode[], edges: ModelEdge[]): Map<FlowNode, NodeT
       expand: getProp(node, 'expand'),
       updates: parseListValue(getProp(node, 'updates')),
       hasErrorHandler: getProp(node, 'on_error') != null,
+      contexts: contextNamesByMember.get(node) ?? [],
+      inheritsContexts,
     });
   }
   return traits;
+}
+
+function contextNamesByNode(contexts: ModelContext[]): Map<FlowNode, string[]> {
+  const namesByNode = new Map<FlowNode, string[]>();
+  for (const context of contexts) {
+    for (const member of context.members) {
+      namesByNode.set(member, [...(namesByNode.get(member) ?? []), context.block.name]);
+    }
+  }
+  return namesByNode;
 }
 
 export function autoLayout(nodes: FlowNode[], edges: ModelEdge[]): void {
@@ -397,16 +522,18 @@ export function addContextMember(block: ContextBlock, memberName: string): void 
   setContextMembers(block, [...block.members, memberName]);
 }
 
-export function renameContextMember(doc: FlowDocument, oldName: string, newName: string): void {
+export function removeContextMember(block: ContextBlock, memberName: string): void {
+  setContextMembers(block, block.members.filter((member) => member !== memberName));
+}
+
+export function renameMemberInContextBlocks(doc: FlowDocument, oldName: string, newName: string): void {
   for (const block of contextBlocksIn(doc.items)) {
     setContextMembers(block, block.members.map((member) => (member === oldName ? newName : member)));
   }
 }
 
-export function removeContextMember(doc: FlowDocument, memberName: string): void {
-  for (const block of contextBlocksIn(doc.items)) {
-    setContextMembers(block, block.members.filter((member) => member !== memberName));
-  }
+export function removeMemberFromContextBlocks(doc: FlowDocument, memberName: string): void {
+  for (const block of contextBlocksIn(doc.items)) removeContextMember(block, memberName);
 }
 
 // Detached deep copies for the clipboard: they keep their original names and positions and
@@ -707,7 +834,7 @@ export function deleteNodes(
   }
 
   if (isTopLevel(items, doc)) {
-    for (const name of deletedNames) removeContextMember(doc, name);
+    for (const name of deletedNames) removeMemberFromContextBlocks(doc, name);
   }
 
   for (const node of nodesIn(items)) {
@@ -781,7 +908,7 @@ function applyNodeRename(
     }
   }
 
-  if (isTopLevel(items, doc)) renameContextMember(doc, oldName, node.name);
+  if (isTopLevel(items, doc)) renameMemberInContextBlocks(doc, oldName, node.name);
 
   const identity = expandIdentityForNode(doc, options?.path ?? null, node);
   if (identity) {

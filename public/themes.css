@@ -41,6 +41,8 @@
   --canvas-entry-stroke: #7fc48a;
   --canvas-decision-stroke: #d9b96a;
   --canvas-expand-stroke: #b48ad9;
+  --canvas-region-stroke: #6fb5a8;
+  --canvas-region-fill: rgba(111, 181, 168, 0.13);
   --canvas-ghost: rgba(155, 168, 184, 0.45);
   --canvas-edge: #8fa1b3;
   --canvas-edge-label: #b9c2cc;
@@ -87,6 +89,8 @@
   --canvas-entry-stroke: #47b374;
   --canvas-decision-stroke: #ddaa25;
   --canvas-expand-stroke: #9a6ee0;
+  --canvas-region-stroke: #2f8f7d;
+  --canvas-region-fill: rgba(47, 143, 125, 0.13);
   --canvas-ghost: rgba(31, 31, 31, 0.32);
   --canvas-edge: #1f1f1f;
   --canvas-edge-label: #3f3f47;

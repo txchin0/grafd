@@ -22,6 +22,7 @@ export const FRAME_TITLE_LEFT = 12;
 export const FRAME_TITLE_MIDDLE_Y = 16;
 // Keeps the frame's title clear of the expand/collapse badges in the header strip.
 export const FRAME_TITLE_RIGHT_INSET = 64;
+export const REGION_LABEL_RIGHT_INSET = 16;
 
 const TITLE_MAX_LINES = 2;
 const DESCRIPTION_FONT_PX = 12.5;
@@ -104,12 +105,23 @@ export function titleBandOf(rect: Rect, layout: NodeTextLayout): Rect {
 }
 
 export function frameTitleBand(ctx: CanvasRenderingContext2D, node: FlowNode, frame: Rect): Rect {
+  return headerLabelBand(ctx, node.name, frame, FRAME_TITLE_RIGHT_INSET);
+}
+
+// A region's name sits where a frame's title does, but a region carries no badges (R47), so its
+// label may run closer to the right edge. Both go through here so the band a hit test measures is
+// the band the painter fills.
+export function regionLabelBand(ctx: CanvasRenderingContext2D, name: string, region: Rect): Rect {
+  return headerLabelBand(ctx, name, region, REGION_LABEL_RIGHT_INSET);
+}
+
+function headerLabelBand(ctx: CanvasRenderingContext2D, text: string, rect: Rect, rightInset: number): Rect {
   ctx.font = FRAME_TITLE_FONT;
-  const available = frame.w - FRAME_TITLE_RIGHT_INSET;
-  const width = Math.min(available, ctx.measureText(node.name).width) + 2 * FRAME_TITLE_HIT_PADDING;
+  const available = rect.w - rightInset;
+  const width = Math.min(available, ctx.measureText(text).width) + 2 * FRAME_TITLE_HIT_PADDING;
   return {
-    x: frame.x + FRAME_TITLE_LEFT - FRAME_TITLE_HIT_PADDING,
-    y: frame.y + FRAME_TITLE_MIDDLE_Y - FRAME_TITLE_LINE_HEIGHT / 2,
+    x: rect.x + FRAME_TITLE_LEFT - FRAME_TITLE_HIT_PADDING,
+    y: rect.y + FRAME_TITLE_MIDDLE_Y - FRAME_TITLE_LINE_HEIGHT / 2,
     w: width,
     h: FRAME_TITLE_LINE_HEIGHT,
   };

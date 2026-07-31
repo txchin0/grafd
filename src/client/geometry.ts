@@ -29,6 +29,24 @@ export function rectContains(rect: Rect, point: Point): boolean {
   );
 }
 
+/** Whether `outer` fully encloses `inner`, touching borders included. */
+export function rectContainsRect(outer: Rect, inner: Rect): boolean {
+  return (
+    inner.x >= outer.x && inner.y >= outer.y &&
+    inner.x + inner.w <= outer.x + outer.w &&
+    inner.y + inner.h <= outer.y + outer.h
+  );
+}
+
+// Whether a point falls within `band` of the rect's outline, inside or out. What makes a region
+// grabbable by its frame while its interior stays free for gestures aimed past it.
+export function pointNearRectBorder(rect: Rect, point: Point, band: number): boolean {
+  const outer = padRect(rect, band);
+  if (!rectContains(outer, point)) return false;
+  const inner = padRect(rect, -band);
+  return inner.w <= 0 || inner.h <= 0 || !rectContains(inner, point);
+}
+
 export function rectsIntersect(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
