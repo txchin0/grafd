@@ -39,13 +39,12 @@ file parses but probably does not say what was meant.
 
 ## Deviation from FLOW-SPEC.md
 
-There is **no `.flow.meta` file**. Layout lives inside the `.flow` file itself via two
-editor-owned node properties:
+Layout lives inside the `.flow` file itself, via the editor-owned properties `id: <uuid>`
+(stable node identity) and `pos: x, y, w, h` (the canvas rectangle, also carried by a
+`context:` block). This is spec'd — see FLOW-SPEC.md §11; there is no `.flow.meta` file and
+the spec no longer describes one.
 
-- `id: <uuid>` — stable node identity
-- `pos: x, y, w, h` — the node's canvas rectangle
-
-Each workspace additionally has a `graf.manifest.json` at its root
+The one thing outside the spec is that each workspace has a `graf.manifest.json` at its root
 (`src/shared/manifest.ts`): the workspace `entrypoint`, its `display` settings (the base
 rough.js roughness the canvas draws with), plus UI state (active flow, per-flow cameras). It
 is editor-owned, ignored by agents apart from `entrypoint`, and travels through the same

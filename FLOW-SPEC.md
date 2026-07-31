@@ -1,6 +1,6 @@
 # .flow Format Specification
 
-**Version:** flow/1.3
+**Version:** flow/1.4
 **Status:** Draft
 
 ## Revision History
@@ -11,6 +11,7 @@
 | flow/1.1 | Edges may target a node inside a subgraph via an optional `{Inner Node}` suffix. |
 | flow/1.2 | Edges may originate from a node inside a subgraph via an optional `{Inner Source}` prefix. |
 | flow/1.3 | Nodes and preambles may carry a `references` block linking to related source files, documents, and URLs. Indented blocks are generalized: a block belongs to the line directly above it. |
+| flow/1.4 | Context providers are declared only as a body-level `context:` block that defines the provider and scopes it to a listed set of nodes; the preamble `context:` field is removed, and `inherits` becomes the sole preamble carrier of context. Providers reach only their members' expansions. `.flow.meta` sidecar files are removed; canvas layout lives on the node as the editor-owned `id` and `pos` properties. |
 
 ---
 
@@ -32,22 +33,15 @@ The `.flow` format is a text-based diagram language designed for solution design
 
 ### 2.1 File Types
 
-Each graph produces two files:
+Each graph is a single `.flow` file. It holds both the semantic content — nodes, edges, properties, descriptions — and the small set of editor-owned properties that carry canvas layout ([Section 11](#11-editor-owned-properties)).
 
-
-| File          | Consumer        | Contains                                                 |
-| ------------- | --------------- | -------------------------------------------------------- |
-| `*.flow`      | LLM agent       | Semantic content: nodes, edges, properties, descriptions |
-| `*.flow.meta` | Frontend editor | Visual metadata: positions, colors, canvas state         |
-
-
-The `.flow` file is the **source of truth** for what exists in the graph. The `.flow.meta` file decorates it with layout information. The LLM never reads `.flow.meta` files.
+There is no sidecar metadata file. Layout travels with the graph so that a `.flow` file is complete on its own: copying, moving, or diffing one file never separates a graph from its picture.
 
 ### 2.2 File Splitting
 
 Complex graphs are split into separate `.flow` files. The exporter applies a heuristic to split automatically, but the user has final say and can merge or split further after export.
 
-**Rule:** The `.flow` file owns the graph. The `.flow.meta` file decorates it.
+**Rule:** One graph, one file. A `.flow` file owns everything about the graph it describes.
 
 ### 2.3 Project Structure
 
@@ -57,15 +51,11 @@ A `.flow` project has a root file and optionally many referenced graph files:
 project/
   SPEC.flow              # Format spec (read by LLM agent first)
   main.flow              # Root graph (entry point)
-  main.flow.meta         # Visual metadata for root graph
   auth/
     login.flow           # Referenced graph
-    login.flow.meta
     logout.flow
-    logout.flow.meta
   checkout/
     payment.flow
-    payment.flow.meta
 ```
 
 ### 2.4 Spec File
@@ -120,8 +110,7 @@ These are specific to the preamble because they relate to the graph's scope:
 
 | Field      | Description                                                                                                      |
 | ---------- | ---------------------------------------------------------------------------------------------------------------- |
-| `context`  | Explicit list of context providers this graph declares. See [Section 8: Context Providers](#8-context-providers) |
-| `inherits` | **Auto-generated on export.** Lists context providers available from parent graphs. Not manually authored        |
+| `inherits` | **Auto-generated.** Lists context providers available from parent graphs, readable by every node in this file. Not manually authored, and the only preamble field that names a provider. See [Section 8.4](#84-inheritance) |
 
 
 #### Note on `expand`
@@ -131,7 +120,7 @@ The `expand` property does not appear in the preamble — the file itself *is* t
 ### 3.2 Syntax Rules
 
 - **Indentation:** 2-space indentation. Tabs are forbidden.
-- **Indented blocks:** A property may take a block of lines indented one level deeper than itself. The block belongs to the line directly above it — `data:` under an edge ([Section 5.5](#55-edge-data)), `references:` under a node or in a preamble ([Section 4.5](#45-references)).
+- **Indented blocks:** A property may take a block of lines indented one level deeper than itself. The block belongs to the line directly above it — `data:` under an edge ([Section 5.5](#55-edge-data)), `references:` under a node or in a preamble ([Section 4.5](#45-references)), `nodes:` under a body-level `context:` block ([Section 8.2](#82-declaration--the-context-block)).
 - **Encoding:** UTF-8.
 - **Comments:** Lines starting with `#` are comments. The LLM ignores them.
 - **Node names:** Cannot contain `:`  (colon followed by space). Enforced by the frontend. Node names must also not contain `{` or `}` — braces appear only on edges: a trailing `{Inner Node}` on an edge target names a node inside the target subgraph (see [Section 5.7](#57-targeting-a-node-inside-a-subgraph)), and a leading `{Inner Source}` prefix names a node inside the owning subgraph that the edge leaves from (see [Section 5.8](#58-originating-an-edge-from-a-node-inside-a-subgraph)).
@@ -169,12 +158,12 @@ All properties are optional. A node can have any combination:
 | `on_error`    | Error handler for this specific node. See [Section 7: Error Handling](#7-error-handling)                                                                    |
 | `updates`     | Lists context providers this node modifies. See [Section 8: Context](#8-context-providers)                                                                  |
 | `entrypoint`  | Boolean. Marks this node as an explicit entry point/trigger. See [Section 4.4: Entry Points](#44-entry-points)                                              |
-| `context`     | Declares context providers. Only applicable when the node is a graph (preamble or `graph:` block). See [Section 8: Context Providers](#8-context-providers) |
-| `inherits`    | **Auto-generated.** Lists context from parent graphs. Only applicable when the node is a graph. See [Section 8: Context Providers](#8-context-providers)    |
 | `references`  | Block of links to the material this node corresponds to — source files, documents, URLs. See [Section 4.5: References](#45-references)                      |
 
 
-A node and a graph preamble share the same property set. The only difference is that a preamble uses `name:` instead of a bare name at column 0, and the `expand` property is not used in preambles (the file *is* the expansion).
+A node and a graph preamble share this property set. A preamble uses `name:` instead of a bare name at column 0, does not use `expand` (the file *is* the expansion), and additionally carries the auto-generated `inherits` field. `context` is not a node or preamble property at all — it appears only as a body-level block ([Section 8.2](#82-declaration--the-context-block)).
+
+Nodes additionally carry the editor-owned properties `id` and `pos`, which describe canvas layout rather than meaning. See [Section 11](#11-editor-owned-properties).
 
 Example inline node with multiple properties:
 
@@ -593,25 +582,69 @@ on_error: [Error Handler](error-handling.flow)
 
 ### 8.1 Concept
 
-Context providers represent shared state available to nodes within a graph — authentication tokens, user sessions, configuration, etc. They solve the problem of many unrelated nodes needing access to the same data without drawing edges between all of them.
+Context providers represent shared state available to nodes — authentication tokens, user sessions, configuration, etc. They solve the problem of many unrelated nodes needing access to the same data without drawing edges between all of them.
 
-### 8.2 Declaration
+A provider has three parts:
 
-Context is declared explicitly at the graph level using the `context` tag in the preamble:
+
+| Part           | Meaning                                                                    |
+| -------------- | -------------------------------------------------------------------------- |
+| **Name**       | How the provider is referenced, here and in every other file               |
+| **Definition** | Optional. What the provider holds and where it lives in code               |
+| **Scope**      | Which nodes may read it                                                     |
+
+
+A provider is **declared in exactly one place**: a `context:` block in the body of the file that owns it ([Section 8.2](#82-declaration--the-context-block)). There is no second declaration form. Everywhere else a provider name appears — `inherits`, `updates` — it refers back to that block.
+
+### 8.2 Declaration — the `context` Block
+
+A `context:` block at root indentation (column 0) declares a provider, defines it, and scopes it to a named set of nodes:
 
 ```
----
-name: Checkout Flow
-context: [Auth, Cart]
-description: "Handles checkout"
----
+context: Auth
+  description: "JWT in an httpOnly cookie; refreshed on 401"
+  references:
+    - [Session middleware](src/server/session.ts)
+  nodes:
+    - Show Login
+    - Submit Credentials
 ```
 
-Each context name in the list is a provider that all nodes in this graph can read. The `description` field is not used for context declaration — `context` is the single, structured source of truth for what's available.
+The block **is** the provider's definition, in the same way a preamble is a graph's node definition. It takes:
 
-### 8.3 Inheritance
 
-When a graph is nested inside another (via `expand`), the child graph inherits the parent's context. The exporter auto-generates an `inherits` field in the child's preamble:
+| Property      | Description                                                                                              |
+| ------------- | -------------------------------------------------------------------------------------------------------- |
+| `description` | Free-form text: what the provider holds, its shape, its lifetime, its constraints                        |
+| `references`  | Block of links to the material that implements it. Same form as [Section 4.5](#45-references)            |
+| `nodes`       | **Required.** Block of `- Node Name` entries naming the nodes that may read this provider                |
+
+
+**Membership rules:**
+
+1. Entries under `nodes:` are the **names of nodes declared elsewhere in this file at column 0**. The block references nodes; it does not contain them. Node declarations stay flat, and a name is resolved in the graph's top-level scope exactly like an edge target.
+2. `nodes:` is **required**. A block scopes its provider to exactly the nodes it lists and to no others. There is no wildcard and no implicit membership — a block that omits `nodes:` is malformed.
+3. An **empty** `nodes:` list is valid: a region that has been declared but not yet populated. It grants access to nobody.
+4. A node may appear in several blocks. Overlapping scopes are how one node reads more than one provider.
+5. A block must not name a provider the file already inherits ([Section 8.4](#84-inheritance)). An inherited provider is graph-wide in this file and cannot be narrowed here; the scoping decision belongs to the graph that declared it.
+6. Only top-level nodes may be members. Nodes inside a `graph:` block reach a provider through their host node's membership ([Section 8.4](#84-inheritance)), not by being listed here.
+
+Since `nodes:` is required, it is always written — an empty list appears as the bare key. This is the one block-valued property that is not omitted when empty.
+
+### 8.3 Region Geometry
+
+A scoped provider is a region on the canvas. Its rectangle is **derived from its membership**, never the reverse:
+
+- With no explicit area, the region is the bounding box of its member nodes.
+- With an explicit area — a rectangle the user drew before populating it — the region is the **union** of that area and its members' bounding box. The drawn rectangle is a floor, not a fence: a member can never fall outside the region, so the picture can never contradict the file.
+
+**Membership is never inferred from geometry.** A node that merely overlaps a region is not a member of it. This is what keeps context readable from the text alone: an agent that adds a node with no layout information can still place it in a context, and moving a node on the canvas never silently changes what that node may read.
+
+The explicit area is stored as a `pos` property on the block, the same editor-owned property a node carries (see [Section 11](#11-editor-owned-properties)). Agents preserve it and never author it.
+
+### 8.4 Inheritance
+
+When a member node has `expand`, its expansion inherits the provider. The child graph's preamble carries an `inherits` field naming what is available from above:
 
 ```
 ---
@@ -620,15 +653,23 @@ inherits: [Auth, Cart]
 ---
 ```
 
-This is **auto-generated on export** — the user does not maintain it. The exporter walks up the graph tree and computes which contexts are available. This ensures the LLM always sees available context at the top of every graph file, even when reading the file in isolation.
+Membership is what propagates. A provider reaches only the expansions of the nodes listed in its block — a subgraph with no business touching `Auth` does not inherit it merely for sharing a file with something that does. This is the practical reason to scope.
 
-### 8.4 Reading Context
+**An inherited provider is graph-wide in the file that receives it.** Every node in that file may read it, and the file cannot re-scope it (rule 5 of [Section 8.2](#82-declaration--the-context-block)). The decision about who reads it was made in the parent, by putting the host node in the region; making it again in the child would mean two places to look.
 
-All nodes within a graph (and its child graphs) implicitly have read access to inherited context. No explicit `uses` annotation is needed.
+`inherits` is **auto-generated** — the user does not maintain it, and it is the only place a provider name appears in a preamble. The editor walks the expansion tree and computes what is available at each level. It exists so the LLM always sees the available context at the top of a graph file, even when reading that file in isolation.
 
-### 8.5 Writing Context
+A preamble carrying `inherits` therefore tells a reader something structural: this file is some other graph's expansion, and its host node sits inside a region. The absence of `inherits` says nothing either way.
 
-If a node **modifies** a context provider, this must be explicitly declared with `updates`:
+### 8.5 Reading Context
+
+Read access is implicit. A node reads two things: the providers whose blocks list it, and everything the file inherits. There is no `uses` annotation and none is needed.
+
+A node that is not a member of a locally declared provider cannot read it. If a node needs access, add it to that block's `nodes:` list — do not declare the provider a second time.
+
+### 8.6 Writing Context
+
+If a node **modifies** a provider, it says so with `updates`:
 
 ```
 Invalidate Token
@@ -636,7 +677,15 @@ Invalidate Token
   description: "Revokes the current JWT and clears the session"
 ```
 
-This is explicit because side effects are important for the LLM to know about — it affects implementation (mutation logic, state management, event dispatching).
+A node may only update a provider it can read — one its file inherits, or one whose block lists it. `updates` naming anything else is an error in the diagram, not a widening of scope; the fix is the membership list.
+
+Writes are explicit because side effects matter to implementation: mutation logic, state management, event dispatching.
+
+### 8.7 Cross-File Definitions
+
+A provider's definition lives in the file that declares it. Downstream files reference it by name alone — `inherits: [Auth]` carries the name, not the description.
+
+This resolves because reading order is fixed: an agent starts at the workspace entrypoint and descends through `expand` links, so it has already read the declaring file by the time it meets the name again. A provider that needs a definition is declared as a `context:` block in the file that owns it; the description is never repeated downstream.
 
 ---
 
@@ -685,55 +734,45 @@ When the LLM encounters an `expand` reference:
 
 ---
 
-## 11. `.flow.meta` File Format
+## 11. Editor-Owned Properties
 
-The `.flow.meta` file is a JSON file consumed only by the frontend editor. It stores visual metadata that has no semantic meaning for the LLM.
+The canvas layout lives inside the `.flow` file, as ordinary properties on the things it describes. They are syntactically indistinguishable from any other property; what makes them editor-owned is that the editor writes them and the agent does not.
 
-### 11.1 Structure
+### 11.1 The Properties
 
-```json
-{
-  "canvas": {
-    "zoom": 1.0,
-    "offsetX": 0,
-    "offsetY": 0,
-    "theme": "dark"
-  },
-  "nodes": {
-    "Validate Cart": {
-      "x": 200,
-      "y": 100,
-      "color": "#4A90D9",
-      "width": 180,
-      "height": 60
-    },
-    "Process Payment": {
-      "x": 450,
-      "y": 100,
-      "color": "#50C878",
-      "width": 200,
-      "height": 60
-    }
-  },
-  "edges": {
-    "Validate Cart -> Process Payment": {
-      "waypoints": [[300, 130], [400, 130]],
-      "style": "curved"
-    }
-  }
-}
+
+| Property | Where                              | Value                                                                    |
+| -------- | ---------------------------------- | ------------------------------------------------------------------------ |
+| `id`     | Node                               | A UUID. Stable identity for the node across renames                      |
+| `pos`    | Node, `context:` block             | Four comma-separated numbers, `x, y, w, h` — the rectangle on the canvas |
+
+
+```
+Validate Cart
+  id: 6f2a1c84-9e07-4d31-b5aa-1f0c2d3e4b55
+  pos: 200, 100, 180, 60
+  description: "Ensures cart has items and valid quantities"
+  -> Process Payment : "cart is valid"
 ```
 
-### 11.2 Reconciliation
+On a `context:` block, `pos` is the region the user reserved rather than a fixed frame — see [Section 8.3](#83-region-geometry).
 
-The `.flow` file is the source of truth for what exists. The frontend reconciles `.flow` and `.flow.meta` using structural matching:
+### 11.2 Rules for Agents
 
-1. **Exact name match** — Node name in `.flow` matches key in `.flow.meta` → same node, keep metadata.
-2. **Edge-pattern match** — If a name changed but the node has identical incoming/outgoing edges as an orphaned `.flow.meta` entry → likely a rename, transfer metadata.
-3. **Orphan detection** — A `.flow.meta` entry with no match in `.flow` and a `.flow` node with no match in `.flow.meta` → pair them if edges match.
-4. **Unresolvable** — New nodes get auto-positioned by the frontend. Orphaned metadata entries are cleaned up.
+- **Preserve** existing `id` and `pos` lines on anything you keep. Renaming a node means keeping its `id`; that is precisely what distinguishes a rename from a delete-and-create.
+- **Omit** both on anything you add. The editor assigns an id and auto-layouts whatever has no position.
+- **Never** copy an `id` onto a second node. Ids are unique within a file.
+- **Ignore** both when interpreting the graph. They carry no semantic meaning; nothing about control flow, scope, or context depends on a coordinate.
 
-This enables round-trip editing: the LLM can rename nodes, add nodes, or restructure the graph, and the frontend preserves layout where possible.
+### 11.3 Identity
+
+`id` is what makes round-trip editing safe. An agent may rename nodes, add nodes, or restructure a graph, and the editor preserves layout because identity never depended on the name.
+
+Where an `id` is absent — a node an agent just wrote — the editor assigns one on next open and positions the node automatically. A file authored entirely without editor-owned properties is valid and opens correctly; it simply gets laid out from scratch.
+
+### 11.4 Stability
+
+Editor-owned properties are the one part of a `.flow` file that a future version of this format may relocate — for example, back into a sidecar file. Treating them as opaque, as [Section 11.2](#112-rules-for-agents) requires, is what makes that change invisible to agents.
 
 ---
 
@@ -744,9 +783,18 @@ This enables round-trip editing: the LLM can rename nodes, add nodes, or restruc
 ```
 ---
 name: User Authentication App
-context: [Auth]
 description: "Simple app with login, dashboard, and logout"
 ---
+
+context: Auth
+  description: "Signed session token in secure storage; absent until login succeeds"
+  references:
+    - [Token storage](src/client/secure-storage.ts)
+  nodes:
+    - Check Session
+    - Submit Credentials
+    - Load Dashboard
+    - Logout
 
 # Entry point — user opens the app
 Open App
@@ -783,6 +831,7 @@ Logout
 ```
 ---
 name: Login Flow
+inherits: [Auth]
 description: "Handles credential validation and token generation"
 references:
   - [Auth service](src/server/auth-service.ts)
@@ -913,7 +962,7 @@ field         := key ": " value | key ": " list | preamble_reference_block
 preamble_reference_block := "references:" newline (indent "- " reference newline)+
 list          := "[" name ("," name)* "]"
 
-body          := (node | graph_block | comment | blank_line)*
+body          := (node | graph_block | context_block | comment | blank_line)*
 
 node          := name newline (property | edge)*
 name          := <text at column 0, no ": " allowed>
@@ -931,12 +980,18 @@ edge_data     := indent indent "data:" newline (indent indent indent key ": " ty
 
 graph_block   := "graph: " name newline (node)*
 
+context_block := "context: " name newline (context_property)* member_block
+context_property := indent key ": " value newline | reference_block
+member_block  := indent "nodes:" newline (indent indent "- " name newline)*
+
 comment       := "#" <any text> newline
 blank_line    := newline
 
 indent        := "  " (2 spaces)
 quoted_label  := '"' <any text> '"'
 ```
+
+`id` and `pos` are ordinary properties syntactically; `pos` takes four comma-separated numbers (`x, y, w, h`). See [Section 11](#11-editor-owned-properties).
 
 ---
 
@@ -953,11 +1008,14 @@ The format has a minimal set of reserved keywords:
 | `expand`      | Node                   | References an expanded graph (not used in preambles)           |
 | `updates`     | Preamble, Node         | Lists contexts this node modifies                              |
 | `entrypoint`  | Preamble, Node         | Marks node as explicit entry point                             |
-| `context`     | Preamble, Node (graph) | Explicit list of context providers this graph declares         |
-| `inherits`    | Preamble, Node (graph) | Auto-generated context inheritance from parent graphs          |
-| `references`  | Preamble, Node         | Block of links to related source files, documents, and URLs    |
+| `context`     | Body                   | Declares one context provider, defines it, and scopes it to listed nodes |
+| `inherits`    | Preamble               | Auto-generated context inheritance from parent graphs          |
+| `references`  | Preamble, Node, `context` block | Block of links to related source files, documents, and URLs |
+| `nodes`       | `context` block        | Required. Lists the nodes a scoped context provider is available to |
 | `data`        | Edge                   | Schema of data passed on this edge                             |
 | `graph`       | Body                   | Defines a local reusable graph block                           |
+| `id`          | Node                   | Editor-owned. Stable node identity across renames              |
+| `pos`         | Node, `context` block  | Editor-owned. Canvas rectangle, `x, y, w, h`                   |
 
 
 ---
@@ -974,11 +1032,16 @@ The format has a minimal set of reserved keywords:
 | Execution order   | Unspecified fan-out = LLM decides                                                 | Consistent implicit philosophy                   |
 | Subgraph nesting  | Flat with references                                                              | LLMs parse flat structures better                |
 | File splitting    | Heuristic on export, user overrides                                               | Smart default, user control                      |
-| Context providers | Explicit `context` tag in preamble, auto-generated `inherits`, explicit `updates` | Structured and parseable, avoids spaghetti edges |
+| Context providers | One declaration form — a body `context:` block — plus auto-generated `inherits` and explicit `updates` | Structured and parseable, avoids spaghetti edges. A single declaration form means one place to look to answer whether a node can read a provider |
+| Context inheritance | Inherited providers are graph-wide in the receiving file and cannot be re-scoped there | The scoping decision was made in the parent by placing the host node in a region; repeating it downstream would put the answer in two files |
+| Context definition | A body-level `context:` block carrying `description` and `references`             | A bare name in a bracketed list tells an agent nothing about what the provider holds; the block gives a provider the same definition surface a node already has |
+| Context scoping   | Membership listed by name under a required `nodes:`, declarations stay flat at column 0 | A node can belong to several contexts, so membership cannot be containment; keeps the flat structure the rest of the format relies on. Requiring `nodes:` means a block always says exactly who reads it — one rule, no implicit-membership case to reason about |
+| Context regions   | Geometry derived from membership; an explicit area is a floor, not a fence         | Membership inferred from geometry would make semantics layout-dependent — agents write no coordinates, and dragging a node would silently change what it reads |
+| Context identity  | Named, no `id`                                                                     | `updates` and `inherits` address providers by name across files, so an id cannot stabilize a rename the way it does for nodes |
 | Error handling    | on_error at graph and node level, bubbles up                                      | Reuses existing concepts                         |
-| Node identity     | Names, unique per graph                                                           | No IDs in .flow files                            |
-| Visual metadata   | Separate .flow.meta file                                                          | Clean separation, no token waste                 |
-| Sync strategy     | Structural reconciliation                                                         | No fragile ID contracts with LLM                 |
+| Node reference    | By name, unique per graph                                                         | Edges, `expand`, and membership all read as prose; no identifiers in the parts a human writes |
+| Node identity     | An editor-assigned `id`, preserved by agents                                      | A rename is an id that stayed put — no structural guessing about which node used to be which |
+| Visual metadata   | Editor-owned `id` / `pos` properties on the node itself, no sidecar file          | A graph and its picture never separate when a file is copied, moved, or diffed; the cost is a few lines agents are told to ignore |
 | Indentation       | YAML-style, 2-space                                                               | Familiar, shallow nesting                        |
 | Edge syntax       | -> Target : "label"                                                               | Compact, colon-space forbidden in names          |
 | Subgraph entry targeting | Optional `{Inner}` suffix on the edge target                               | Keeps the edge anchored to the subgraph node while refining the entry point; braces are unused elsewhere, so no new keyword and no collision with the `[](path)` link form |

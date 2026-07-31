@@ -1,4 +1,4 @@
-# .flow Format Guide (flow/1.3)
+# .flow Format Guide (flow/1.4)
 
 You are reading a `.flow` workspace. This guide defines how to parse, interpret, and edit `.flow` files. Read once, then apply to every `.flow` file in the workspace.
 
@@ -30,7 +30,6 @@ Start reading at the manifest's `entrypoint`. If there is no manifest, start at 
 ---
 name: <graph name>            # required
 description: <free-form text> # optional: constraints, style, tech stack, guidance
-context: [A, B]               # optional: context providers this graph declares
 inherits: [A, B]              # auto-generated: context from parent graphs
 on_error: -> Target           # optional: graph-level error handler
 updates: [A]                  # optional: context this graph mutates
@@ -39,7 +38,7 @@ references:                   # optional: links to related code, docs, URLs
   - [Label](src/file.ts:12-40)
 ---
 
-<node declarations>
+<node declarations, graph: blocks, context: blocks>
 ```
 
 ## Nodes
@@ -67,10 +66,10 @@ All properties are optional. A node with no properties is a valid leaf.
 
 ### Editor-Owned Properties
 
-The canvas editor stores its visual metadata directly on nodes (there is no separate metadata file):
+The canvas editor stores its visual metadata directly on the thing it describes (there is no separate metadata file):
 
 - `id: <uuid>` — stable node identity across renames.
-- `pos: x, y, w, h` — the node's rectangle on the canvas.
+- `pos: x, y, w, h` — the rectangle on the canvas. Also carried by a `context:` block.
 
 When editing a `.flow` file:
 
@@ -239,23 +238,64 @@ on_error: [Handler](path.flow)
 
 ## Context Providers
 
-Shared state available to all nodes in a graph (auth, session, config, etc.).
+Shared state available to nodes (auth, session, config, etc.).
 
-- **Declared** at graph level via `context: [Name1, Name2]` in the preamble.
-- **Inherited** by child graphs via auto-generated `inherits: [...]` in their preamble.
-- **Read access is implicit** — no annotation needed. Any node in a graph can read its declared or inherited context.
-- **Write access is explicit** — a node that mutates context declares `updates: [Name]`.
+A provider is declared in exactly one place: a `context:` block in the body of the file that owns it. There is no preamble `context:` field. The only preamble field that names a provider is `inherits:`, which is auto-generated and lists what came from the parent graph:
 
 ```
 ---
 name: Payment Flow
-context: [Cart]
-inherits: [Auth]          # available from parent
+inherits: [Auth]          # auto-generated; every node here can read Auth
 ---
 
 Charge Card
-  updates: [Cart]          # this node mutates Cart
+  updates: [Auth]          # this node mutates Auth
 ```
+
+**Declaring one** — a `context:` block at column 0:
+
+```
+context: Auth
+  description: "JWT in an httpOnly cookie; refreshed on 401"
+  references:
+    - [Session middleware](src/server/session.ts)
+  nodes:
+    - Show Login
+    - Submit Credentials
+```
+
+That is the complete shape of a block you write. Do not add anything else to it.
+
+- Entries under `nodes:` are names of nodes declared at column 0 elsewhere in the file. The block references them; it never contains them.
+- **`nodes:` is required.** A block scopes its provider to exactly the nodes it lists and to no others — there is no wildcard. An empty list is valid and grants access to nobody; keep the bare key.
+- A node may be a member of several blocks.
+- A block must not name a provider the file already inherits. An inherited provider is graph-wide here and cannot be narrowed — that decision belongs to the graph that declared it.
+
+### `pos` on a `context:` Block
+
+A block you encounter may carry a `pos` line:
+
+```
+context: Auth
+  pos: 40, 60, 480, 320         # the user drew this region — preserve as-is
+  description: "…"
+```
+
+**Never write a `pos` on a context block you create.** It is not optional-but-nice — it means something you cannot know. It records an area the *user* deliberately reserved on the canvas by drawing a box, which is why it survives even when no node sits in it yet. A block without `pos` is drawn as the bounding box of its members, which is the correct result for every block you author.
+
+This differs from a node's `pos`, which the editor eventually assigns to everything. On a context block, absent stays absent until a person draws one.
+
+Keep an existing `pos` exactly as written, and ignore its numbers. **Membership comes from `nodes:` alone** — never from which nodes look like they sit inside the box.
+
+**Read access is implicit.** A node reads two things: the providers whose blocks list it, and everything the file inherits. There is no `uses` annotation.
+
+**Write access is explicit.** A node that mutates a provider declares `updates: [Name]`, and may only update what it can read. If `updates` names something the node cannot read, the membership list is what needs fixing.
+
+**Inheritance follows membership.** A member node with `expand` passes that provider into its expansion — that is what the child's `inherits` lists. A node in no block passes nothing down.
+
+**Inherited context is graph-wide.** Every node in a file that inherits `Auth` can read it, with no block and no membership list. `inherits` in a preamble also tells you this file is another graph's expansion.
+
+**Definitions do not travel.** `inherits: [Auth]` carries the name, not the description. You will already have read the defining block, since you start at the entrypoint and descend through `expand`. Never copy a provider's description into child files.
 
 ## Comments
 
@@ -265,7 +305,7 @@ Lines starting with `#` are comments. Ignore them when interpreting; preserve th
 
 When you encounter `expand: [Label](path.flow)`:
 1. Read the referenced file.
-2. The file's preamble defines the expanded node — put node-definition fields there (`description`, `references`, and the target's own `context` / `inherits`), not on the referencing node.
+2. The file's preamble defines the expanded node — put node-definition fields there (`description`, `references`), not on the referencing node. Its `inherits` is auto-generated from the referencing node's context membership.
 3. Its body contains the child nodes.
 4. Apply all rules recursively.
 
@@ -273,7 +313,7 @@ Paths are relative to the referencing file. The referencing node keeps parent-sc
 
 ## Reserved Keywords
 
-`name`, `description`, `context`, `inherits`, `on_error`, `expand`, `updates`, `entrypoint`, `references`, `data`, `graph`, `id`, `pos`
+`name`, `description`, `context`, `inherits`, `on_error`, `expand`, `updates`, `entrypoint`, `references`, `data`, `graph`, `nodes`, `id`, `pos`
 
 All other identifiers are user-defined node names or context names.
 
@@ -286,8 +326,9 @@ All other identifiers are user-defined node names or context names.
 | `on_error` | Error bubbles up to parent graph |
 | `updates` | Node is read-only with respect to context |
 | `entrypoint` | Inferred: no incoming edges = entry point |
-| `context` | Graph declares no new context |
-| `inherits` | Graph inherits nothing (root or isolated) |
+| no `context:` blocks | File declares no providers of its own |
+| `inherits` | Graph inherits nothing (root, or its host node is in no region) |
+| `pos` on a `context` block | Region is the bounding box of its members |
 | `references` | No known related code or documents — locate them yourself, and add them once you implement the node |
 | `id` / `pos` | Editor assigns them on next open |
 | Edge label | Sequential connection |
@@ -304,7 +345,7 @@ preamble    := "---" NL field+ "---" NL
 field       := (key ": " (value | list) NL) | reference_block
 list        := "[" name ("," name)* "]"
 
-body        := (node | graph_block | comment | blank)*
+body        := (node | graph_block | context_block | comment | blank)*
 
 node        := name NL (indent property)*
 property    := (key ": " value) | reference_block | edge
@@ -318,6 +359,9 @@ target_node := name
 data_block  := "data:" NL (indent key ": " type NL)+
 
 graph_block := "graph: " name NL (node)*
+
+context_block := "context: " name NL (indent (key ": " value | reference_block))* indent member_block
+member_block  := "nodes:" NL (indent "- " name NL)*
 
 comment     := "#" any NL
 indent      := "  "    # 2 spaces, no tabs
@@ -335,6 +379,7 @@ When you create or edit `.flow` files, follow the editor's canonical style so fi
 - One blank line between top-level items (nodes, `graph:` blocks, the preamble).
 - Per-node line order: `id`, `pos`, other single-line properties, the `references:` block, then edges. Block-valued properties come last so the single-line ones stay in one column.
 - An empty `references:` block is omitted entirely — write the key only when it has entries.
+- A `context:` block you write is `description`, then the `references:` block, then `nodes:` — never a `pos`. If you are editing a block that already has one, it stays first, above `description`. Unlike `references:`, `nodes:` is required and always written, as the bare key when the list is empty.
 - Quoted values use double quotes. The format has **no escape sequences** — a `"` character can never appear inside a label or quoted value.
 - Node names are unique within their graph and never contain `: ` (colon-space) or curly braces `{` `}`. An optional `-> Subgraph {Inner}` edge target enters the subgraph at that inner node; an optional `{Inner Source} -> Target` prefix leaves the subgraph from that inner node.
 
@@ -343,7 +388,7 @@ When you create or edit `.flow` files, follow the editor's canonical style so fi
 For each `.flow` file:
 
 1. Parse preamble between `---` fences as the graph's node definition.
-2. Parse body nodes top to bottom. Each bare-name line at column 0 begins a new node (or `graph:` block).
+2. Parse body nodes top to bottom. Each bare-name line at column 0 begins a new node (or a `graph:` / `context:` block).
 3. Properties and edges are indented 2 spaces under their owning node.
 4. Resolve `expand` references by reading the target file or local `graph:` block.
 5. Build the node-and-edge model. Apply inference rules to determine node roles.
@@ -358,5 +403,5 @@ For each `.flow` file:
 - If they specified precisely, respect the specification.
 - Use `description` fields as primary guidance for tech stack, patterns, and constraints.
 - Follow `references` to existing code and documents before writing anything new, and point them at the real code once you have implemented a node.
-- Respect `context`/`inherits` as available state, `updates` as mutations.
+- Respect `context`/`inherits` as available state, `updates` as mutations. A `context:` block's `description` and `references` tell you what the provider actually is — read them before implementing anything that touches it.
 - Respect `on_error` as the error flow.
