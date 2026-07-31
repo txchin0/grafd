@@ -33,7 +33,6 @@ import {
   normalizedRect,
   padRect,
   rectBorderPointToward,
-  pointNearRectBorder,
   rectCenter,
   rectContainsRect,
   rectContains,
@@ -57,6 +56,19 @@ import {
   titleBandOf,
   type NodeTextLayout,
 } from './node-metrics.js';
+import {
+  applyRegionMove,
+  applyRegionResize,
+  rollbackRegionMove,
+  rollbackRegionResize,
+} from './region-gestures.js';
+import { hitRegionAt, hitRegionHandleAt } from './region-hit-test.js';
+import {
+  HANDLE_HIT_RADIUS_PX,
+  hitResizeCorner,
+  selectionHandleOrigins,
+  type ResizeCorner,
+} from './resize-handles.js';
 // A live object refilled in place on every theme change, never reassigned.
 import { canvasPalette } from '../theme.js';
 import {
@@ -95,8 +107,6 @@ export type Tool = 'select' | 'node' | 'context';
 
 
 
-
-type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se';
 
 type Gesture =
   | { type: 'pan'; startView: View; startScreen: Point }
@@ -245,10 +255,6 @@ export interface RegionTarget {
 const MIN_SCALE = 0.12;
 const MAX_SCALE = 5;
 const MAX_FIT_SCALE = 1.4;
-const HANDLE_HIT_RADIUS_PX = 9;
-// A frame is grabbed by its outline; wide enough to catch with a mouse, narrow enough that the
-// interior still belongs to the marquee.
-const REGION_BORDER_BAND_PX = 7;
 const MIN_NODE_WIDTH = 120;
 const MIN_NODE_HEIGHT = 64;
 const DRAG_THRESHOLD_PX = 4;
@@ -1031,10 +1037,9 @@ export class CanvasView {
     } else if (gesture?.type === 'resize') {
       Object.assign(gesture.node.pos!, gesture.startRect);
     } else if (gesture?.type === 'region-move') {
-      for (const [member, start] of gesture.startPositions) Object.assign(member.pos!, start);
-      if (gesture.context.block.pos) Object.assign(gesture.context.block.pos, gesture.startRect);
+      rollbackRegionMove(gesture);
     } else if (gesture?.type === 'region-resize') {
-      Object.assign(gesture.context.block.pos!, gesture.startRect);
+      rollbackRegionResize(gesture);
     }
   }
 
@@ -1095,11 +1100,11 @@ export class CanvasView {
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'region-move') {
-      this.applyRegionMove(gesture, world);
+      applyRegionMove(gesture, world, snap);
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'region-resize') {
-      this.applyRegionResize(gesture, world);
+      applyRegionResize(gesture, world, snap);
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'edge') {
@@ -1134,42 +1139,6 @@ export class CanvasView {
       rect.y = start.y + start.h - height;
       rect.h = height;
     }
-  }
-
-  // The members travel with the frame, so the picture the user grabbed moves as one piece. Only
-  // a block that already had a drawn area keeps one: moving a region derived purely from its
-  // members must not invent a `pos` the file would then carry forever (R3).
-  private applyRegionMove(gesture: Extract<Gesture, { type: 'region-move' }>, world: Point): void {
-    gesture.moved = true;
-    const dx = world.x - gesture.startWorld.x;
-    const dy = world.y - gesture.startWorld.y;
-    for (const [member, start] of gesture.startPositions) {
-      member.pos!.x = snap(start.x + dx);
-      member.pos!.y = snap(start.y + dy);
-    }
-    const drawn = gesture.context.block.pos;
-    if (drawn) {
-      drawn.x = snap(gesture.startRect.x + dx);
-      drawn.y = snap(gesture.startRect.y + dy);
-    }
-  }
-
-  // No minimum size: a region is an area the user reserved, and nothing about it needs to stay
-  // big enough to hold anything (R31). Its members do not move, so shrinking past one shuts it out.
-  private applyRegionResize(gesture: Extract<Gesture, { type: 'region-resize' }>, world: Point): void {
-    const dx = world.x - gesture.startWorld.x;
-    const dy = world.y - gesture.startWorld.y;
-    const start = gesture.startRect;
-    const corner = gesture.context.block.pos!;
-    const opposite = {
-      x: gesture.corner[1] === 'w' ? start.x + start.w : start.x,
-      y: gesture.corner[0] === 'n' ? start.y + start.h : start.y,
-    };
-    const dragged = {
-      x: snap((gesture.corner[1] === 'w' ? start.x : start.x + start.w) + dx),
-      y: snap((gesture.corner[0] === 'n' ? start.y : start.y + start.h) + dy),
-    };
-    Object.assign(corner, normalizedRect(opposite, dragged));
   }
 
   private onPointerCancel(event: PointerEvent): void {
@@ -1526,20 +1495,8 @@ export class CanvasView {
   private hitResizeHandle(world: Point): { node: FlowNode; corner: ResizeCorner } | null {
     if (this.selection.size !== 1) return null;
     const [node] = this.selection;
-    const hitRadius = 9 / this.view.scale;
-    const { x, y, w, h } = this.rect(node);
-    const corners: Array<{ corner: ResizeCorner; x: number; y: number }> = [
-      { corner: 'nw', x, y },
-      { corner: 'ne', x: x + w, y },
-      { corner: 'sw', x, y: y + h },
-      { corner: 'se', x: x + w, y: y + h },
-    ];
-    for (const candidate of corners) {
-      if (Math.hypot(world.x - candidate.x, world.y - candidate.y) <= hitRadius) {
-        return { node, corner: candidate.corner };
-      }
-    }
-    return null;
+    const corner = hitResizeCorner(this.rect(node), world, HANDLE_HIT_RADIUS_PX / this.view.scale);
+    return corner ? { node, corner } : null;
   }
 
   // Regions answer gestures only in the graph the canvas is showing: one inside an unfolded
@@ -1550,39 +1507,19 @@ export class CanvasView {
 
   private hitRegionHandle(world: Point): { context: ModelContext; corner: ResizeCorner } | null {
     if (!this.selectedRegion) return null;
-    const rect = this.regionRectOfContext(this.selectedRegion);
-    if (!rect) return null;
-    const corner = this.cornerNear(rect, world);
-    return corner ? { context: this.selectedRegion, corner } : null;
-  }
-
-  private cornerNear(rect: Rect, world: Point): ResizeCorner | null {
-    const hitRadius = HANDLE_HIT_RADIUS_PX / this.view.scale;
-    const corners: Array<{ corner: ResizeCorner; x: number; y: number }> = [
-      { corner: 'nw', x: rect.x, y: rect.y },
-      { corner: 'ne', x: rect.x + rect.w, y: rect.y },
-      { corner: 'sw', x: rect.x, y: rect.y + rect.h },
-      { corner: 'se', x: rect.x + rect.w, y: rect.y + rect.h },
-    ];
-    for (const candidate of corners) {
-      if (Math.hypot(world.x - candidate.x, world.y - candidate.y) <= hitRadius) return candidate.corner;
-    }
-    return null;
+    return hitRegionHandleAt(this.selectedRegion, this.model, world, this.view.scale);
   }
 
   // The frame and the name label, never the interior: a region encloses nodes it does not own, so
   // a press inside it has to fall through to the marquee (R27). Topmost first, so the region drawn
   // last wins where two frames overlap.
   private hitRegion(world: Point): ModelContext | null {
-    const band = REGION_BORDER_BAND_PX / this.view.scale;
-    for (let index = this.model.contexts.length - 1; index >= 0; index -= 1) {
-      const context = this.model.contexts[index];
-      const rect = this.regionRectOfContext(context);
-      if (!rect) continue;
-      if (pointNearRectBorder(rect, world, band)) return context;
-      if (rectContains(regionLabelBand(this.ctx, context.block.name, rect), world)) return context;
-    }
-    return null;
+    return hitRegionAt(
+      this.model,
+      world,
+      this.view.scale,
+      (name, rect) => regionLabelBand(this.ctx, name, rect),
+    );
   }
 
   private hitBadge(world: Point): BadgeHit | null {
@@ -1833,10 +1770,9 @@ export class CanvasView {
       const [node] = this.selection;
       if (!this.isNodeVisible(node)) return;
       const handleSize = 8 / this.view.scale;
-      const { x, y, w, h } = this.rect(node);
       ctx.fillStyle = canvasPalette.select;
-      for (const corner of [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]) {
-        ctx.fillRect(corner[0] - handleSize / 2, corner[1] - handleSize / 2, handleSize, handleSize);
+      for (const origin of selectionHandleOrigins(this.rect(node), handleSize)) {
+        ctx.fillRect(origin.x, origin.y, handleSize, handleSize);
       }
     }
   }
@@ -1857,8 +1793,8 @@ export class CanvasView {
 
     const handleSize = 8 / this.view.scale;
     ctx.fillStyle = canvasPalette.select;
-    for (const corner of [[rect.x, rect.y], [rect.x + rect.w, rect.y], [rect.x, rect.y + rect.h], [rect.x + rect.w, rect.y + rect.h]]) {
-      ctx.fillRect(corner[0] - handleSize / 2, corner[1] - handleSize / 2, handleSize, handleSize);
+    for (const origin of selectionHandleOrigins(rect, handleSize)) {
+      ctx.fillRect(origin.x, origin.y, handleSize, handleSize);
     }
   }
 
