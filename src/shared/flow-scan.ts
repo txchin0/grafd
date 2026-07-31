@@ -9,6 +9,7 @@
 // reason, and tests/flow-scan.test.ts asserts a scan and a parse of the same text agree.
 
 import {
+  CONTEXT_HEADER,
   EDGE_LINE,
   GRAPH_HEADER,
   PROPERTY_LINE,
@@ -24,6 +25,8 @@ export type DropReason =
   | 'property-before-node'
   | 'orphan-block-entry'
   | 'malformed-reference-entry'
+  | 'malformed-member-entry'
+  | 'edge-in-context-block'
   | 'edge-data-field-without-data-key'
   | 'unparsable-property'
   | 'unparsable-preamble-line';
@@ -71,6 +74,26 @@ export interface ScannedNode {
   edges: ScannedEdge[];
 }
 
+export interface ScannedMember {
+  name: string;
+  line: number;
+}
+
+/** A body-level `context:` block. `nodesLine` is null when the required `nodes:` key is absent. */
+export interface ScannedContext {
+  name: string;
+  line: number;
+  properties: ScannedProperty[];
+  referencesLine: number | null;
+  references: ScannedReference[];
+  nodesLine: number | null;
+  members: ScannedMember[];
+}
+
+// A node and a context block both take a `references:` block, and the scan attaches entries to
+// whichever one is open without caring which it is.
+type ReferenceHolder = Pick<ScannedNode, 'referencesLine' | 'references'>;
+
 /** A graph scope: the file body itself (name null) or one local `graph:` block. */
 export interface ScannedScope {
   name: string | null;
@@ -90,14 +113,20 @@ export interface ScannedFile {
   lines: string[];
   preamble: ScannedPreamble | null;
   scopes: ScannedScope[];
+  // Flat, like `scopes`: a `context:` block is only legal at column 0, so it belongs to the file
+  // rather than to any one scope.
+  contexts: ScannedContext[];
   droppedLines: DroppedLine[];
 }
 
-type OpenBlock = 'edge-data' | 'references' | null;
+type OpenBlock = 'edge-data' | 'references' | 'members' | null;
+
+// The item indented lines attach to, mirroring parseItems' BodyOwner.
+type BodyOwner = { kind: 'node'; node: ScannedNode } | { kind: 'context'; block: ScannedContext };
 
 export function scanFlow(text: string): ScannedFile {
   const lines = text.split(/\r?\n/);
-  const file: ScannedFile = { lines, preamble: null, scopes: [], droppedLines: [] };
+  const file: ScannedFile = { lines, preamble: null, scopes: [], contexts: [], droppedLines: [] };
   let index = skipBlankLines(lines, 0);
 
   while (lines[index]?.trim().startsWith('#')) {
@@ -197,7 +226,7 @@ function scanItems(
   scope: ScannedScope,
   file: ScannedFile,
 ): number {
-  let currentNode: ScannedNode | null = null;
+  let currentOwner: BodyOwner | null = null;
   let openBlock: OpenBlock = null;
   let index = start;
 
@@ -226,43 +255,99 @@ function scanItems(
         const block: ScannedScope = { name: graphMatch[1].trim(), line: lineNumber, nodes: [] };
         file.scopes.push(block);
         index = scanItems(lines, index + 1, baseIndent + 2, block, file);
-        currentNode = null;
+        currentOwner = null;
         openBlock = null;
         continue;
       }
-      currentNode = emptyScannedNode(trimmed, lineNumber);
+      const contextMatch = baseIndent === 0 ? line.match(CONTEXT_HEADER) : null;
+      if (contextMatch) {
+        const block = emptyScannedContext(contextMatch[1].trim(), lineNumber);
+        file.contexts.push(block);
+        currentOwner = { kind: 'context', block };
+      } else {
+        const node = emptyScannedNode(trimmed, lineNumber);
+        scope.nodes.push(node);
+        currentOwner = { kind: 'node', node };
+      }
       openBlock = null;
-      scope.nodes.push(currentNode);
       index += 1;
       continue;
     }
 
-    if (!currentNode) {
+    if (!currentOwner) {
       drop(file, lineNumber, 'property-before-node', trimmed);
       index += 1;
       continue;
     }
 
-    if (indent >= 4) {
-      if (openBlock === 'references') attachReference(currentNode, trimmed, lineNumber, file);
-      else if (openBlock === 'edge-data') attachDataField(currentNode, trimmed, lineNumber, file);
-      else drop(file, lineNumber, 'orphan-block-entry', trimmed);
-    } else if (isEdgeLine(trimmed)) {
-      currentNode.edges.push(scanEdge(trimmed, lineNumber));
-      openBlock = 'edge-data';
-    } else {
-      const match = trimmed.match(PROPERTY_LINE);
-      if (!match) drop(file, lineNumber, 'unparsable-property', trimmed);
-      else openBlock = assignProperty(currentNode, match[1], match[2].trim(), lineNumber);
-    }
+    openBlock =
+      currentOwner.kind === 'node'
+        ? scanNodeBodyLine(currentOwner.node, trimmed, indent, openBlock, lineNumber, file)
+        : scanContextBodyLine(currentOwner.block, trimmed, indent, openBlock, lineNumber, file);
     index += 1;
   }
 
   return index;
 }
 
+function scanNodeBodyLine(
+  node: ScannedNode,
+  trimmed: string,
+  indent: number,
+  openBlock: OpenBlock,
+  line: number,
+  file: ScannedFile,
+): OpenBlock {
+  if (indent >= 4) {
+    if (openBlock === 'references') attachReference(node, trimmed, line, file);
+    else if (openBlock === 'edge-data') attachDataField(node, trimmed, line, file);
+    else drop(file, line, 'orphan-block-entry', trimmed);
+    return openBlock;
+  }
+  if (isEdgeLine(trimmed)) {
+    node.edges.push(scanEdge(trimmed, line));
+    return 'edge-data';
+  }
+  const match = trimmed.match(PROPERTY_LINE);
+  if (!match) {
+    drop(file, line, 'unparsable-property', trimmed);
+    return openBlock;
+  }
+  return assignProperty(node, match[1], match[2].trim(), line);
+}
+
+function scanContextBodyLine(
+  block: ScannedContext,
+  trimmed: string,
+  indent: number,
+  openBlock: OpenBlock,
+  line: number,
+  file: ScannedFile,
+): OpenBlock {
+  if (indent >= 4) {
+    if (openBlock === 'references') attachReference(block, trimmed, line, file);
+    else if (openBlock === 'members') attachMember(block, trimmed, line, file);
+    else drop(file, line, 'orphan-block-entry', trimmed);
+    return openBlock;
+  }
+  if (isEdgeLine(trimmed)) {
+    drop(file, line, 'edge-in-context-block', trimmed);
+    return null;
+  }
+  const match = trimmed.match(PROPERTY_LINE);
+  if (!match) {
+    drop(file, line, 'unparsable-property', trimmed);
+    return openBlock;
+  }
+  return assignContextProperty(block, match[1], match[2].trim(), line);
+}
+
 function emptyScannedNode(name: string, line: number): ScannedNode {
   return { name, line, properties: [], referencesLine: null, references: [], edges: [] };
+}
+
+function emptyScannedContext(name: string, line: number): ScannedContext {
+  return { name, line, properties: [], referencesLine: null, references: [], nodesLine: null, members: [] };
 }
 
 function scannedReference(text: string, line: number): ScannedReference {
@@ -274,18 +359,47 @@ function assignProperty(node: ScannedNode, key: string, value: string, line: num
     node.properties.push({ key, value, line });
     return null;
   }
-  node.referencesLine = line;
-  if (value !== '') node.references.push(scannedReference(value, line));
+  return openReferenceBlock(node, value, line);
+}
+
+function assignContextProperty(block: ScannedContext, key: string, value: string, line: number): OpenBlock {
+  if (key === 'references') return openReferenceBlock(block, value, line);
+  if (key !== 'nodes') {
+    block.properties.push({ key, value, line });
+    return null;
+  }
+  block.nodesLine = line;
+  pushMember(block, value, line);
+  return 'members';
+}
+
+function openReferenceBlock(holder: ReferenceHolder, value: string, line: number): OpenBlock {
+  holder.referencesLine = line;
+  if (value !== '') holder.references.push(scannedReference(value, line));
   return 'references';
 }
 
-function attachReference(node: ScannedNode, trimmed: string, line: number, file: ScannedFile): void {
+function attachReference(holder: ReferenceHolder, trimmed: string, line: number, file: ScannedFile): void {
   const entry = trimmed.match(REFERENCE_ENTRY);
   if (!entry) {
     drop(file, line, 'malformed-reference-entry', trimmed);
     return;
   }
-  node.references.push(scannedReference(entry[1], line));
+  holder.references.push(scannedReference(entry[1], line));
+}
+
+function attachMember(block: ScannedContext, trimmed: string, line: number, file: ScannedFile): void {
+  const entry = trimmed.match(REFERENCE_ENTRY);
+  if (!entry) {
+    drop(file, line, 'malformed-member-entry', trimmed);
+    return;
+  }
+  pushMember(block, entry[1], line);
+}
+
+function pushMember(block: ScannedContext, entryText: string, line: number): void {
+  const name = entryText.trim();
+  if (name !== '') block.members.push({ name, line });
 }
 
 function attachDataField(node: ScannedNode, trimmed: string, line: number, file: ScannedFile): void {

@@ -11,6 +11,7 @@ import { error, warning, type Diagnostic } from './flow-diagnostics.js';
 import { isLegalNodeName, parseEdgeExpression, parseExpandLink, parseListValue } from './flow-format.js';
 import { parseReferenceLineRange } from './reference-target.js';
 import type {
+  ScannedContext,
   ScannedEdge,
   ScannedFile,
   ScannedNode,
@@ -37,11 +38,14 @@ export function localExpansionLookup(file: ScannedFile): ExpansionLookup {
 
 export function lintSemantics(file: ScannedFile, lookup: ExpansionLookup): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
-  const declaredContexts = declaredContextNames(file);
+  // A file that names no provider at all — no block, no `inherits` — never said what it reads, so
+  // an `updates` there is evidence of an older file rather than of a mistake.
+  const readable = declaresSomeContext(file) ? readableContextsByNode(file) : null;
   for (const scope of file.scopes) {
-    reportScope(scope, declaredContexts, lookup, diagnostics);
+    reportScope(scope, readable, lookup, diagnostics);
   }
   reportGraphBlockUsage(file, diagnostics);
+  reportContextBlocks(file, diagnostics);
   reportPreamble(file, diagnostics);
   return diagnostics;
 }
@@ -62,16 +66,60 @@ function expandValueOf(node: ScannedNode): string | null {
   return property && property.value !== '' ? property.value : null;
 }
 
-function declaredContextNames(file: ScannedFile): Set<string> | null {
-  const fields = file.preamble?.fields ?? [];
-  const declarations = fields.filter((field) => field.key === 'context' || field.key === 'inherits');
-  if (declarations.length === 0) return null;
-  return new Set(declarations.flatMap((field) => parseListValue(field.value)));
+/** Which providers each node may read, or null while the file has said nothing about what it reads. */
+type ReadableContexts = Map<ScannedNode, Set<string>> | null;
+
+export function declaresSomeContext(file: ScannedFile): boolean {
+  return file.contexts.length > 0 || inheritedContextNames(file).length > 0;
+}
+
+export function inheritedContextNames(file: ScannedFile): string[] {
+  return (file.preamble?.fields ?? [])
+    .filter((field) => field.key === 'inherits')
+    .flatMap((field) => parseListValue(field.value));
+}
+
+// Read access, resolved once for the whole file (spec §8.5). A top-level node reads what the blocks
+// listing it provide, plus everything the file inherits. A node inside a `graph:` block is a member
+// of nothing (§8.2 rule 6) and reads what the node expanding that block reads (§8.4).
+//
+// Shared with the workspace pass, which asks the same question of a node with an `expand` link to
+// decide what its expansion must inherit — so both answer it the same way or the two disagree.
+export function readableContextsByNode(file: ScannedFile): Map<ScannedNode, Set<string>> {
+  const inherited = inheritedContextNames(file);
+  const providersByMemberName = providersByMember(file);
+  const readable = new Map<ScannedNode, Set<string>>();
+
+  for (const node of rootScope(file)?.nodes ?? []) {
+    readable.set(node, new Set([...inherited, ...(providersByMemberName.get(node.name) ?? [])]));
+  }
+
+  const hostsByBlockName = localExpansionHostsByBlockName(file);
+  for (const scope of file.scopes) {
+    if (scope.name == null) continue;
+    const hosts = hostsByBlockName.get(scope.name) ?? [];
+    const throughHosts = hosts.flatMap((host) => [...(readable.get(host) ?? [])]);
+    const scopeWide = new Set([...inherited, ...throughHosts]);
+    for (const node of scope.nodes) readable.set(node, scopeWide);
+  }
+  return readable;
+}
+
+function providersByMember(file: ScannedFile): Map<string, Set<string>> {
+  const providersByMemberName = new Map<string, Set<string>>();
+  for (const block of file.contexts) {
+    for (const member of block.members) {
+      const providers = providersByMemberName.get(member.name) ?? new Set<string>();
+      providers.add(block.name);
+      providersByMemberName.set(member.name, providers);
+    }
+  }
+  return providersByMemberName;
 }
 
 function reportScope(
   scope: ScannedScope,
-  declaredContexts: Set<string> | null,
+  readableContexts: ReadableContexts,
   lookup: ExpansionLookup,
   diagnostics: Diagnostic[],
 ): void {
@@ -79,7 +127,7 @@ function reportScope(
   for (const node of scope.nodes) {
     reportExpand(node, lookup, diagnostics);
     reportOnErrorProperty(findProperty(node, 'on_error'), nodesByName, diagnostics);
-    reportContextProperties(node, declaredContexts, diagnostics);
+    reportUpdatedContexts(node, readableContexts, diagnostics);
     reportReferences(node.references, diagnostics);
     reportDuplicateEdges(node, diagnostics);
     for (const edge of node.edges) {
@@ -133,35 +181,86 @@ function reportOnErrorProperty(
   }
 }
 
-function reportContextProperties(
+// A node may only update a provider it can read, and the fix is always the membership list —
+// `updates` never widens scope by itself (spec §8.6).
+function reportUpdatedContexts(
   node: ScannedNode,
-  declaredContexts: Set<string> | null,
+  readableContexts: ReadableContexts,
   diagnostics: Diagnostic[],
 ): void {
-  for (const key of ['context', 'inherits']) {
-    const property = findProperty(node, key);
-    if (property && !expandValueOf(node)) {
-      diagnostics.push(
-        warning(
-          'context-on-non-graph-node',
-          property.line,
-          `\`${key}\` applies only to a node that is a graph; this node has no \`expand\`.`,
-        ),
-      );
-    }
-  }
   const updates = findProperty(node, 'updates');
-  if (!updates || declaredContexts == null) return;
+  if (!updates || !readableContexts) return;
+  const readable = readableContexts.get(node) ?? new Set<string>();
   for (const name of parseListValue(updates.value)) {
-    if (declaredContexts.has(name)) continue;
+    if (readable.has(name)) continue;
     diagnostics.push(
       warning(
         'updates-undeclared-context',
         updates.line,
-        `Context "${name}" is not declared in this graph's \`context\` or \`inherits\`.`,
+        `"${node.name}" cannot read context "${name}": no \`context: ${name}\` block in this file lists it under \`nodes:\`, and the file does not inherit it.`,
       ),
     );
   }
+}
+
+function reportContextBlocks(file: ScannedFile, diagnostics: Diagnostic[]): void {
+  const topLevelNames = new Set((rootScope(file)?.nodes ?? []).map((node) => node.name));
+  const nestedNames = new Set(
+    file.scopes.filter((scope) => scope.name != null).flatMap((scope) => scope.nodes.map((node) => node.name)),
+  );
+  const inherited = new Set(inheritedContextNames(file));
+
+  for (const block of file.contexts) {
+    if (inherited.has(block.name)) {
+      diagnostics.push(
+        warning(
+          'context-redeclares-inherited',
+          block.line,
+          `"${block.name}" is already inherited, which makes it readable by every node in this file; a block cannot narrow it, and the scoping decision belongs to the graph that declared it.`,
+        ),
+      );
+    }
+    reportContextMembers(block, topLevelNames, nestedNames, diagnostics);
+    reportContextGeometry(block, diagnostics);
+    reportReferences(block.references, diagnostics);
+  }
+}
+
+function reportContextMembers(
+  block: ScannedContext,
+  topLevelNames: Set<string>,
+  nestedNames: Set<string>,
+  diagnostics: Diagnostic[],
+): void {
+  for (const member of block.members) {
+    if (topLevelNames.has(member.name)) continue;
+    diagnostics.push(
+      nestedNames.has(member.name)
+        ? warning(
+            'context-member-in-graph-block',
+            member.line,
+            `"${member.name}" is declared inside a \`graph:\` block, so it cannot be a member; a node there reaches a provider through the node that expands the block.`,
+          )
+        : warning(
+            'context-member-not-found',
+            member.line,
+            `No node named "${member.name}" is declared at column 0 in this file, so this entry grants access to nothing.`,
+          ),
+    );
+  }
+}
+
+// A block with no members and no area the user drew is a provider nobody can read and nothing
+// draws. The canvas stays silent about it, so the linter is where it surfaces.
+function reportContextGeometry(block: ScannedContext, diagnostics: Diagnostic[]): void {
+  if (block.members.length > 0 || block.properties.some((property) => property.key === 'pos')) return;
+  diagnostics.push(
+    warning(
+      'context-region-has-no-geometry',
+      block.line,
+      `Context "${block.name}" lists no nodes and reserves no area, so nothing can read it and no region is drawn.`,
+    ),
+  );
 }
 
 function reportEdgeTarget(

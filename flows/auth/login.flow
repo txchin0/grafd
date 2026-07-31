@@ -1,5 +1,6 @@
 ---
 name: Login Flow
+inherits: [Auth]
 description: "Handles credential validation and token generation"
 references:
   - [Auth service](src/server/auth-service.ts)

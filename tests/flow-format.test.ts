@@ -28,6 +28,7 @@ import {
   newUuid,
   type NodeItem,
   type GraphItem,
+  type ContextItem,
 } from '../src/shared/flow-format.js';
 
 const MESSY_DOCUMENT = `# Checkout flow
@@ -54,6 +55,14 @@ Validate
     data:
       amount: number
       currency: string
+
+context: Session
+  description: "Signed token in a cookie"
+  references:
+    - src/session.ts
+  nodes:
+    - Start
+    - Validate
 
 graph: Details
 
@@ -82,6 +91,14 @@ Validate
     data:
       amount: number
       currency: string
+
+context: Session
+  description: "Signed token in a cookie"
+  references:
+    - src/session.ts
+  nodes:
+    - Start
+    - Validate
 
 graph: Details
   Inner
@@ -127,8 +144,17 @@ describe('parseFlow', () => {
     ]);
   });
 
+  it('parses context blocks with their definition and membership list', () => {
+    const block = (doc.items[3] as ContextItem).block;
+    expect(block.name).toBe('Session');
+    expect(block.pos).toBeNull();
+    expect(block.props).toEqual([{ key: 'description', value: '"Signed token in a cookie"' }]);
+    expect(block.references).toEqual([{ label: null, target: 'src/session.ts' }]);
+    expect(block.members).toEqual(['Start', 'Validate']);
+  });
+
   it('parses graph blocks with nested nodes', () => {
-    const graph = doc.items[3] as GraphItem;
+    const graph = doc.items[4] as GraphItem;
     expect(graph.kind).toBe('graph');
     expect(graph.name).toBe('Details');
     const inner = (graph.items[0] as NodeItem).node;
@@ -240,6 +266,61 @@ describe('references', () => {
   it('formats a reference back to entry text', () => {
     expect(formatReference({ label: 'Label', target: 'src/a.ts' })).toBe('[Label](src/a.ts)');
     expect(formatReference({ label: null, target: 'src/a.ts' })).toBe('src/a.ts');
+  });
+});
+
+const CONTEXT_DOCUMENT = `---
+name: Checkout
+---
+
+context: Auth
+  pos: 40, 60, 480, 320
+  description: "JWT in an httpOnly cookie"
+  references:
+    - [Session middleware](src/server/session.ts)
+  nodes:
+    - Show Login
+    - Submit Credentials
+
+Show Login
+
+Submit Credentials
+`;
+
+describe('context blocks', () => {
+  it('round-trips a canonical document unchanged', () => {
+    expect(serializeFlow(parseFlow(CONTEXT_DOCUMENT))).toBe(CONTEXT_DOCUMENT);
+  });
+
+  it('parses the editor-owned pos the user drew', () => {
+    const block = (parseFlow(CONTEXT_DOCUMENT).items[0] as ContextItem).block;
+    expect(block.pos).toEqual({ x: 40, y: 60, w: 480, h: 320 });
+  });
+
+  // Unlike `references:`, a membership list is required: a block scopes its provider to exactly
+  // the nodes it lists, so an absent `nodes:` says something different from an empty one.
+  it('writes nodes: even when the membership list is empty', () => {
+    expect(serializeFlow(parseFlow('context: Auth\n  nodes:\n'))).toBe('context: Auth\n  nodes:\n');
+    expect(serializeFlow(parseFlow('context: Auth\n'))).toBe('context: Auth\n  nodes:\n');
+  });
+
+  it('binds each indented block to the line directly above it', () => {
+    const block = (parseFlow('context: Auth\n  references:\n    - src/a.ts\n  nodes:\n    - Show Login\n')
+      .items[0] as ContextItem).block;
+    expect(block.references).toEqual([{ label: null, target: 'src/a.ts' }]);
+    expect(block.members).toEqual(['Show Login']);
+  });
+
+  // A block references nodes rather than containing them, so it has no edge list to attach to.
+  it('drops an edge line under a context block', () => {
+    const doc = parseFlow('context: Auth\n  -> Show Login\n  nodes:\n    - Show Login\n');
+    expect((doc.items[0] as ContextItem).block.members).toEqual(['Show Login']);
+    expect(serializeFlow(doc)).toBe('context: Auth\n  nodes:\n    - Show Login\n');
+  });
+
+  it('leaves a nested context header as an ordinary node, as the parser sees it', () => {
+    const doc = parseFlow('graph: Details\n  context: Auth\n');
+    expect(((doc.items[0] as GraphItem).items[0] as NodeItem).node.name).toBe('context: Auth');
   });
 });
 

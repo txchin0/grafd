@@ -3,9 +3,10 @@
 // would silently drop or misread — see the module comment in flow-scan.ts.
 
 import { error, warning, type Diagnostic } from './flow-diagnostics.js';
-import { GRAPH_HEADER, parsePos } from './flow-format.js';
+import { CONTEXT_HEADER, GRAPH_HEADER, parsePos } from './flow-format.js';
 import type {
   DropReason,
+  ScannedContext,
   ScannedEdge,
   ScannedFile,
   ScannedNode,
@@ -15,9 +16,20 @@ import type {
 } from './flow-scan.js';
 import { allScannedNodes } from './flow-scan.js';
 
-const PREAMBLE_KEYS = ['name', 'description', 'on_error', 'updates', 'entrypoint', 'context', 'inherits', 'references'];
-const NODE_KEYS = ['id', 'pos', 'description', 'expand', 'on_error', 'updates', 'entrypoint', 'context', 'inherits', 'references'];
-const LIST_VALUED_KEYS = ['context', 'inherits', 'updates'];
+const PREAMBLE_KEYS = ['name', 'description', 'on_error', 'updates', 'entrypoint', 'inherits', 'references'];
+const NODE_KEYS = ['id', 'pos', 'description', 'expand', 'on_error', 'updates', 'entrypoint', 'references'];
+const CONTEXT_KEYS = ['pos', 'description', 'references', 'nodes'];
+const LIST_VALUED_KEYS = ['inherits', 'updates'];
+// Where a `key: value` line sits, which decides both the keys it may use and how it is named in
+// a diagnostic. Not called `context`: that word is taken by the domain here.
+type PropertySite = 'preamble' | 'node' | 'context';
+
+const SITE_LABELS: Record<PropertySite, string> = {
+  preamble: 'preamble',
+  node: 'node',
+  context: 'context block',
+};
+
 const BOOLEAN_VALUE = /^(true|false)$/;
 const LIST_VALUE = /^\[\s*([^[\],]+(\s*,\s*[^[\],]+)*)?\s*\]$/;
 const NAME_WITH_COLON = /:(\s|$)/;
@@ -29,6 +41,10 @@ const DROP_MESSAGES: Record<DropReason, string> = {
     'Line is indented as a block entry but no `data:` or `references:` block is open above it, so the parser discards it.',
   'malformed-reference-entry':
     'Entry under `references:` must start with `- `, otherwise the parser discards it.',
+  'malformed-member-entry':
+    'Entry under a context block\'s `nodes:` must start with `- `, otherwise the parser discards it.',
+  'edge-in-context-block':
+    'A `context:` block references nodes rather than connecting them, so it has no edges and the parser discards this line.',
   'edge-data-field-without-data-key':
     'Edge data field appears without a `data:` line opening the block, so the parser discards it.',
   'unparsable-property':
@@ -48,8 +64,10 @@ export function lintSyntax(file: ScannedFile): Diagnostic[] {
   reportDroppedLines(file, diagnostics);
   reportPreamble(file, diagnostics);
   reportDuplicateGraphBlockNames(file, diagnostics);
+  reportDuplicateContextBlockNames(file, diagnostics);
   reportDuplicateNodeIds(file, diagnostics);
   for (const scope of file.scopes) reportScope(scope, diagnostics);
+  for (const block of file.contexts) reportContextBlock(block, diagnostics);
   return diagnostics;
 }
 
@@ -139,6 +157,49 @@ function reportDuplicateGraphBlockNames(file: ScannedFile, diagnostics: Diagnost
   }
 }
 
+function reportDuplicateContextBlockNames(file: ScannedFile, diagnostics: Diagnostic[]): void {
+  const firstLineByName = new Map<string, number>();
+  for (const block of file.contexts) {
+    const firstLine = firstLineByName.get(block.name);
+    if (firstLine == null) {
+      firstLineByName.set(block.name, block.line);
+      continue;
+    }
+    diagnostics.push(
+      error(
+        'duplicate-context-block',
+        block.line,
+        `Context "${block.name}" is already declared on line ${firstLine}; a provider is declared in exactly one place and only the first block is read.`,
+      ),
+    );
+  }
+}
+
+function reportContextBlock(block: ScannedContext, diagnostics: Diagnostic[]): void {
+  if (NAME_WITH_COLON.test(block.name)) {
+    diagnostics.push(
+      error(
+        'context-name-contains-colon',
+        block.line,
+        'A context name cannot contain a colon followed by a space or end of line; the parser reads only the text up to it.',
+      ),
+    );
+  }
+  // Nothing is dropped by an absent `nodes:` — the block simply scopes its provider to nobody
+  // while claiming to scope it to somebody (spec §8.2 rule 2).
+  if (block.nodesLine == null) {
+    diagnostics.push(
+      warning(
+        'context-block-missing-nodes',
+        block.line,
+        '`nodes:` is required on a `context:` block; write the bare key when the provider reaches nobody yet.',
+      ),
+    );
+  }
+  reportProperties(block.properties, CONTEXT_KEYS, 'context', diagnostics);
+  reportReferenceBlock(block.referencesLine, block.references, diagnostics);
+}
+
 function reportDuplicateNodeIds(file: ScannedFile, diagnostics: Diagnostic[]): void {
   const firstLineById = new Map<string, number>();
   for (const node of allScannedNodes(file)) {
@@ -180,6 +241,20 @@ function reportNodeName(node: ScannedNode, diagnostics: Diagnostic[]): void {
     );
     return;
   }
+  // A `context:` header is only a block at column 0, so this line became a node literally named
+  // "context: X" and its members were dropped.
+  if (CONTEXT_HEADER.test(node.name)) {
+    diagnostics.push(
+      error(
+        'nested-context-block',
+        node.line,
+        'A `context:` block only exists at column 0; the parser reads this as a node literally named "' +
+          node.name +
+          '" and discards its `nodes:` list.',
+      ),
+    );
+    return;
+  }
   if (/[{}]/.test(node.name)) {
     diagnostics.push(
       error('node-name-contains-braces', node.line, 'Node names cannot contain `{` or `}`; braces appear only on edges.'),
@@ -199,7 +274,7 @@ function reportNodeName(node: ScannedNode, diagnostics: Diagnostic[]): void {
 function reportProperties(
   properties: ScannedProperty[],
   allowedKeys: string[],
-  context: 'preamble' | 'node',
+  site: PropertySite,
   diagnostics: Diagnostic[],
 ): void {
   const firstLineByKey = new Map<string, number>();
@@ -209,23 +284,23 @@ function reportProperties(
     else {
       diagnostics.push(
         warning(
-          context === 'preamble' ? 'duplicate-preamble-field' : 'duplicate-property',
+          site === 'preamble' ? 'duplicate-preamble-field' : 'duplicate-property',
           property.line,
           `\`${property.key}\` is already set on line ${firstLine}; only the first is read.`,
         ),
       );
     }
-    reportPropertyValue(property, allowedKeys, context, diagnostics);
+    reportPropertyValue(property, allowedKeys, site, diagnostics);
   }
 }
 
 function reportPropertyValue(
   property: ScannedProperty,
   allowedKeys: string[],
-  context: 'preamble' | 'node',
+  site: PropertySite,
   diagnostics: Diagnostic[],
 ): void {
-  if (context === 'preamble' && property.key === 'expand') {
+  if (site === 'preamble' && property.key === 'expand') {
     diagnostics.push(
       warning('expand-in-preamble', property.line, 'A preamble has no `expand` — the file itself is the expansion.'),
     );
@@ -234,7 +309,7 @@ function reportPropertyValue(
       warning(
         'unknown-property',
         property.line,
-        `\`${property.key}\` is not a ${context} property. Reserved keywords here: ${allowedKeys.join(', ')}.`,
+        `\`${property.key}\` is not a ${SITE_LABELS[site]} property. Reserved keywords here: ${allowedKeys.join(', ')}.`,
       ),
     );
   }

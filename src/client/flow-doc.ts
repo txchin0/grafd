@@ -4,6 +4,7 @@
 
 import {
   collapseToSingleLine,
+  emptyContextBlock,
   emptyNode,
   getProp,
   setProp,
@@ -21,6 +22,8 @@ import {
   type EdgeDataField,
   type EdgeSpec,
   type FlowDocument,
+  type ContextBlock,
+  type ContextItem,
   type FlowItem,
   type FlowNode,
   type GraphItem,
@@ -142,6 +145,16 @@ export function ensureScopeItems(doc: FlowDocument, scopeName: string | null): F
 
 export function nodesIn(items: FlowItem[]): FlowNode[] {
   return items.filter((item): item is { kind: 'node'; node: FlowNode } => item.kind === 'node').map((item) => item.node);
+}
+
+// Context blocks are addressed by name, not by id: the same provider name appears in other files'
+// `inherits` and `updates`, and nothing in the format carries an identifier for a provider.
+export function contextBlocksIn(items: FlowItem[]): ContextBlock[] {
+  return items.filter((item): item is ContextItem => item.kind === 'context').map((item) => item.block);
+}
+
+export function contextBlockNamed(doc: FlowDocument, name: string): ContextBlock | null {
+  return contextBlocksIn(doc.items).find((block) => block.name === name) ?? null;
 }
 
 export function findNodeById(doc: FlowDocument, nodeId: string | null): FlowNode | null {
@@ -348,6 +361,52 @@ export function addNode(items: FlowItem[], rect: Rect, requestedName = 'Untitled
   };
   items.push({ kind: 'node', node });
   return node;
+}
+
+// A region the user drew keeps its rectangle; one grouped from a selection has none, because the
+// user expressed membership rather than an area (spec §8.3 — `pos` is a floor, never authored by
+// anything but a deliberate draw).
+export function addContextBlock(
+  items: FlowItem[],
+  requestedName: string,
+  pos: Rect | null,
+  memberNames: string[],
+): ContextBlock {
+  const takenNames = new Set(contextBlocksIn(items).map((block) => block.name));
+  const block = emptyContextBlock(uniqueName(takenNames, sanitizeName(requestedName) || 'Context'));
+  if (pos) {
+    block.pos = { x: Math.round(pos.x), y: Math.round(pos.y), w: Math.round(pos.w), h: Math.round(pos.h) };
+  }
+  setContextMembers(block, memberNames);
+  items.push({ kind: 'context', block });
+  return block;
+}
+
+export function deleteContextBlock(items: FlowItem[], block: ContextBlock): void {
+  const index = items.findIndex((item) => item.kind === 'context' && item.block === block);
+  if (index >= 0) items.splice(index, 1);
+}
+
+// These four are the only writers of a block's membership list: membership is never inferred from
+// geometry, and no editor field exposes it (spec §8.3).
+export function setContextMembers(block: ContextBlock, memberNames: string[]): void {
+  block.members = [...new Set(memberNames.map((name) => name.trim()).filter(Boolean))];
+}
+
+export function addContextMember(block: ContextBlock, memberName: string): void {
+  setContextMembers(block, [...block.members, memberName]);
+}
+
+export function renameContextMember(doc: FlowDocument, oldName: string, newName: string): void {
+  for (const block of contextBlocksIn(doc.items)) {
+    setContextMembers(block, block.members.map((member) => (member === oldName ? newName : member)));
+  }
+}
+
+export function removeContextMember(doc: FlowDocument, memberName: string): void {
+  for (const block of contextBlocksIn(doc.items)) {
+    setContextMembers(block, block.members.filter((member) => member !== memberName));
+  }
 }
 
 // Detached deep copies for the clipboard: they keep their original names and positions and
@@ -647,6 +706,10 @@ export function deleteNodes(
     if (item.kind === 'node' && deletedSet.has(item.node)) items.splice(index, 1);
   }
 
+  if (isTopLevel(items, doc)) {
+    for (const name of deletedNames) removeContextMember(doc, name);
+  }
+
   for (const node of nodesIn(items)) {
     node.edges = node.edges.filter((edge) => !deletedNames.has(edge.target));
     const onError = getProp(node, 'on_error');
@@ -718,11 +781,19 @@ function applyNodeRename(
     }
   }
 
+  if (isTopLevel(items, doc)) renameContextMember(doc, oldName, node.name);
+
   const identity = expandIdentityForNode(doc, options?.path ?? null, node);
   if (identity) {
     retargetInnerRefs(docsForRetarget(doc, options), identity, oldName, node.name);
   }
   return node.name;
+}
+
+// Only nodes declared at column 0 can be context members (spec §8.2 rule 6), so a mutation inside
+// a `graph:` block's item list never touches a membership list.
+function isTopLevel(items: FlowItem[], doc: FlowDocument): boolean {
+  return items === doc.items;
 }
 
 function applyGraphBlockRename(doc: FlowDocument, graphItem: GraphItem, requestedName: string): string {

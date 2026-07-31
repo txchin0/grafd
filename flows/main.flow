@@ -1,8 +1,15 @@
 ---
 name: User Authentication App
-context: [Auth]
 description: "Simple app with login, dashboard, and logout"
 ---
+
+context: Auth
+  description: "Signed session token in secure storage; absent until login succeeds"
+  nodes:
+    - Check Session
+    - Submit Credentials
+    - Load Dashboard
+    - Logout
 
 # Entry point — user opens the app
 

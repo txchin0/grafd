@@ -8,8 +8,8 @@ import {
   type FlowNode,
   type GraphItem,
 } from '../src/shared/flow-format.js';
-import { scanFlow, type ScannedFile, type ScannedNode } from '../src/shared/flow-scan.js';
-import { nodesIn } from '../src/client/flow-doc.js';
+import { scanFlow, type ScannedContext, type ScannedFile, type ScannedNode } from '../src/shared/flow-scan.js';
+import { contextBlocksIn, nodesIn } from '../src/client/flow-doc.js';
 
 // The linter trusts the scanner to see a file exactly as parseFlow does — everything it
 // accepts, and nothing it silently drops. These projections put the two side by side.
@@ -19,6 +19,18 @@ function scanShape(file: ScannedFile) {
     preambleFields: file.preamble?.fields.map(({ key, value }) => ({ key, value })) ?? null,
     preambleReferences: file.preamble?.references.map((entry) => entry.reference).filter(Boolean) ?? null,
     scopes: file.scopes.map((scope) => ({ name: scope.name, nodes: scope.nodes.map(scannedNodeShape) })),
+    contexts: file.contexts.map(scannedContextShape),
+  };
+}
+
+function scannedContextShape(block: ScannedContext) {
+  const pos = block.properties.filter((property) => property.key === 'pos').at(-1)?.value ?? null;
+  return {
+    name: block.name,
+    pos: pos == null ? null : parsePos(pos),
+    props: block.properties.filter((property) => property.key !== 'pos').map(({ key, value }) => ({ key, value })),
+    references: block.references.map((entry) => entry.reference).filter(Boolean),
+    members: block.members.map((member) => member.name),
   };
 }
 
@@ -50,6 +62,13 @@ function parseShape(doc: FlowDocument) {
       { name: null as string | null, nodes: nodesIn(doc.items).map(parsedNodeShape) },
       ...blocks.map((block) => ({ name: block.name, nodes: nodesIn(block.items).map(parsedNodeShape) })),
     ],
+    contexts: contextBlocksIn(doc.items).map((block) => ({
+      name: block.name,
+      pos: block.pos,
+      props: block.props,
+      references: block.references,
+      members: block.members,
+    })),
   };
 }
 
@@ -97,7 +116,7 @@ Start
 const FIXTURES: Record<string, string> = {
   'a node with every property kind': `---
 name: Everything
-context: [Auth]
+inherits: [Auth]
 references:
   - [Service](src/auth.ts:1-9)
 ---
@@ -126,6 +145,23 @@ graph: Inner
     -> Sibling
 
   Sibling
+`,
+  'a context block with every property kind': `---
+name: Scoped
+---
+
+context: Auth
+  pos: 40, 60, 480, 320
+  description: "JWT in a cookie"
+  references:
+    - [Session](src/session.ts)
+  nodes:
+    - Start
+
+context: Empty
+  nodes:
+
+Start
 `,
   'lines the parser discards': DISCARDED_LINES,
   'braces, inner names and odd spacing': `---
@@ -163,6 +199,14 @@ describe('scanFlow drop reporting', () => {
       { line: 10, reason: 'orphan-block-entry', text: 'deep line with no open block' },
       { line: 11, reason: 'unparsable-property', text: '- reference without a block' },
       { line: 13, reason: 'unparsable-property', text: 'another line with no open block' },
+    ]);
+  });
+
+  it('records the lines a context block drops, which a node would have kept', () => {
+    const text = 'context: Auth\n  -> Start\n  nodes:\n    Start\n';
+    expect(scanFlow(text).droppedLines).toEqual([
+      { line: 2, reason: 'edge-in-context-block', text: '-> Start' },
+      { line: 4, reason: 'malformed-member-entry', text: 'Start' },
     ]);
   });
 

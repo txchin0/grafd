@@ -8,9 +8,7 @@
 
 import {
   collapseToSingleLine,
-  formatListValue,
   getPreambleField,
-  parseListValue,
   quoteValue,
   setPreambleField,
   setPreambleReferences,
@@ -44,7 +42,6 @@ export interface GraphPanelElements {
   toggle: HTMLButtonElement;
   name: HTMLInputElement;
   description: HTMLTextAreaElement;
-  context: HTMLInputElement;
   onError: HTMLInputElement;
   entrypoint: HTMLInputElement;
   referenceRows: HTMLDivElement;
@@ -79,16 +76,6 @@ export function createGraphPanel(options: GraphPanelOptions): GraphPanel {
       store: (text) => {
         const line = collapseToSingleLine(text);
         return line ? quoteValue(line) : null;
-      },
-    },
-    {
-      element: elements.context,
-      key: 'context',
-      commitOn: 'change',
-      display: (doc) => parseListValue(getPreambleField(doc, 'context')).join(', '),
-      store: (text) => {
-        const entries = text.split(',').map((entry) => entry.trim()).filter(Boolean);
-        return entries.length ? formatListValue(entries) : null;
       },
     },
     {

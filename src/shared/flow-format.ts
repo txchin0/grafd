@@ -65,7 +65,23 @@ export interface GraphItem {
   items: FlowItem[];
 }
 
-export type FlowItem = CommentItem | NodeItem | GraphItem;
+// A body-level `context:` block (spec §8.2): it declares a context provider, defines it with a
+// description and references, and scopes it to the nodes named under `nodes:`. It has no `id`
+// because a provider is addressed by name, across files as well as within one.
+export interface ContextBlock {
+  name: string;
+  pos: Rect | null;
+  props: KeyValue[];
+  references: Reference[];
+  members: string[];
+}
+
+export interface ContextItem {
+  kind: 'context';
+  block: ContextBlock;
+}
+
+export type FlowItem = CommentItem | NodeItem | GraphItem | ContextItem;
 
 export interface Preamble {
   fields: KeyValue[];
@@ -89,12 +105,18 @@ export interface ExpandLink {
 export const PROPERTY_LINE = /^([A-Za-z_][\w-]*):\s?(.*)$/;
 export const EDGE_LINE = /^(?:\{([^}]*)\}\s+)?->\s+([^{]+?)(?:\s*\{([^}]*)\})?(?:\s+:\s+"(.*)")?$/;
 export const GRAPH_HEADER = /^graph:\s+(.+)$/;
+export const CONTEXT_HEADER = /^context:\s+(.+)$/;
 export const MARKDOWN_LINK = /^\[(.*)\]\((.*)\)$/;
 export const REFERENCE_ENTRY = /^-\s+(.*)$/;
 
 // An indented block belongs to the line directly above it: `data:` under an edge, `- entry`
-// lines under a `references:` key. The parser tracks which one is open as it walks a node.
-type OpenBlock = 'edge-data' | 'references' | null;
+// lines under a `references:` key, `- Node Name` lines under a context block's `nodes:` key.
+// The parser tracks which one is open as it walks a node or a context block.
+type OpenBlock = 'edge-data' | 'references' | 'members' | null;
+
+// The item an indented line attaches to. A node and a context block take nearly the same body,
+// so the walk tracks whichever one is open rather than a node alone.
+type BodyOwner = NodeItem | ContextItem;
 
 export function parseFlow(text: string): FlowDocument {
   const lines = text.split(/\r?\n/);
@@ -157,7 +179,7 @@ function pushReference(references: Reference[], entryText: string): void {
 
 function parseItems(lines: string[], start: number, baseIndent: number): { items: FlowItem[]; next: number } {
   const items: FlowItem[] = [];
-  let currentNode: FlowNode | null = null;
+  let currentOwner: BodyOwner | null = null;
   let openBlock: OpenBlock = null;
   let index = start;
 
@@ -185,33 +207,30 @@ function parseItems(lines: string[], start: number, baseIndent: number): { items
       if (graphMatch) {
         const graphBody = parseItems(lines, index + 1, baseIndent + 2);
         items.push({ kind: 'graph', name: graphMatch[1].trim(), items: graphBody.items });
-        currentNode = null;
+        currentOwner = null;
         openBlock = null;
         index = graphBody.next;
         continue;
       }
-      currentNode = emptyNode(trimmed);
+      const contextMatch = baseIndent === 0 ? line.match(CONTEXT_HEADER) : null;
+      currentOwner = contextMatch
+        ? { kind: 'context', block: emptyContextBlock(contextMatch[1].trim()) }
+        : { kind: 'node', node: emptyNode(trimmed) };
       openBlock = null;
-      items.push({ kind: 'node', node: currentNode });
+      items.push(currentOwner);
       index += 1;
       continue;
     }
 
-    if (!currentNode) {
+    if (!currentOwner) {
       index += 1;
       continue;
     }
 
-    if (indent >= 4) {
-      if (openBlock === 'references') attachReference(currentNode, trimmed);
-      else if (openBlock === 'edge-data') attachEdgeData(currentNode, trimmed);
-    } else if (isEdgeLine(trimmed)) {
-      currentNode.edges.push(parseEdgeExpression(trimmed));
-      openBlock = 'edge-data';
-    } else {
-      const match = trimmed.match(PROPERTY_LINE);
-      if (match) openBlock = assignNodeProperty(currentNode, match[1], match[2].trim());
-    }
+    openBlock =
+      currentOwner.kind === 'node'
+        ? extendNodeBody(currentOwner.node, trimmed, indent, openBlock)
+        : extendContextBody(currentOwner.block, trimmed, indent, openBlock);
     index += 1;
   }
 
@@ -224,6 +243,44 @@ function stripCommentMarker(line: string): string {
 
 export function emptyNode(name: string): FlowNode {
   return { name, id: null, pos: null, props: [], references: [], edges: [] };
+}
+
+export function emptyContextBlock(name: string): ContextBlock {
+  return { name, pos: null, props: [], references: [], members: [] };
+}
+
+// Each body helper returns the block left open by the line it consumed, so the walk knows where
+// the lines indented beneath it belong.
+function extendNodeBody(node: FlowNode, trimmed: string, indent: number, openBlock: OpenBlock): OpenBlock {
+  if (indent >= 4) {
+    if (openBlock === 'references') attachReference(node.references, trimmed);
+    else if (openBlock === 'edge-data') attachEdgeData(node, trimmed);
+    return openBlock;
+  }
+  if (isEdgeLine(trimmed)) {
+    node.edges.push(parseEdgeExpression(trimmed));
+    return 'edge-data';
+  }
+  const match = trimmed.match(PROPERTY_LINE);
+  return match ? assignNodeProperty(node, match[1], match[2].trim()) : openBlock;
+}
+
+// A context block references nodes rather than containing them, so it has no edge list: an edge
+// line under one is dropped, not attached. The linter reports it as `edge-in-context-block`.
+function extendContextBody(
+  block: ContextBlock,
+  trimmed: string,
+  indent: number,
+  openBlock: OpenBlock,
+): OpenBlock {
+  if (indent >= 4) {
+    if (openBlock === 'references') attachReference(block.references, trimmed);
+    else if (openBlock === 'members') attachMember(block, trimmed);
+    return openBlock;
+  }
+  if (isEdgeLine(trimmed)) return null;
+  const match = trimmed.match(PROPERTY_LINE);
+  return match ? assignContextProperty(block, match[1], match[2].trim()) : openBlock;
 }
 
 // Returns the block this property opens, so the caller knows where the lines indented
@@ -243,9 +300,36 @@ function assignNodeProperty(node: FlowNode, key: string, value: string): OpenBlo
   return null;
 }
 
-function attachReference(node: FlowNode, trimmed: string): void {
+// Mirrors assignNodeProperty for a context block, which takes `pos`, free-form properties, a
+// `references:` block and the required `nodes:` membership block.
+function assignContextProperty(block: ContextBlock, key: string, value: string): OpenBlock {
+  if (key === 'pos') {
+    block.pos = parsePos(value);
+  } else if (key === 'references') {
+    pushReference(block.references, value);
+    return 'references';
+  } else if (key === 'nodes') {
+    pushMember(block.members, value);
+    return 'members';
+  } else {
+    block.props.push({ key, value });
+  }
+  return null;
+}
+
+function attachReference(references: Reference[], trimmed: string): void {
   const entry = trimmed.match(REFERENCE_ENTRY);
-  if (entry) pushReference(node.references, entry[1]);
+  if (entry) pushReference(references, entry[1]);
+}
+
+function attachMember(block: ContextBlock, trimmed: string): void {
+  const entry = trimmed.match(REFERENCE_ENTRY);
+  if (entry) pushMember(block.members, entry[1]);
+}
+
+function pushMember(members: string[], entryText: string): void {
+  const name = entryText.trim();
+  if (name !== '') members.push(name);
 }
 
 export function parseReference(entryText: string): Reference | null {
@@ -335,6 +419,7 @@ function serializeItem(item: FlowItem, indent: string): string {
     const body = item.items.map((inner) => serializeItem(inner, indent + '  '));
     return `${indent}graph: ${item.name}\n` + body.join('\n\n');
   }
+  if (item.kind === 'context') return serializeContextBlock(item.block, indent);
   return serializeNode(item.node, indent);
 }
 
@@ -346,6 +431,22 @@ function referenceBlockLines(references: Reference[], indent: string): string[] 
     `${indent}references:`,
     ...references.map((reference) => `${indent}  - ${formatReference(reference)}`),
   ];
+}
+
+// `nodes:` is the one block-valued property written even when empty: a block scopes its provider
+// to exactly the nodes it lists, so an absent list is malformed rather than empty (spec §8.2).
+function memberBlockLines(members: string[], indent: string): string[] {
+  return [`${indent}nodes:`, ...members.map((member) => `${indent}  - ${member}`)];
+}
+
+function serializeContextBlock(block: ContextBlock, indent: string): string {
+  const lines = [`${indent}context: ${block.name}`];
+  const propIndent = indent + '  ';
+  if (block.pos) lines.push(`${propIndent}pos: ${formatPos(block.pos)}`);
+  for (const prop of block.props) lines.push(`${propIndent}${prop.key}: ${prop.value}`);
+  lines.push(...referenceBlockLines(block.references, propIndent));
+  lines.push(...memberBlockLines(block.members, propIndent));
+  return lines.join('\n');
 }
 
 function serializeNode(node: FlowNode, indent: string): string {

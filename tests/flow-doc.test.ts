@@ -10,14 +10,17 @@ import {
   type GraphItem,
 } from '../src/shared/flow-format.js';
 import {
+  addContextBlock,
   addEdge,
   addNode,
   allNodes,
   assignMissingIds,
   buildModel,
   containingItems,
+  contextBlockNamed,
   groupNodesByOwner,
   DEFAULT_NODE_SIZE,
+  deleteContextBlock,
   deleteEdge,
   deleteNodes,
   duplicateNodes,
@@ -287,6 +290,73 @@ C
     const [a] = allNodes(doc);
     expect(renameNode(doc.items, a, '   ', doc)).toBe('A');
     expect(renameNode(doc.items, a, 'A', doc)).toBe('A');
+  });
+});
+
+describe('context blocks', () => {
+  const MEMBERSHIP = `context: Auth
+  nodes:
+    - A
+    - B
+
+A
+
+B
+
+graph: Sub
+  A
+`;
+
+  it('adds a block with a drawn area and rounded coordinates', () => {
+    const doc = docFrom('A\n');
+    const block = addContextBlock(doc.items, 'Auth', { x: 1.4, y: 2.6, w: 480.2, h: 320.5 }, ['A']);
+    expect(block.pos).toEqual({ x: 1, y: 3, w: 480, h: 321 });
+    expect(contextBlockNamed(doc, 'Auth')).toBe(block);
+  });
+
+  it('groups a selection into a block with no area of its own', () => {
+    const doc = docFrom('A\n\nB\n');
+    expect(addContextBlock(doc.items, 'Auth', null, ['A', 'B']).pos).toBeNull();
+  });
+
+  it('makes a new block name unique against the blocks already in the file', () => {
+    const doc = docFrom('context: Auth\n  nodes:\n');
+    expect(addContextBlock(doc.items, 'Auth', null, []).name).toBe('Auth 2');
+  });
+
+  it('drops blank and duplicate member names', () => {
+    const doc = docFrom('A\n');
+    expect(addContextBlock(doc.items, 'Auth', null, ['A', ' A ', '  ']).members).toEqual(['A']);
+  });
+
+  it('deletes a block without touching its members', () => {
+    const doc = docFrom(MEMBERSHIP);
+    deleteContextBlock(doc.items, contextBlockNamed(doc, 'Auth')!);
+    expect(contextBlockNamed(doc, 'Auth')).toBeNull();
+    expect(nodesIn(doc.items).map((node) => node.name)).toEqual(['A', 'B']);
+  });
+
+  it('follows a renamed member', () => {
+    const doc = docFrom(MEMBERSHIP);
+    renameNode(doc.items, nodesIn(doc.items)[0], 'Start', doc);
+    expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['Start', 'B']);
+  });
+
+  it('drops a deleted member', () => {
+    const doc = docFrom(MEMBERSHIP);
+    deleteNodes(doc.items, [nodesIn(doc.items)[1]], doc);
+    expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['A']);
+  });
+
+  // Only nodes at column 0 can be members, so a same-named node inside a `graph:` block is not
+  // the member the list refers to.
+  it('ignores renames and deletions inside a graph block', () => {
+    const doc = docFrom(MEMBERSHIP);
+    const block = doc.items.find((item): item is GraphItem => item.kind === 'graph')!;
+    renameNode(block.items, nodesIn(block.items)[0], 'Inner', doc);
+    expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['A', 'B']);
+    deleteNodes(block.items, nodesIn(block.items), doc);
+    expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['A', 'B']);
   });
 });
 

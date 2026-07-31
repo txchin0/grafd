@@ -16,11 +16,15 @@ const CLEAN = `# A well-formed file, used as the baseline for every rule below.
 ---
 name: Checkout
 description: "Handles the cart through payment"
-context: [Cart]
 references:
   - [Checkout service](src/server/checkout.ts:10-80)
   - https://stripe.com/docs
 ---
+
+context: Cart
+  description: "Line items and totals, held until payment succeeds"
+  nodes:
+    - Process Payment
 
 Validate Cart
   id: 11111111-1111-4111-8111-111111111111
@@ -133,6 +137,32 @@ Start
     expect(rulesOf('---\nname: T\n---\n\nA\n  description: "one"\n  description: "two"\n')).toContain('duplicate-property');
   });
 
+  it('reports a nested context block, whose membership list the parser discards', () => {
+    expect(rulesOf('---\nname: T\n---\n\ngraph: Outer\n  context: Auth\n    nodes:\n')).toContain('nested-context-block');
+  });
+
+  it('reports the lines a context block discards but a node would have kept', () => {
+    const text = '---\nname: T\n---\n\ncontext: Auth\n  -> A\n  nodes:\n    A\n\nA\n';
+    expect(rulesOf(text)).toEqual(expect.arrayContaining(['edge-in-context-block', 'malformed-member-entry']));
+  });
+
+  it('reports context blocks that are duplicated, misnamed, or missing their membership list', () => {
+    const duplicated = '---\nname: T\n---\n\ncontext: Auth\n  nodes:\n    - A\n\ncontext: Auth\n  nodes:\n    - A\n\nA\n';
+    expect(severityOf(duplicated, 'duplicate-context-block')).toBe('error');
+    expect(rulesOf('---\nname: T\n---\n\ncontext: Auth\n  description: "no members"\n\nA\n')).toContain(
+      'context-block-missing-nodes',
+    );
+    expect(rulesOf('---\nname: T\n---\n\ncontext: A: B\n  nodes:\n')).toContain('context-name-contains-colon');
+  });
+
+  it('reports properties that no longer belong where they are written', () => {
+    expect(rulesOf('---\nname: T\ncontext: [Cart]\n---\n\nA\n')).toContain('unknown-property');
+    expect(rulesOf('---\nname: T\n---\n\nA\n  context: [Cart]\n')).toContain('unknown-property');
+    expect(rulesOf('---\nname: T\n---\n\ncontext: Cart\n  expand: Sub\n  nodes:\n    - A\n\nA\n')).toContain(
+      'unknown-property',
+    );
+  });
+
   it('reports empty blocks, which the serializer drops', () => {
     expect(rulesOf('---\nname: T\n---\n\nA\n  references:\n')).toContain('empty-references-block');
     expect(rulesOf('---\nname: T\n---\n\nA\n  -> B\n    data:\n\nB\n')).toContain('empty-edge-data-block');
@@ -183,15 +213,52 @@ describe('semantic rules', () => {
     expect(rulesOf(wrongSource)).toContain('inner-source-not-found');
   });
 
-  it('reports context misuse only when the graph declares its context', () => {
-    const declared = '---\nname: T\ncontext: [Cart]\n---\n\nA\n  updates: [Auth]\n';
-    expect(rulesOf(declared)).toContain('updates-undeclared-context');
+  it('reports an update to a context the node cannot read, once the file says what it reads', () => {
+    const inherited = '---\nname: T\ninherits: [Cart]\n---\n\nA\n  updates: [Auth]\n';
+    expect(rulesOf(inherited)).toContain('updates-undeclared-context');
 
     const undeclared = '---\nname: T\n---\n\nA\n  updates: [Auth]\n';
     expect(rulesOf(undeclared)).not.toContain('updates-undeclared-context');
+  });
 
-    const onLeaf = '---\nname: T\n---\n\nA\n  context: [Cart]\n';
-    expect(rulesOf(onLeaf)).toContain('context-on-non-graph-node');
+  // Membership, not mere declaration: a provider declared in this file but scoped to other nodes
+  // is not readable here, and the fix is the `nodes:` list rather than the `updates` line.
+  it('reads a context through membership, inheritance, or the host node of a graph block', () => {
+    const member = '---\nname: T\n---\n\ncontext: Cart\n  nodes:\n    - A\n\nA\n  updates: [Cart]\n';
+    expect(rulesOf(member)).not.toContain('updates-undeclared-context');
+
+    const nonMember = '---\nname: T\n---\n\ncontext: Cart\n  nodes:\n    - B\n\nA\n  updates: [Cart]\n\nB\n';
+    expect(rulesOf(nonMember)).toContain('updates-undeclared-context');
+
+    const inherited = '---\nname: T\ninherits: [Cart]\n---\n\nA\n  updates: [Cart]\n';
+    expect(rulesOf(inherited)).not.toContain('updates-undeclared-context');
+
+    const throughHost =
+      '---\nname: T\n---\n\ncontext: Cart\n  nodes:\n    - A\n\nA\n  expand: Sub\n\ngraph: Sub\n  Inner\n    updates: [Cart]\n';
+    expect(rulesOf(throughHost)).not.toContain('updates-undeclared-context');
+
+    const hostNotAMember =
+      '---\nname: T\n---\n\ncontext: Cart\n  nodes:\n\nA\n  expand: Sub\n\ngraph: Sub\n  Inner\n    updates: [Cart]\n';
+    expect(rulesOf(hostNotAMember)).toContain('updates-undeclared-context');
+  });
+
+  it('reports a membership list that grants access to nothing', () => {
+    const missing = '---\nname: T\n---\n\ncontext: Cart\n  nodes:\n    - Nowhere\n\nA\n';
+    expect(rulesOf(missing)).toContain('context-member-not-found');
+
+    const nested = '---\nname: T\n---\n\ncontext: Cart\n  nodes:\n    - Inner\n\nA\n  expand: Sub\n\ngraph: Sub\n  Inner\n';
+    expect(rulesOf(nested)).toContain('context-member-in-graph-block');
+  });
+
+  it('reports a block that redeclares an inherited provider it cannot narrow', () => {
+    const text = '---\nname: T\ninherits: [Cart]\n---\n\ncontext: Cart\n  nodes:\n    - A\n\nA\n';
+    expect(rulesOf(text)).toContain('context-redeclares-inherited');
+  });
+
+  it('reports a provider with neither members nor an area, which nothing can read or draw', () => {
+    expect(rulesOf('---\nname: T\n---\n\ncontext: Cart\n  nodes:\n\nA\n')).toContain('context-region-has-no-geometry');
+    const drawn = '---\nname: T\n---\n\ncontext: Cart\n  pos: 0, 0, 400, 300\n  nodes:\n\nA\n';
+    expect(rulesOf(drawn)).not.toContain('context-region-has-no-geometry');
   });
 
   it('reports a duplicated edge', () => {
@@ -206,6 +273,78 @@ describe('semantic rules', () => {
     expect(rulesOf('---\nname: T\n---\n\nA\n  references:\n    - src/a.ts:90-12\n')).toContain(
       'reference-invalid-line-range',
     );
+  });
+});
+
+describe('cross-file context rules', () => {
+  function workspaceRules(files: { path: string; text: string }[], path: string): string[] {
+    return lintWorkspace({ files })
+      .find((file) => file.path === path)!
+      .diagnostics.map((diagnostic) => diagnostic.rule);
+  }
+
+  const child = (inherits: string) => ({
+    path: 'child.flow',
+    text: `---\nname: Child\ninherits: ${inherits}\n---\n\nInner\n  updates: [Auth]\n`,
+  });
+
+  const parent = (members: string) => ({
+    path: 'main.flow',
+    text: `---\nname: Main\n---\n\ncontext: Auth\n  nodes:\n${members}\n\nHost\n  expand: [Child](child.flow)\n`,
+  });
+
+  it('accepts an inherits generated from the parent block listing the host node', () => {
+    expect(workspaceRules([parent('    - Host'), child('[Auth]')], 'child.flow')).not.toContain(
+      'inherits-without-parent-membership',
+    );
+  });
+
+  it('reports an inherits the parent no longer backs with membership', () => {
+    expect(workspaceRules([parent('    - Other'), child('[Auth]')], 'main.flow')).toContain('context-member-not-found');
+    expect(workspaceRules([parent(''), child('[Auth]')], 'child.flow')).toContain(
+      'inherits-without-parent-membership',
+    );
+  });
+
+  // The direction no user can see: `inherits` is auto-generated, so a provider that never reached
+  // an expansion leaves nothing in the child to look wrong.
+  it('reports an expansion that never received the context its host can read', () => {
+    const files = [parent('    - Host'), { path: 'child.flow', text: '---\nname: Child\n---\n\nInner\n' }];
+    expect(workspaceRules(files, 'main.flow')).toContain('expansion-missing-inherits');
+    expect(workspaceRules([parent('    - Host'), child('[Auth]')], 'main.flow')).not.toContain(
+      'expansion-missing-inherits',
+    );
+  });
+
+  const grandchildFrom = (childInherits: string) => [
+    parent('    - Host'),
+    {
+      path: 'child.flow',
+      text: `---\nname: Child\n${childInherits}---\n\nInner\n  expand: [Deep](deep.flow)\n`,
+    },
+    { path: 'deep.flow', text: '---\nname: Deep\n---\n\nLeaf\n' },
+  ];
+
+  // An inherited provider is graph-wide in the file that receives it (§8.4), so it keeps
+  // propagating. Each file is measured against what its own children carry, which is what makes
+  // the check reach any depth without walking the tree — and what keeps one break from cascading.
+  it('follows inheritance to any depth, reporting the level where it breaks', () => {
+    expect(workspaceRules(grandchildFrom('inherits: [Auth]\n'), 'child.flow')).toContain(
+      'expansion-missing-inherits',
+    );
+    expect(workspaceRules(grandchildFrom(''), 'main.flow')).toContain('expansion-missing-inherits');
+    expect(workspaceRules(grandchildFrom(''), 'child.flow')).not.toContain('expansion-missing-inherits');
+  });
+
+  it('carries a provider into an expansion reached through a local graph block', () => {
+    const files = [
+      {
+        path: 'main.flow',
+        text: '---\nname: Main\n---\n\ncontext: Auth\n  nodes:\n    - Host\n\nHost\n  expand: Host\n\ngraph: Host\n  Deep\n    expand: [Child](child.flow)\n',
+      },
+      { path: 'child.flow', text: '---\nname: Child\n---\n\nLeaf\n' },
+    ];
+    expect(workspaceRules(files, 'main.flow')).toContain('expansion-missing-inherits');
   });
 });
 

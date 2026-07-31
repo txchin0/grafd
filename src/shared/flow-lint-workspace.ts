@@ -7,8 +7,13 @@
 // ExpansionLookup is upgraded to resolve external links against the workspace.
 
 import { byLine, warning, type Diagnostic, type FileDiagnostics } from './flow-diagnostics.js';
-import { parseExpandLink, resolveLinkPath } from './flow-format.js';
-import { localExpansionLookup, type ExpansionLookup } from './flow-lint-semantics.js';
+import { parseExpandLink, parseListValue, resolveLinkPath } from './flow-format.js';
+import {
+  inheritedContextNames,
+  localExpansionLookup,
+  readableContextsByNode,
+  type ExpansionLookup,
+} from './flow-lint-semantics.js';
 import { lintScannedFile } from './flow-lint.js';
 import { allScannedNodes, findProperty, rootScope, scanFlow, type ScannedFile, type ScannedNode } from './flow-scan.js';
 import { MANIFEST_FILE_NAME, defaultEntrypoint, type WorkspaceManifest } from './manifest.js';
@@ -46,6 +51,8 @@ export function lintWorkspace(input: WorkspaceLintInput): FileDiagnostics[] {
 
   reportMissingHandlerFiles(scans, report);
   reportExpansionCycles(scans, report);
+  reportOrphanedInheritance(scans, report);
+  reportMissingInheritance(scans, report);
   const manifestDiagnostics = reportUnreachableFiles(scans, input.manifest ?? null, report);
 
   for (const result of results) result.diagnostics.sort(byLine);
@@ -144,6 +151,99 @@ function reportExpansionCycles(scans: Map<string, ScannedFile>, report: Report):
   };
 
   for (const key of units.keys()) visit(key);
+}
+
+/** A node in one file whose `expand` link resolves to another file. */
+interface ExpansionHost {
+  path: string;
+  node: ScannedNode;
+  /** Whether it is declared at column 0, the only place a context block can name it. */
+  topLevel: boolean;
+}
+
+// `inherits` is auto-generated from membership in the parent (spec §8.4): a provider reaches only
+// the expansions of the nodes its block lists. An entry naming something the host node cannot read
+// is stale — the parent's region no longer covers it — and the editor will not regenerate it.
+function reportOrphanedInheritance(scans: Map<string, ScannedFile>, report: Report): void {
+  const hostsByTargetPath = expansionHostsByTargetPath(scans);
+  for (const [path, scan] of scans) {
+    const hosts = hostsByTargetPath.get(path) ?? [];
+    // A file nothing expands has no parent to check against; unreachable-flow-file covers it.
+    if (hosts.length === 0) continue;
+    for (const field of (scan.preamble?.fields ?? []).filter((entry) => entry.key === 'inherits')) {
+      for (const name of parseListValue(field.value)) {
+        if (hosts.some((host) => hostReadsContext(scans, host, name))) continue;
+        report(
+          path,
+          warning(
+            'inherits-without-parent-membership',
+            field.line,
+            `Nothing that expands this file can read "${name}": no \`context: ${name}\` block lists the node expanding it. Drag that node into the region, or drop this entry.`,
+          ),
+        );
+      }
+    }
+  }
+}
+
+// The other direction, and the one no user can see: `inherits` is auto-generated, so a provider
+// that failed to reach an expansion leaves nothing behind to notice. A node passes everything it
+// reads into its expansion, and an inherited provider is graph-wide in the file that receives it
+// (spec §8.4) — so this propagates to any depth without a walk, because each file is measured
+// against the `inherits` its own children actually carry. A break is therefore reported once, at
+// the level where it happens, instead of cascading down the subtree beneath it.
+function reportMissingInheritance(scans: Map<string, ScannedFile>, report: Report): void {
+  for (const [path, scan] of scans) {
+    const readable = readableContextsByNode(scan);
+    for (const node of allScannedNodes(scan)) {
+      const expand = findProperty(node, 'expand');
+      const link = parseExpandLink(expand?.value);
+      // A local `graph:` block has no preamble, so there is nowhere for `inherits` to live; those
+      // nodes read through their host instead, which readableContextsByNode already resolves.
+      if (!expand || !link) continue;
+      const target = scans.get(resolveLinkPath(path, link.path));
+      if (!target) continue;
+      const alreadyInherited = new Set(inheritedContextNames(target));
+      for (const name of readable.get(node) ?? []) {
+        if (alreadyInherited.has(name)) continue;
+        report(
+          path,
+          warning(
+            'expansion-missing-inherits',
+            expand.line,
+            `"${node.name}" can read context "${name}", so its expansion can too, but "${link.path}" does not inherit it. \`inherits\` is auto-generated: reading that file alone, an agent never learns "${name}" is available.`,
+          ),
+        );
+      }
+    }
+  }
+}
+
+function hostReadsContext(scans: Map<string, ScannedFile>, host: ExpansionHost, name: string): boolean {
+  const parent = scans.get(host.path);
+  // A host inside a `graph:` block reads through the node expanding that block, which this walk
+  // does not follow; treat it as answered rather than guess.
+  if (!parent || !host.topLevel) return true;
+  const listedInBlock = parent.contexts.some(
+    (block) => block.name === name && block.members.some((member) => member.name === host.node.name),
+  );
+  return listedInBlock || inheritedContextNames(parent).includes(name);
+}
+
+function expansionHostsByTargetPath(scans: Map<string, ScannedFile>): Map<string, ExpansionHost[]> {
+  const hostsByTargetPath = new Map<string, ExpansionHost[]>();
+  for (const [path, scan] of scans) {
+    const topLevelNodes = new Set(rootScope(scan)?.nodes ?? []);
+    for (const node of allScannedNodes(scan)) {
+      const link = parseExpandLink(findProperty(node, 'expand')?.value);
+      if (!link) continue;
+      const targetPath = resolveLinkPath(path, link.path);
+      const hosts = hostsByTargetPath.get(targetPath) ?? [];
+      hosts.push({ path, node, topLevel: topLevelNodes.has(node) });
+      hostsByTargetPath.set(targetPath, hosts);
+    }
+  }
+  return hostsByTargetPath;
 }
 
 function reportUnreachableFiles(
