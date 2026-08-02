@@ -493,11 +493,20 @@ function liveNode(node: FlowNode): FlowNode {
 }
 
 // A node added inside a frame has no locus until frame geometry is rebuilt; laying out now
-// keeps the editor from anchoring to subgraph coordinates read as world ones.
+// keeps the inline title editor from anchoring to subgraph coordinates read as world ones.
 function focusNewNode(node: FlowNode): void {
   view.refreshDisplayGeometry();
   view.select(node);
-  editors.openNodeEditor(node, { focusTitle: true });
+  editors.openTitleEditor(node);
+}
+
+// Inline expansion animates the frame open or shut; wait for that layout to settle before
+// anchoring the title overlay (same delay convertSelectionToSubgraph already used for the
+// node editor).
+function focusNodeTitleAfterLayout(node: FlowNode): void {
+  view.refreshDisplayGeometry();
+  view.select(node);
+  setTimeout(() => editors.openTitleEditor(liveNode(node)), TOGGLE_DURATION_MS);
 }
 
 function commitCreatedNodeMembership(owner: DocumentOwner, node: FlowNode): void {
@@ -565,8 +574,7 @@ function convertSelectionToSubgraph(): void {
     }
   });
   expansions.collapseFrom(host!);
-  view.setSelection([host!]);
-  setTimeout(() => editors.openNodeEditor(host!, { focusTitle: true }), TOGGLE_DURATION_MS);
+  focusNodeTitleAfterLayout(host!);
 }
 
 // A plain node becomes a subgraph host by gaining a local `graph:` block of its own name — the
@@ -1205,8 +1213,8 @@ function addEdgeToExistingNode(fromNode: FlowNode, targetName: string, innerName
 }
 
 // Invents the node the edge points at. A ghost already carries the name the document asked for,
-// so only a node conjured out of empty canvas still needs one — and gets the title editor
-// opened on it rather than the edge editor.
+// so only a node conjured out of empty canvas still needs one — and gets inline title editing
+// rather than the edge editor.
 function addEdgeToNewNode(fromNode: FlowNode, rect: Rect, ghostName: string | null): void {
   const flow = openFlow;
   if (!flow) return;
@@ -1220,8 +1228,7 @@ function addEdgeToNewNode(fromNode: FlowNode, rect: Rect, ghostName: string | nu
   });
 
   if (!ghostName && createdNode) {
-    view.select(createdNode);
-    editors.openNodeEditor(createdNode, { focusTitle: true });
+    focusNewNode(createdNode);
     return;
   }
   editCreatedEdge(createdSpec);
