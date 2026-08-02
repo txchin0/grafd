@@ -8,7 +8,7 @@
 
 import type { FlowNode } from '../shared/flow-format.js';
 import type { CanvasView } from './canvas/canvas-view.js';
-import { HAND_FONT } from './canvas/node-metrics.js';
+import { handFontAt } from './canvas/node-metrics.js';
 
 export interface TitleEditorContext {
   view: CanvasView;
@@ -86,7 +86,7 @@ export function createTitleEditor(context: TitleEditorContext): TitleEditor {
     input.style.top = `${Math.round(band.y + band.h / 2 - height / 2)}px`;
     input.style.width = `${Math.round(width)}px`;
     input.style.height = `${Math.round(height)}px`;
-    input.style.font = `600 ${fontPx.toFixed(1)}px ${HAND_FONT}`;
+    input.style.font = handFontAt(fontPx, 600);
     input.style.textAlign = placement.align;
     input.style.color = placement.color;
   }

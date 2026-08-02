@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_CANVAS_FONT,
   DEFAULT_ROUGHNESS,
   MANIFEST_FORMAT,
   MAX_ROUGHNESS,
@@ -19,6 +20,7 @@ describe('parseManifest', () => {
     manifest.ui.cameras['main.flow'] = { x: 10, y: -20, scale: 1.5 };
     manifest.ui.expansions['main.flow'] = ['node-a', 'node-b'];
     manifest.display.roughness = 2.5;
+    manifest.display.font = 'playpen';
     expect(parseManifest(serializeManifest(manifest))).toEqual(manifest);
   });
 
@@ -34,7 +36,7 @@ describe('parseManifest', () => {
     expect(parsed).toEqual({
       format: MANIFEST_FORMAT,
       entrypoint: null,
-      display: { roughness: DEFAULT_ROUGHNESS },
+      display: { roughness: DEFAULT_ROUGHNESS, font: DEFAULT_CANVAS_FONT },
       ui: { activeFlow: null, cameras: { 'b.flow': { x: 1, y: 2, scale: 3 } }, expansions: {} },
     });
   });
@@ -49,6 +51,14 @@ describe('parseManifest', () => {
     // JSON has no literal for these, so they serialize to null and must not survive as one.
     expect(roughnessOf({ roughness: Number.NaN })).toBe(DEFAULT_ROUGHNESS);
     expect(roughnessOf({ roughness: Number.POSITIVE_INFINITY })).toBe(DEFAULT_ROUGHNESS);
+  });
+
+  it('defaults font when it is missing or not a known id', () => {
+    const fontOf = (display: unknown) => parseManifest(JSON.stringify({ display }))?.display.font;
+    expect(fontOf(undefined)).toBe(DEFAULT_CANVAS_FONT);
+    expect(fontOf({})).toBe(DEFAULT_CANVAS_FONT);
+    expect(fontOf({ font: 'comic-sans' })).toBe(DEFAULT_CANVAS_FONT);
+    expect(fontOf({ font: 'playpen' })).toBe('playpen');
   });
 
   it('clamps roughness into the supported range', () => {

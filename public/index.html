@@ -6,6 +6,7 @@
   <title>Graf — .flow canvas</title>
   <link rel="icon" href="data:," />
   <link rel="preload" href="fonts/HankenGrotesk-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/PlaypenSans-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="themes.css" />
   <link rel="stylesheet" href="style.css" />
   <!-- Applies the stored theme and sidebar state before first paint. main.js applies both too,
@@ -230,6 +231,9 @@
             </select>
           </label>
           <h3 class="settings-group-title">This workspace</h3>
+          <label>Canvas font
+            <select id="pref-canvas-font"></select>
+          </label>
           <label class="slider-row">Sketch roughness
             <input type="range" id="pref-roughness" min="0" max="10" step="0.1" />
             <output id="pref-roughness-value"></output>

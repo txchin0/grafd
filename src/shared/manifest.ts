@@ -16,6 +16,18 @@ export const DEFAULT_ROUGHNESS = 1;
 export const MIN_ROUGHNESS = 0;
 export const MAX_ROUGHNESS = 10;
 
+export const CANVAS_FONTS = [
+  { id: 'system', label: 'System' },
+  { id: 'playpen', label: 'Playpen Sans' },
+] as const;
+
+export type CanvasFontId = (typeof CANVAS_FONTS)[number]['id'];
+export const DEFAULT_CANVAS_FONT: CanvasFontId = 'system';
+
+export function isCanvasFontId(value: unknown): value is CanvasFontId {
+  return CANVAS_FONTS.some((font) => font.id === value);
+}
+
 export interface CameraState {
   x: number;
   y: number;
@@ -25,6 +37,8 @@ export interface CameraState {
 export interface DisplaySettings {
   // The base every canvas element's rough.js roughness is scaled by. 0 draws clean lines.
   roughness: number;
+  // Which typeface the canvas draws node and edge labels in.
+  font: CanvasFontId;
 }
 
 export interface WorkspaceManifest {
@@ -42,7 +56,7 @@ export function emptyManifest(): WorkspaceManifest {
   return {
     format: MANIFEST_FORMAT,
     entrypoint: null,
-    display: { roughness: DEFAULT_ROUGHNESS },
+    display: { roughness: DEFAULT_ROUGHNESS, font: DEFAULT_CANVAS_FONT },
     ui: { activeFlow: null, cameras: {}, expansions: {} },
   };
 }
@@ -77,10 +91,15 @@ export function parseManifest(text: string | null | undefined): WorkspaceManifes
 }
 
 function readDisplay(raw: unknown): DisplaySettings {
-  if (typeof raw !== 'object' || raw == null) return { roughness: DEFAULT_ROUGHNESS };
-  const { roughness } = raw as Partial<DisplaySettings>;
-  if (typeof roughness !== 'number' || !Number.isFinite(roughness)) return { roughness: DEFAULT_ROUGHNESS };
-  return { roughness: clampRoughness(roughness) };
+  const defaults = { roughness: DEFAULT_ROUGHNESS, font: DEFAULT_CANVAS_FONT };
+  if (typeof raw !== 'object' || raw == null) return defaults;
+  const record = raw as Partial<DisplaySettings>;
+  return {
+    roughness: typeof record.roughness === 'number' && Number.isFinite(record.roughness)
+      ? clampRoughness(record.roughness)
+      : defaults.roughness,
+    font: isCanvasFontId(record.font) ? record.font : defaults.font,
+  };
 }
 
 function readCameras(raw: unknown): Record<string, CameraState> {

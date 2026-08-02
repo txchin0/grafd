@@ -6,8 +6,7 @@
 // the font strings and the wrapping in one place is what stops them from diverging.
 
 import type { FlowNode, Rect } from '../../shared/flow-format.js';
-
-export const HAND_FONT = '"Segoe Print", "Comic Sans MS", cursive';
+import { handFontFamily } from '../canvas-font.js';
 
 export const NODE_TEXT_SIDE_PADDING = 13;
 export const TITLE_FONT_PX = 15;
@@ -30,9 +29,22 @@ const DESCRIPTION_MAX_LINES = 4;
 const TITLE_DESCRIPTION_GAP = 6;
 const FRAME_TITLE_HIT_PADDING = 6;
 
-export const TITLE_FONT = `600 ${TITLE_FONT_PX}px ${HAND_FONT}`;
-export const DESCRIPTION_FONT = `${DESCRIPTION_FONT_PX}px ${HAND_FONT}`;
-export const FRAME_TITLE_FONT = `600 ${FRAME_TITLE_FONT_PX}px ${HAND_FONT}`;
+export function titleFont(): string {
+  return `600 ${TITLE_FONT_PX}px ${handFontFamily()}`;
+}
+
+export function descriptionFont(): string {
+  return `${DESCRIPTION_FONT_PX}px ${handFontFamily()}`;
+}
+
+export function frameTitleFont(): string {
+  return `600 ${FRAME_TITLE_FONT_PX}px ${handFontFamily()}`;
+}
+
+export function handFontAt(sizePx: number, weight?: number | string): string {
+  const size = `${sizePx}px ${handFontFamily()}`;
+  return weight == null ? size : `${weight} ${size}`;
+}
 
 export interface NodeTextLayout {
   titleLines: string[];
@@ -73,9 +85,9 @@ export function layOutNodeText(
 ): NodeTextLayout {
   const maxWidth = rect.w - 2 * NODE_TEXT_SIDE_PADDING;
 
-  ctx.font = TITLE_FONT;
+  ctx.font = titleFont();
   const titleLines = wrapText(ctx, node.name, maxWidth, TITLE_MAX_LINES);
-  ctx.font = DESCRIPTION_FONT;
+  ctx.font = descriptionFont();
   const descriptionLineBudget = Math.max(
     0,
     Math.floor((rect.h - TITLE_LINE_HEIGHT - titleLines.length * TITLE_LINE_HEIGHT) / DESCRIPTION_LINE_HEIGHT),
@@ -116,7 +128,7 @@ export function regionLabelBand(ctx: CanvasRenderingContext2D, name: string, reg
 }
 
 function headerLabelBand(ctx: CanvasRenderingContext2D, text: string, rect: Rect, rightInset: number): Rect {
-  ctx.font = FRAME_TITLE_FONT;
+  ctx.font = frameTitleFont();
   const available = rect.w - rightInset;
   const width = Math.min(available, ctx.measureText(text).width) + 2 * FRAME_TITLE_HIT_PADDING;
   return {

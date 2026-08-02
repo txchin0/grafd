@@ -26,17 +26,17 @@ import type { ExpansionLayer, FrameExpansion } from './expansion.js';
 import { BADGE_DIAMETER, BADGE_SYMBOLS, nodeBadges } from './node-badges.js';
 import {
   DESCRIPTION_FIRST_LINE_NUDGE,
-  DESCRIPTION_FONT,
   DESCRIPTION_LINE_HEIGHT,
-  FRAME_TITLE_FONT,
   FRAME_TITLE_LEFT,
   FRAME_TITLE_MIDDLE_Y,
   FRAME_TITLE_RIGHT_INSET,
-  HAND_FONT,
-  TITLE_FONT,
   TITLE_LINE_HEIGHT,
+  descriptionFont,
+  frameTitleFont,
+  handFontAt,
   layOutNodeText,
   regionLabelBand,
+  titleFont,
 } from './node-metrics.js';
 
 type RoughCanvas = ReturnType<typeof rough.canvas>;
@@ -165,7 +165,7 @@ export class ScenePainter {
   private drawRegionLabel(name: string, rect: Rect): void {
     const { ctx } = this;
     const band = regionLabelBand(ctx, name, rect);
-    ctx.font = FRAME_TITLE_FONT;
+    ctx.font = frameTitleFont();
     ctx.fillStyle = canvasPalette.regionStroke;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
@@ -241,7 +241,7 @@ export class ScenePainter {
 
   private drawEdgeLabelPill(text: string, anchor: Point, isError: boolean): Rect {
     const { ctx } = this;
-    ctx.font = `12px ${HAND_FONT}`;
+    ctx.font = handFontAt(12);
     const paddingX = 7;
     const rect = {
       x: anchor.x - ctx.measureText(text).width / 2 - paddingX,
@@ -263,7 +263,7 @@ export class ScenePainter {
   // readable on the canvas without opening the edge editor.
   private drawEdgeDataFields(fields: EdgeDataField[], centerX: number, top: number): Rect {
     const { ctx } = this;
-    ctx.font = `10.5px ${HAND_FONT}`;
+    ctx.font = handFontAt(10.5);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
 
@@ -345,7 +345,7 @@ export class ScenePainter {
     });
 
     if (!this.titleIsHidden(node)) {
-      ctx.font = FRAME_TITLE_FONT;
+      ctx.font = frameTitleFont();
       ctx.fillStyle = canvasPalette.expandStroke;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
@@ -369,7 +369,7 @@ export class ScenePainter {
 
   private drawEmptySubgraphHint(): void {
     const { ctx } = this;
-    ctx.font = `13px ${HAND_FONT}`;
+    ctx.font = handFontAt(13);
     ctx.fillStyle = canvasPalette.muted;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -385,7 +385,7 @@ export class ScenePainter {
 
     let lineY = layout.firstLineMiddleY;
     if (!this.titleIsHidden(node)) {
-      ctx.font = TITLE_FONT;
+      ctx.font = titleFont();
       ctx.fillStyle = canvasPalette.ink;
       for (const line of layout.titleLines) {
         ctx.fillText(line, centerX, lineY, layout.maxWidth);
@@ -397,7 +397,7 @@ export class ScenePainter {
 
     if (layout.descriptionLines.length) {
       lineY += DESCRIPTION_FIRST_LINE_NUDGE;
-      ctx.font = DESCRIPTION_FONT;
+      ctx.font = descriptionFont();
       ctx.fillStyle = canvasPalette.muted;
       for (const line of layout.descriptionLines) {
         ctx.fillText(line, centerX, lineY, layout.maxWidth);
@@ -412,19 +412,19 @@ export class ScenePainter {
     ctx.textBaseline = 'middle';
 
     if (traits?.entry) {
-      ctx.font = `11px ${HAND_FONT}`;
+      ctx.font = handFontAt(11);
       ctx.fillStyle = canvasPalette.entryStroke;
       ctx.textAlign = 'left';
       ctx.fillText('▶', x + 8, y + 14);
     }
     if (traits?.hasErrorHandler) {
-      ctx.font = `12px ${HAND_FONT}`;
+      ctx.font = handFontAt(12);
       ctx.fillStyle = canvasPalette.error;
       ctx.textAlign = 'right';
       ctx.fillText('⚠', x + w - 8, y + h - 12);
     }
     if (traits?.updates.length) {
-      ctx.font = `10.5px ${HAND_FONT}`;
+      ctx.font = handFontAt(10.5);
       ctx.fillStyle = canvasPalette.updates;
       ctx.textAlign = 'left';
       ctx.fillText(`↺ ${traits.updates.join(', ')}`, x + 8, y + h - 12, w - 30);
@@ -439,7 +439,7 @@ export class ScenePainter {
     if (!traits?.contexts.length) return;
     const { ctx } = this;
     const passesDown = traits.expand != null;
-    ctx.font = `10.5px ${HAND_FONT}`;
+    ctx.font = handFontAt(10.5);
     ctx.fillStyle = canvasPalette.regionStroke;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
@@ -460,7 +460,7 @@ export class ScenePainter {
         strokeWidth: 1.3,
         roughness: this.roughnessFor(BADGE_ROUGHNESS),
       });
-      ctx.font = `12px ${HAND_FONT}`;
+      ctx.font = handFontAt(12);
       ctx.fillStyle = canvasPalette.expandStroke;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -479,11 +479,11 @@ export class ScenePainter {
     ctx.restore();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = `600 14px ${HAND_FONT}`;
+    ctx.font = handFontAt(14, 600);
     ctx.fillStyle = canvasPalette.ghost;
     ctx.fillText(ghost.name, x + w / 2, y + h / 2 - 8, w - 20);
     if (clickable) {
-      ctx.font = `10.5px ${HAND_FONT}`;
+      ctx.font = handFontAt(10.5);
       ctx.fillText('click to create', x + w / 2, y + h / 2 + 14, w - 20);
     }
   }

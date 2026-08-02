@@ -12,9 +12,12 @@ import {
   chooseStartupFlow,
   clampRoughness,
   defaultEntrypoint,
+  DEFAULT_CANVAS_FONT,
   emptyManifest,
+  isCanvasFontId,
   parseManifest,
   serializeManifest,
+  type CanvasFontId,
   type WorkspaceManifest,
 } from '../shared/manifest.js';
 import type { View } from './canvas/canvas-view.js';
@@ -89,6 +92,15 @@ export function createWorkspaceUiState(options: WorkspaceUiStateOptions) {
 
     setRoughness(value: number): void {
       manifest.display.roughness = clampRoughness(value);
+      scheduleSave();
+    },
+
+    font(): CanvasFontId {
+      return manifest.display.font;
+    },
+
+    setFont(value: CanvasFontId): void {
+      manifest.display.font = isCanvasFontId(value) ? value : DEFAULT_CANVAS_FONT;
       scheduleSave();
     },
 

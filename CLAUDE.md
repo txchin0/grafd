@@ -45,8 +45,8 @@ Layout lives inside the `.flow` file itself, via the editor-owned properties `id
 the spec no longer describes one.
 
 The one thing outside the spec is that each workspace has a `graf.manifest.json` at its root
-(`src/shared/manifest.ts`): the workspace `entrypoint`, its `display` settings (the base
-rough.js roughness the canvas draws with), plus UI state (active flow, per-flow cameras). It
+(`src/shared/manifest.ts`): the workspace `entrypoint`, its `display` settings (canvas
+roughness and font), plus UI state (active flow, per-flow cameras). It
 is editor-owned, ignored by agents apart from `entrypoint`, and travels through the same
 read/write path as .flow files.
 

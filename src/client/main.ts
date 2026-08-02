@@ -50,6 +50,7 @@ import { CanvasView, type ContextTarget, type EdgeDrop, type Tool, type View } f
 import { createContextMenu, type MenuItem } from './context-menu.js';
 import type { Modal } from './modal.js';
 import { createPreferencesDialog } from './preferences-dialog.js';
+import { applyCanvasFont } from './canvas-font.js';
 import { loadPreferences, savePreferences, type Preferences } from './preferences.js';
 import type { LinkContext } from './reference-link.js';
 import { applyTheme } from './theme.js';
@@ -1427,8 +1428,9 @@ function applySidebarVisibility(collapsed: boolean): void {
 
 // Unlike the user-level preferences, the workspace's display settings are read back from the
 // manifest the editor already has open rather than from storage of their own.
-function applyWorkspaceDisplay(): void {
+async function applyWorkspaceDisplay(): Promise<void> {
   view.baseRoughness = uiState.roughness();
+  await applyCanvasFont(uiState.font());
   view.requestRender();
 }
 
@@ -1436,7 +1438,12 @@ const preferencesDialog = createPreferencesDialog(applyPreferences, {
   roughness: () => uiState.roughness(),
   setRoughness: (value) => {
     uiState.setRoughness(value);
-    applyWorkspaceDisplay();
+    void applyWorkspaceDisplay();
+  },
+  font: () => uiState.font(),
+  setFont: (value) => {
+    uiState.setFont(value);
+    void applyWorkspaceDisplay();
   },
 });
 
@@ -1693,7 +1700,7 @@ async function switchWorkspace(next: Workspace, { preferHash = false } = {}): Pr
     workspaceFiles = [];
   }
   uiState.adopt(await next.readFile(MANIFEST_FILE_NAME), workspaceFiles);
-  applyWorkspaceDisplay();
+  await applyWorkspaceDisplay();
   renderFileList();
   renderWorkspaceBar();
 

@@ -3,8 +3,10 @@
 // immediately and reported to the app, so there is no apply/cancel step.
 
 import { createModal, type Modal } from './modal.js';
+import { CANVAS_FONTS } from './canvas-font.js';
 import { loadPreferences, savePreferences, type Preferences } from './preferences.js';
 import type { EditorLinkScheme } from './reference-link.js';
+import { isCanvasFontId, type CanvasFontId } from '../shared/manifest.js';
 import { THEMES, type ThemeId } from './theme.js';
 
 // Workspace-scoped settings live in graf.manifest.json, so the dialog reads and writes them
@@ -12,6 +14,8 @@ import { THEMES, type ThemeId } from './theme.js';
 export interface WorkspaceDisplaySettings {
   roughness(): number;
   setRoughness(value: number): void;
+  font(): CanvasFontId;
+  setFont(value: CanvasFontId): void;
 }
 
 export function createPreferencesDialog(
@@ -23,6 +27,7 @@ export function createPreferencesDialog(
   const openSubgraphOnDoubleClick = document.getElementById('pref-open-subgraph-dblclick') as HTMLInputElement;
   const editorLinkScheme = document.getElementById('pref-editor-link') as HTMLSelectElement;
   const theme = document.getElementById('pref-theme') as HTMLSelectElement;
+  const canvasFont = document.getElementById('pref-canvas-font') as HTMLSelectElement;
   const roughness = document.getElementById('pref-roughness') as HTMLInputElement;
   const roughnessValue = document.getElementById('pref-roughness-value') as HTMLOutputElement;
   const closeButton = document.getElementById('preferences-close') as HTMLButtonElement;
@@ -30,6 +35,9 @@ export function createPreferencesDialog(
   // Generated from the registry so that adding a theme never means editing this dialog.
   theme.append(
     ...THEMES.map((descriptor) => new Option(descriptor.label, descriptor.id)),
+  );
+  canvasFont.append(
+    ...CANVAS_FONTS.map((descriptor) => new Option(descriptor.label, descriptor.id)),
   );
 
   // Preferences the dialog has no control for — the sidebar's collapsed state, toggled from the
@@ -57,9 +65,15 @@ export function createPreferencesDialog(
     workspaceDisplay.setRoughness(value);
   }
 
+  function applyWorkspaceFont(): void {
+    if (!isCanvasFontId(canvasFont.value)) return;
+    workspaceDisplay.setFont(canvasFont.value);
+  }
+
   for (const control of [showCanvasGrid, openSubgraphOnDoubleClick, editorLinkScheme, theme]) {
     control.addEventListener('change', applyChange);
   }
+  canvasFont.addEventListener('change', applyWorkspaceFont);
   roughness.addEventListener('input', applyRoughness);
   closeButton.addEventListener('click', modal.close);
 
@@ -71,6 +85,7 @@ export function createPreferencesDialog(
       openSubgraphOnDoubleClick.checked = stored.openSubgraphOnDoubleClick;
       editorLinkScheme.value = stored.editorLinkScheme;
       theme.value = stored.theme;
+      canvasFont.value = workspaceDisplay.font();
       const workspaceRoughness = workspaceDisplay.roughness();
       roughness.value = String(workspaceRoughness);
       roughnessValue.value = formatRoughness(workspaceRoughness);

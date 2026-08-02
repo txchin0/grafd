@@ -7,6 +7,14 @@
 }
 
 @font-face {
+  font-family: "Playpen Sans";
+  src: url("fonts/PlaypenSans-Variable.woff2") format("woff2-variations");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
   font-family: "Hanken Grotesk Fallback";
   src: local("Segoe UI"), local("Arial");
   size-adjust: 100.06%;
