@@ -416,7 +416,7 @@ html, body {
 #title-editor {
   position: absolute;
   z-index: 11;
-  background: var(--title-editor-bg);
+  background: transparent;
   border: none;
   padding: 0 4px;
   outline: none;
@@ -424,7 +424,7 @@ html, body {
 }
 
 /* Names a region in place, over the label the canvas draws at its top-left corner. The reason
-   line only appears when a name is refused, so the box stays the size of what it edits. */
+   line only appears when a name is refused. */
 #region-name-editor {
   position: absolute;
   z-index: 11;
@@ -434,12 +434,11 @@ html, body {
 }
 
 #region-name-input {
-  background: var(--field-bg);
-  border: 1px solid var(--canvas-region-stroke);
-  border-radius: 4px;
-  color: var(--text);
-  padding: 2px 6px;
+  background: transparent;
+  border: none;
+  padding: 0 4px;
   outline: none;
+  line-height: 1;
 }
 
 #region-name-error {

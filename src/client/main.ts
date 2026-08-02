@@ -66,7 +66,6 @@ import {
   type TrailEntry,
 } from './canvas/dive-navigation.js';
 import { createEditors, type Editors } from './editors.js';
-import { createRegionNameEditor } from './region-name-editor.js';
 import { EditSession, type CommitTiming } from './edit-session.js';
 import { MANIFEST_FILE_NAME } from '../shared/manifest.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
@@ -1306,6 +1305,7 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   completeEdge,
   editEdge: (edge) => editors.openEdgeEditor(edge),
   editNodeTitle: (node) => editors.openTitleEditor(node),
+  editRegionTitle: (region) => editors.openRegionNameEditor(region),
   openExpand,
   toggleExpand: toggleInlineExpansion,
   materializeGhost: (ghost) => {
@@ -1314,23 +1314,13 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   contextMenu: openCanvasContextMenu,
   viewChanged: () => {
     editors.reposition();
-    regionNameEditor.reposition();
     if (openFlow) scheduleManifestSave();
   },
   afterRender: () => {
     editors.reposition();
-    regionNameEditor.reposition();
     elements.zoomLevel.textContent = `${Math.round(view.view.scale * 100)}%`;
   },
 }, expansions);
-
-// Names a region over the label the canvas draws for it. Built beside the node editors and, like
-// them, reaching the document only through callbacks defined here.
-const regionNameEditor = createRegionNameEditor({
-  view,
-  rectOf: (region) => view.regionRectOfBlock(region.block),
-  renameRegion: (region, name) => contextOps.renameRegion(region, name),
-});
 
 const editors: Editors = createEditors({
   view,
@@ -1370,6 +1360,7 @@ const editors: Editors = createEditors({
   deleteNodes: deleteNodesAction,
   innerTargetOptions: (edge) => innerOptions(edge, 'target'),
   innerSourceOptions: (edge) => innerOptions(edge, 'source'),
+  renameRegion: (region, name) => contextOps.renameRegion(region, name),
 });
 
 contextOps = createContextOrchestration({
@@ -1382,7 +1373,7 @@ contextOps = createContextOrchestration({
   suspendAction: () => session.suspendAction(),
   selectRegion: (name) => view.selectRegion(name),
   clearSelection: () => view.clearSelection(),
-  openRegionNameEditor: (region, rename) => regionNameEditor.open(region, rename),
+  openRegionNameEditor: (region, rename) => editors.openRegionNameEditor(region, rename),
   openRegionEditor: (region) => editors.openRegionEditor(region),
   openConfirmMenu: (items, at) => contextMenu.open(items, at),
   inherits: {

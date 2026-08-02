@@ -26,9 +26,6 @@
   --row-hover: #262a31;
   --row-active: #2b3644;
   --field-bg: #171a1f;
-  /* The opaque twin of --canvas-node-fill: the inline title editor sits on the canvas in
-     place of a node's drawn title and must not let the node's fill show through. */
-  --title-editor-bg: #242830;
   --scrim: rgba(0, 0, 0, 0.55);
   --shadow-floating: 0 8px 28px rgba(0, 0, 0, 0.45);
   --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.55);
@@ -76,7 +73,6 @@
   --row-hover: #f0f0f4;
   --row-active: #e4e6f1;
   --field-bg: #ffffff;
-  --title-editor-bg: #ffffff;
   --scrim: rgba(0, 0, 0, 0.3);
   --shadow-floating: 0 8px 28px rgba(0, 0, 0, 0.12);
   --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.18);

@@ -229,6 +229,7 @@ export interface CanvasActions {
   completeEdge(fromNode: FlowNode, drop: EdgeDrop): void;
   editEdge(edge: ModelEdge): void;
   editNodeTitle(node: FlowNode): void;
+  editRegionTitle(region: RegionTarget): void;
   openExpand(node: FlowNode): void;
   toggleExpand(node: FlowNode): void;
   materializeGhost(ghost: GhostNode): void;
@@ -245,6 +246,13 @@ export interface TitlePlacement {
   color: string;
   screenScale: number;
 }
+
+export interface HiddenCanvasTitles {
+  nodeId: string | null;
+  regionName: string | null;
+}
+
+export const NO_HIDDEN_TITLES: HiddenCanvasTitles = { nodeId: null, regionName: null };
 
 export type ContextTarget =
   | { kind: 'node'; node: FlowNode }
@@ -359,7 +367,7 @@ export class CanvasView {
   gridIsVisible = true;
   doubleClickOpensSubgraph = true;
   baseRoughness = DEFAULT_ROUGHNESS;
-  titleEditingNodeId: string | null = null;
+  readonly hiddenTitles: HiddenCanvasTitles = { nodeId: null, regionName: null };
 
   private hoverNode: FlowNode | null = null;
   private hoverPoint: Point | null = null;
@@ -704,7 +712,7 @@ export class CanvasView {
         pixelRatio * view.scale, 0, 0, pixelRatio * view.scale,
         pixelRatio * view.x, pixelRatio * view.y,
       );
-      this.scenePainter(null).drawScene(this.model);
+      this.scenePainter(NO_HIDDEN_TITLES).drawScene(this.model);
     } finally {
       this.target = previousTarget;
       this.edgeGeometry = previousEdgeGeometry;
@@ -1191,7 +1199,7 @@ export class CanvasView {
     } else if (gesture.type === 'resize') {
       this.actions.moveCommitted([gesture.node]);
     } else if (gesture.type === 'region-move') {
-      this.commitRegionMove(gesture);
+      this.commitRegionMove(gesture, event.detail);
     } else if (gesture.type === 'region-resize') {
       this.commitRegionResize(gesture);
     } else if (gesture.type === 'edge') {
@@ -1206,9 +1214,12 @@ export class CanvasView {
 
   // A press that selected a region without dragging it has nothing to write; it was a click, and
   // a click on a region opens its editor the way a click on a node opens that node's.
-  private commitRegionMove(gesture: Extract<Gesture, { type: 'region-move' }>): void {
+  private commitRegionMove(
+    gesture: Extract<Gesture, { type: 'region-move' }>,
+    clickCount: number,
+  ): void {
     if (!gesture.moved) {
-      this.actions.regionClicked(this.regionTargetOf(gesture.context));
+      if (clickCount < 2) this.actions.regionClicked(this.regionTargetOf(gesture.context));
       return;
     }
     const frame = this.regionRectOfContext(gesture.context);
@@ -1374,6 +1385,12 @@ export class CanvasView {
     if (titledNode) {
       this.select(titledNode);
       this.actions.editNodeTitle(titledNode);
+      return;
+    }
+    const titledRegion = this.hitRegionTitle(world);
+    if (titledRegion) {
+      this.selectRegion(titledRegion.block.name);
+      this.actions.editRegionTitle(this.regionTargetOf(titledRegion));
       return;
     }
     const subgraph = this.subgraphToOpenAt(world);
@@ -1552,6 +1569,15 @@ export class CanvasView {
     );
   }
 
+  // Narrows a region hit to its name label, so double-clicking the border keeps its existing
+  // meaning and only the painted title opens inline rename.
+  private hitRegionTitle(world: Point): ModelContext | null {
+    const region = this.hitRegion(world);
+    if (!region) return null;
+    const placement = this.regionTitlePlacementOf(region);
+    return placement && rectContains(placement.rect, world) ? region : null;
+  }
+
   private hitBadge(world: Point): BadgeHit | null {
     return this.hitBadgeIn(this.model, world);
   }
@@ -1619,14 +1645,14 @@ export class CanvasView {
     });
   }
 
-  private scenePainter(hiddenTitleNodeId: string | null): ScenePainter {
+  private scenePainter(hiddenTitles: HiddenCanvasTitles): ScenePainter {
     return new ScenePainter({
       regionRects: this.regionRectsForPainting(),
       ctx: this.ctx,
       rough: this.rough,
       baseRoughness: this.baseRoughness,
       selectedEdge: this.selectedEdge,
-      hiddenTitleNodeId,
+      hiddenTitles,
       edgeGeometry: this.edgeGeometry,
       expansions: this.expansionLayer,
     });
@@ -1635,7 +1661,7 @@ export class CanvasView {
   private render(): void {
     const { ctx } = this;
     this.edgeGeometry.clear();
-    const painter = this.scenePainter(this.titleEditingNodeId);
+    const painter = this.scenePainter(this.hiddenTitles);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
@@ -1779,6 +1805,25 @@ export class CanvasView {
       color: expansion ? canvasPalette.expandStroke : canvasPalette.ink,
       screenScale: this.screenScaleOf(node),
     };
+  }
+
+  // World-space rect and typography of a region's name label as drawn, or null when the region
+  // has no geometry on the canvas.
+  regionTitlePlacementOf(context: ModelContext): TitlePlacement | null {
+    const rect = this.regionRectOfContext(context);
+    if (!rect) return null;
+    return {
+      rect: regionLabelBand(this.ctx, context.block.name, rect),
+      fontPx: FRAME_TITLE_FONT_PX,
+      align: 'left',
+      color: canvasPalette.regionStroke,
+      screenScale: this.view.scale,
+    };
+  }
+
+  regionTitlePlacementOfTarget(region: RegionTarget): TitlePlacement | null {
+    const context = this.model.contexts.find((candidate) => candidate.block === region.block);
+    return context ? this.regionTitlePlacementOf(context) : null;
   }
 
   private drawSelectionDecorations(): void {

@@ -20,6 +20,7 @@ import * as FlowDoc from './flow-doc.js';
 import type { ModelEdge } from './flow-doc.js';
 import type { CanvasView, RegionTarget } from './canvas/canvas-view.js';
 import { createTitleEditor } from './title-editor.js';
+import { createRegionNameEditor, type RenameRegion } from './region-name-editor.js';
 import { createReferenceRows } from './reference-rows.js';
 import type { LinkContext } from './reference-link.js';
 
@@ -57,6 +58,7 @@ export interface EditorContext {
   deleteNodes(nodes: FlowNode[]): void;
   innerTargetOptions(edge: ModelEdge): string[];
   innerSourceOptions(edge: ModelEdge): string[];
+  renameRegion: RenameRegion;
 }
 
 export interface Editors {
@@ -64,6 +66,7 @@ export interface Editors {
   openEdgeEditor(edge: ModelEdge): void;
   openRegionEditor(region: RegionTarget): void;
   openTitleEditor(node: FlowNode): void;
+  openRegionNameEditor(region: RegionTarget, rename?: RenameRegion): void;
   closeAll(): void;
   reposition(): void;
   refreshFromDoc(): void;
@@ -113,6 +116,7 @@ export function createEditors(context: EditorContext): Editors {
   };
 
   const titleEditor = createTitleEditor(context);
+  const regionNameEditor = createRegionNameEditor(context);
 
   const referenceRows = createReferenceRows({
     rows: elements.referenceRows,
@@ -150,14 +154,24 @@ export function createEditors(context: EditorContext): Editors {
   }
 
   function openTitleEditor(node: FlowNode): void {
+    regionNameEditor.close({ commit: false });
     closeNodeEditor();
     closeEdgeEditor();
     closeRegionEditor();
     titleEditor.open(node);
   }
 
+  function openRegionNameEditor(region: RegionTarget, rename?: RenameRegion): void {
+    closeNodeEditor();
+    closeEdgeEditor();
+    closeRegionEditor();
+    titleEditor.close({ commit: false });
+    regionNameEditor.open(region, rename);
+  }
+
   function openNodeEditor(node: FlowNode, { focusTitle = false }: { focusTitle?: boolean } = {}): void {
-    titleEditor.close();
+    titleEditor.close({ commit: false });
+    regionNameEditor.close({ commit: false });
     closeEdgeEditor();
     closeRegionEditor();
     editingNodeId = node.id;
@@ -240,7 +254,8 @@ export function createEditors(context: EditorContext): Editors {
   // A region has no title of its own here: the name is edited in place on the canvas, and `pos`
   // is not a field at all — an area is what the user drew, not a number to type (R36).
   function openRegionEditor(region: RegionTarget): void {
-    titleEditor.close();
+    titleEditor.close({ commit: false });
+    regionNameEditor.close({ commit: false });
     closeNodeEditor();
     closeEdgeEditor();
     editingRegion = region;
@@ -288,7 +303,8 @@ export function createEditors(context: EditorContext): Editors {
   }
 
   function openEdgeEditor(edge: ModelEdge): void {
-    titleEditor.close();
+    titleEditor.close({ commit: false });
+    regionNameEditor.close({ commit: false });
     closeNodeEditor();
     closeRegionEditor();
     editingEdgeSpec = edge.spec;
@@ -457,7 +473,8 @@ export function createEditors(context: EditorContext): Editors {
   }
 
   function closeAll(): void {
-    titleEditor.close();
+    titleEditor.close({ commit: false });
+    regionNameEditor.close({ commit: false });
     closeNodeEditor();
     closeEdgeEditor();
     closeRegionEditor();
@@ -465,6 +482,7 @@ export function createEditors(context: EditorContext): Editors {
 
   function reposition(): void {
     titleEditor.reposition();
+    regionNameEditor.reposition();
     if (editingRegion) {
       const rect = context.view.regionRectOfBlock(editingRegion.block);
       if (rect) positionBesideRect(elements.regionEditor, context.view.worldRectToScreen(rect));
@@ -496,6 +514,7 @@ export function createEditors(context: EditorContext): Editors {
 
   function refreshFromDoc(): void {
     titleEditor.refreshFromDoc();
+    regionNameEditor.refreshFromDoc();
     if (editingRegion) fillRegionFields(editingRegion);
     const node = editingNode();
     if (editingNodeId && !node) {
@@ -646,5 +665,5 @@ export function createEditors(context: EditorContext): Editors {
     context.deleteRegion(region);
   });
 
-  return { openNodeEditor, openEdgeEditor, openRegionEditor, openTitleEditor, closeAll, reposition, refreshFromDoc, editingNode };
+  return { openNodeEditor, openEdgeEditor, openRegionEditor, openTitleEditor, openRegionNameEditor, closeAll, reposition, refreshFromDoc, editingNode };
 }

@@ -127,4 +127,32 @@ describe('CanvasView title placement', () => {
     const hidden = buildModel(parseFlow(DASHBOARD_FLOW), 'Logout Confirmation').nodes[0];
     expect(view.titlePlacementOf(hidden)).toBeNull();
   });
+
+  it('places a region name label left-aligned in the header strip', () => {
+    const doc = parseFlow(`---
+name: Demo
+---
+
+context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+    - A
+
+A
+  id: a-1
+  pos: 200, 200, 200, 88
+`);
+    const model = buildModel(doc, null);
+    const view = createView();
+    view.setModel(model);
+
+    const context = model.contexts[0];
+    const placement = view.regionTitlePlacementOf(context)!;
+
+    expect(placement.align).toBe('left');
+    expect(placement.fontPx).toBe(13);
+    expect(placement.screenScale).toBeCloseTo(view.view.scale, 8);
+    expect(placement.rect.x).toBeGreaterThanOrEqual(0);
+    expect(placement.rect.y + placement.rect.h / 2).toBeCloseTo(16, 8);
+  });
 });

@@ -58,6 +58,7 @@ function createSurface() {
     completeEdge: vi.fn(),
     editEdge: vi.fn(),
     editNodeTitle: vi.fn(),
+    editRegionTitle: vi.fn(),
     openExpand: vi.fn(),
     toggleExpand: vi.fn(),
     materializeGhost: vi.fn(),

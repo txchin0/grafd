@@ -6,8 +6,8 @@
 // uniquified would be wrong here: two regions are two providers, and a user who typed a name that
 // is already taken meant the one that exists.
 
-import type { Rect } from '../shared/flow-format.js';
 import type { CanvasView, RegionTarget } from './canvas/canvas-view.js';
+import { positionInlineTitlePanel } from './inline-title-overlay.js';
 
 /** Applies the name, reports why it cannot be used, or `undefined` when the edit was abandoned. */
 export type RenameRegion = (
@@ -17,8 +17,6 @@ export type RenameRegion = (
 
 export interface RegionNameEditorContext {
   view: CanvasView;
-  /** The region's rectangle in world coordinates, or null once it is gone from the canvas. */
-  rectOf(region: RegionTarget): Rect | null;
   renameRegion: RenameRegion;
 }
 
@@ -28,12 +26,9 @@ export interface RegionNameEditor {
   open(region: RegionTarget, rename?: RenameRegion): void;
   close(options?: { commit?: boolean; insist?: boolean }): void;
   reposition(): void;
+  refreshFromDoc(): void;
   isOpen(): boolean;
 }
-
-// The label is drawn at a fixed offset inside the region's corner; the overlay sits on it rather
-// than scaling with the canvas, so a name stays typable at any zoom.
-const LABEL_INSET = { x: 6, y: 4 };
 
 export function createRegionNameEditor(context: RegionNameEditorContext): RegionNameEditor {
   const panel = document.getElementById('region-name-editor') as HTMLDivElement;
@@ -50,12 +45,14 @@ export function createRegionNameEditor(context: RegionNameEditorContext): Region
     close({ commit: false });
     editing = region;
     applyName = rename;
+    context.view.hiddenTitles.regionName = region.block.name;
     input.value = region.block.name;
     panel.classList.remove('hidden');
     showRejection(null);
     reposition();
     input.focus();
     input.select();
+    context.view.requestRender();
   }
 
   // Clearing the editing state first keeps the commit's re-render — and the blur it triggers —
@@ -63,13 +60,17 @@ export function createRegionNameEditor(context: RegionNameEditorContext): Region
   // `insist` holds the editor open on a refused name so the user can see why and fix it. Leaving
   // the box by clicking elsewhere does not: reopening under a stray click would trap the focus.
   function close({ commit = true, insist = false }: { commit?: boolean; insist?: boolean } = {}): void {
+    if (!isOpen()) return;
     const region = editing;
     const rename = applyName;
+    const requestedName = input.value;
     editing = null;
+    context.view.hiddenTitles.regionName = null;
     panel.classList.add('hidden');
     showRejection(null);
+    context.view.requestRender();
     if (!region || !commit) return;
-    const outcome = rename(region, input.value);
+    const outcome = rename(region, requestedName);
     if (outcome === undefined) {
       open(region, rename);
       return;
@@ -93,22 +94,34 @@ export function createRegionNameEditor(context: RegionNameEditorContext): Region
 
   function reposition(): void {
     if (!editing) return;
-    const rect = editing && context.rectOf(editing);
-    if (!rect) {
+    const placement = context.view.regionTitlePlacementOfTarget(editing);
+    if (!placement) {
       close({ commit: false });
       return;
     }
-    const screen = context.view.worldRectToScreen(rect);
-    panel.style.left = `${screen.x + LABEL_INSET.x}px`;
-    panel.style.top = `${screen.y + LABEL_INSET.y}px`;
+
+    positionInlineTitlePanel(panel, input, context.view, placement);
+  }
+
+  function refreshFromDoc(): void {
+    if (!editing) return;
+    if (!context.view.regionTitlePlacementOfTarget(editing)) close({ commit: false });
+    else reposition();
   }
 
   input.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') close({ insist: true });
-    else if (event.key === 'Escape') close({ commit: false });
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      close({ insist: true });
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      close({ commit: false });
+    }
     event.stopPropagation();
   });
   input.addEventListener('blur', () => close());
+  input.addEventListener('pointerdown', (event) => event.stopPropagation());
+  input.addEventListener('dblclick', (event) => event.stopPropagation());
 
-  return { open, close, reposition, isOpen };
+  return { open, close, reposition, refreshFromDoc, isOpen };
 }

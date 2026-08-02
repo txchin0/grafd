@@ -8,7 +8,7 @@
 
 import type { FlowNode } from '../shared/flow-format.js';
 import type { CanvasView } from './canvas/canvas-view.js';
-import { handFontAt } from './canvas/node-metrics.js';
+import { positionInlineTitleInput } from './inline-title-overlay.js';
 
 export interface TitleEditorContext {
   view: CanvasView;
@@ -23,12 +23,6 @@ export interface TitleEditor {
   refreshFromDoc(): void;
   isOpen(): boolean;
 }
-
-// Deeply nested or zoomed-out titles are drawn far too small to type into, so the overlay
-// stops shrinking well before the canvas text does.
-const MIN_FONT_PX = 11;
-const MIN_WIDTH_PX = 90;
-const LINE_BOX_RATIO = 1.6;
 
 export function createTitleEditor(context: TitleEditorContext): TitleEditor {
   const input = document.getElementById('title-editor') as HTMLInputElement;
@@ -46,7 +40,7 @@ export function createTitleEditor(context: TitleEditorContext): TitleEditor {
     if (!node.id) return;
     close();
     editingNodeId = node.id;
-    context.view.titleEditingNodeId = node.id;
+    context.view.hiddenTitles.nodeId = node.id;
     input.value = node.name;
     input.classList.remove('hidden');
     reposition();
@@ -62,7 +56,7 @@ export function createTitleEditor(context: TitleEditorContext): TitleEditor {
     const node = editingNode();
     const requestedName = input.value;
     editingNodeId = null;
-    context.view.titleEditingNodeId = null;
+    context.view.hiddenTitles.nodeId = null;
     input.classList.add('hidden');
     if (commit && node) context.renameNode(node, requestedName);
     context.view.requestRender();
@@ -77,18 +71,7 @@ export function createTitleEditor(context: TitleEditorContext): TitleEditor {
       return;
     }
 
-    const band = context.view.worldRectToScreen(placement.rect);
-    const fontPx = Math.max(MIN_FONT_PX, placement.fontPx * placement.screenScale);
-    const width = Math.max(band.w, MIN_WIDTH_PX);
-    const height = Math.max(band.h, fontPx * LINE_BOX_RATIO);
-
-    input.style.left = `${Math.round(band.x + band.w / 2 - width / 2)}px`;
-    input.style.top = `${Math.round(band.y + band.h / 2 - height / 2)}px`;
-    input.style.width = `${Math.round(width)}px`;
-    input.style.height = `${Math.round(height)}px`;
-    input.style.font = handFontAt(fontPx, 600);
-    input.style.textAlign = placement.align;
-    input.style.color = placement.color;
+    positionInlineTitleInput(input, context.view, placement);
   }
 
   function refreshFromDoc(): void {

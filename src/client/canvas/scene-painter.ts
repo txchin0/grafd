@@ -20,6 +20,7 @@ import {
 } from '../flow-doc.js';
 import { unionRect, type Point } from '../geometry.js';
 import { canvasPalette } from '../theme.js';
+import type { HiddenCanvasTitles } from './canvas-view.js';
 import { edgeEnd, edgePathApproach, edgePathMidpoint } from './edge-path.js';
 import { edgeReachesInsideOpenFrame, layOutModelEdges, type EdgeGeometryMap } from './edge-layout.js';
 import type { ExpansionLayer, FrameExpansion } from './expansion.js';
@@ -72,10 +73,8 @@ export interface ScenePainterOptions {
   rough: RoughCanvas;
   baseRoughness: number;
   selectedEdge: ModelEdge | null;
-  // The node whose title the inline editor is painting itself; drawing it again underneath
-  // would show through the overlay's background. An export passes null — it has no overlay,
-  // and its output must always include every title.
-  hiddenTitleNodeId: string | null;
+  // The inline editors paint over these; drawing them again underneath would show through.
+  hiddenTitles: HiddenCanvasTitles;
   edgeGeometry: EdgeGeometryMap;
   expansions: ExpansionLayer;
   // Where each region draws, when the caller has settled that itself. A node drag freezes every
@@ -98,7 +97,7 @@ export class ScenePainter {
   private readonly rough: RoughCanvas;
   private readonly baseRoughness: number;
   private readonly selectedEdge: ModelEdge | null;
-  private readonly hiddenTitleNodeId: string | null;
+  private readonly hiddenTitles: HiddenCanvasTitles;
   private readonly edgeGeometry: EdgeGeometryMap;
   private readonly expansions: ExpansionLayer;
   private readonly regionRects: ReadonlyMap<ContextBlock, Rect> | null;
@@ -108,7 +107,7 @@ export class ScenePainter {
     this.rough = options.rough;
     this.baseRoughness = options.baseRoughness;
     this.selectedEdge = options.selectedEdge;
-    this.hiddenTitleNodeId = options.hiddenTitleNodeId;
+    this.hiddenTitles = options.hiddenTitles;
     this.edgeGeometry = options.edgeGeometry;
     this.expansions = options.expansions;
     this.regionRects = options.regionRects ?? null;
@@ -163,6 +162,7 @@ export class ScenePainter {
   }
 
   private drawRegionLabel(name: string, rect: Rect): void {
+    if (name === this.hiddenTitles.regionName) return;
     const { ctx } = this;
     const band = regionLabelBand(ctx, name, rect);
     ctx.font = frameTitleFont();
@@ -194,7 +194,7 @@ export class ScenePainter {
   }
 
   private titleIsHidden(node: FlowNode): boolean {
-    return node.id != null && node.id === this.hiddenTitleNodeId;
+    return node.id != null && node.id === this.hiddenTitles.nodeId;
   }
 
   private edgeColor(edge: ModelEdge): string {

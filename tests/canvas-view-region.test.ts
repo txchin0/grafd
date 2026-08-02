@@ -112,6 +112,7 @@ function stubActions(): CanvasActions {
     completeEdge: vi.fn(),
     editEdge: vi.fn(),
     editNodeTitle: vi.fn(),
+    editRegionTitle: vi.fn(),
     openExpand: vi.fn(),
     toggleExpand: vi.fn(),
     materializeGhost: vi.fn(),
@@ -372,5 +373,58 @@ describe('drawing a region with the context tool', () => {
     dragOnCanvas(canvas, { x: 900, y: 100 }, { x: 1100, y: 300 });
     expect(actions.createNode).toHaveBeenCalled();
     expect(actions.createRegion).not.toHaveBeenCalled();
+  });
+});
+
+function doubleClickOnCanvas(canvas: HTMLCanvasElement, point: Point): void {
+  listenerFor(canvas, 'pointerdown')({
+    button: 0,
+    pointerId: 1,
+    clientX: point.x,
+    clientY: point.y,
+    shiftKey: false,
+    detail: 1,
+  });
+  listenerFor(canvas, 'pointerup')({ pointerId: 1, clientX: point.x, clientY: point.y, detail: 1 });
+  listenerFor(canvas, 'pointerdown')({
+    button: 0,
+    pointerId: 1,
+    clientX: point.x,
+    clientY: point.y,
+    shiftKey: false,
+    detail: 2,
+  });
+  listenerFor(canvas, 'pointerup')({ pointerId: 1, clientX: point.x, clientY: point.y, detail: 2 });
+  listenerFor(canvas, 'dblclick')({
+    button: 0,
+    clientX: point.x,
+    clientY: point.y,
+    shiftKey: false,
+    detail: 2,
+  });
+}
+
+describe('double-clicking a region label', () => {
+  // With the mocked measureText width of 0, the label band is only as wide as its hit padding.
+  const labelPoint = { x: 12, y: 16 };
+
+  it('opens inline title edit on the label', () => {
+    const { actions, canvas } = openedCanvas(ZONE_FLOW);
+    doubleClickOnCanvas(canvas, labelPoint);
+    expect(actions.editRegionTitle).toHaveBeenCalledTimes(1);
+    const calls = (actions.editRegionTitle as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[0][0].block.name).toBe('Zone');
+  });
+
+  it('does not open inline title edit on the border alone', () => {
+    const { actions, canvas } = openedCanvas(ZONE_FLOW);
+    doubleClickOnCanvas(canvas, { x: 0, y: 300 });
+    expect(actions.editRegionTitle).not.toHaveBeenCalled();
+  });
+
+  it('opens the region editor only on the first click of a double-click', () => {
+    const { actions, canvas } = openedCanvas(ZONE_FLOW);
+    doubleClickOnCanvas(canvas, labelPoint);
+    expect(actions.regionClicked).toHaveBeenCalledTimes(1);
   });
 });
