@@ -188,6 +188,19 @@ export function membershipChangesForRegion(
   return changes;
 }
 
+// Regions a freshly created top-level node joins when its rectangle is fully inside their
+// frame — the inverse of drawing a region over existing nodes (R9a). Each overlapping region is
+// evaluated independently (R15). Subgraph nodes are excluded because they are absent from a
+// root-scoped model (R5).
+export function membershipChangesForNewNode(model: FlowModel, node: FlowNode): MembershipChange[] {
+  const regionRects = new Map<ContextBlock, Rect>();
+  for (const context of model.contexts) {
+    const frame = regionRectOf(model, context);
+    if (frame) regionRects.set(context.block, frame);
+  }
+  return membershipChangesForMove(model, [node], regionRects);
+}
+
 // One node's rect in its own model's coordinates. Callers must prefer this over reading `pos`
 // directly, or an unfolded frame measures at its collapsed size.
 export function displayRectOf(model: FlowModel, node: FlowNode): Rect {

@@ -500,13 +500,27 @@ function focusNewNode(node: FlowNode): void {
   editors.openNodeEditor(node, { focusTitle: true });
 }
 
+function commitCreatedNodeMembership(owner: DocumentOwner, node: FlowNode): void {
+  const changes = FlowDoc.membershipChangesForNewNode(FlowDoc.buildModel(owner.doc, null), node);
+  if (changes.length > 0) writeMovesAndMembership([], changes, []);
+}
+
+function runNodeCreationAction(owner: DocumentOwner, create: () => FlowNode | null): FlowNode | null {
+  let node: FlowNode | null = null;
+  session.runAction(() => {
+    applyToDoc(owner, () => {
+      node = create();
+    }, { commit: 'now' });
+    if (node) commitCreatedNodeMembership(owner, node);
+  });
+  return node;
+}
+
 function createNodeAndEdit(rect: Rect, frameHost: FlowNode | null = null, requestedName = 'Untitled'): FlowNode | null {
   const target = creationTargetFor(frameHost);
   if (!target) return null;
-  let node: FlowNode | null = null;
-  applyToDoc(target.owner, () => {
-    node = FlowDoc.addNode(creationItems(target), rect, requestedName);
-  }, { commit: 'now' });
+  const items = creationItems(target);
+  const node = runNodeCreationAction(target.owner, () => FlowDoc.addNode(items, rect, requestedName));
   if (node) focusNewNode(node);
   return node;
 }
@@ -1157,16 +1171,20 @@ function createNodeForEmptyDrop(
     const target = creationTargetFor(host);
     if (!target) return;
     const source = liveNode(fromNode);
-    applyToDoc(target.owner, () => {
-      created = FlowDoc.addNode(creationItems(target), rect);
-      FlowDoc.addEdge(source, created.name);
-    }, { commit: 'now' });
+    const items = creationItems(target);
+    created = runNodeCreationAction(target.owner, () => {
+      const node = FlowDoc.addNode(items, rect);
+      FlowDoc.addEdge(source, node.name);
+      return node;
+    });
   } else {
     const owner = ownerOf(host);
-    applyToDoc(owner, () => {
-      created = FlowDoc.addNode(FlowDoc.containingItems(owner.doc, host), rect);
-      FlowDoc.addEdge(host, created.name, null, null, drop.innerName);
-    }, { commit: 'now' });
+    const items = FlowDoc.containingItems(owner.doc, host);
+    created = runNodeCreationAction(owner, () => {
+      const node = FlowDoc.addNode(items, rect);
+      FlowDoc.addEdge(host, node.name, null, null, drop.innerName);
+      return node;
+    });
   }
   if (created) focusNewNode(created);
 }
@@ -1192,12 +1210,14 @@ function addEdgeToExistingNode(fromNode: FlowNode, targetName: string, innerName
 function addEdgeToNewNode(fromNode: FlowNode, rect: Rect, ghostName: string | null): void {
   const flow = openFlow;
   if (!flow) return;
-  let createdNode: FlowNode | null = null;
   let createdSpec: EdgeSpec | null = null;
-  mutate(() => {
-    createdNode = FlowDoc.addNode(FlowDoc.scopeItems(flow.doc, flow.scope), rect, ghostName ?? undefined);
-    createdSpec = FlowDoc.addEdge(fromNode, createdNode.name, null, null);
-  }, { commit: 'now' });
+  const items = FlowDoc.scopeItems(flow.doc, flow.scope);
+  const owner = { doc: flow.doc, path: flow.path };
+  const createdNode = runNodeCreationAction(owner, () => {
+    const node = FlowDoc.addNode(items, rect, ghostName ?? undefined);
+    createdSpec = FlowDoc.addEdge(fromNode, node.name, null, null);
+    return node;
+  });
 
   if (!ghostName && createdNode) {
     view.select(createdNode);

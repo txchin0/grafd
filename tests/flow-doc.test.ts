@@ -39,6 +39,7 @@ import {
   findNodeById,
   graphBlockNames,
   hostsOfExpansion,
+  membershipChangesForNewNode,
   nodesIn,
   REGION_MEMBER_PADDING,
   regionRectOf,
@@ -497,6 +498,47 @@ B
   it('reads the preamble list the editor generates', () => {
     expect(inheritedContextNames(docFrom(DOC))).toEqual(['Billing']);
     expect(inheritedContextNames(docFrom('A\n'))).toEqual([]);
+  });
+});
+
+describe('membershipChangesForNewNode', () => {
+  const ZONE = `context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+
+Outside
+  pos: 900, 200, 200, 88
+`;
+
+  const OVERLAPS = `context: Left
+  pos: 0, 0, 700, 700
+  nodes:
+
+context: Right
+  pos: 400, 0, 700, 700
+  nodes:
+`;
+
+  function changesFor(text: string, rect: { x: number; y: number; w: number; h: number }) {
+    const doc = docFrom(text);
+    const node = addNode(doc.items, rect);
+    const model = buildModel(doc, null);
+    return membershipChangesForNewNode(model, node);
+  }
+
+  it('joins every region that fully encloses the new node (R9a)', () => {
+    const changes = changesFor(ZONE, { x: 200, y: 200, w: 200, h: 88 });
+    expect(changes).toEqual([{ block: expect.objectContaining({ name: 'Zone' }), node: expect.anything(), joins: true }]);
+  });
+
+  it('joins nothing when the node is only partly inside a region', () => {
+    expect(changesFor(ZONE, { x: 750, y: 200, w: 200, h: 88 })).toEqual([]);
+  });
+
+  it('joins every overlapping region independently (R15)', () => {
+    const changes = changesFor(OVERLAPS, { x: 500, y: 300, w: 200, h: 88 });
+    expect(changes.map((change) => change.block.name).sort()).toEqual(['Left', 'Right']);
+    expect(changes.every((change) => change.joins)).toBe(true);
   });
 });
 
