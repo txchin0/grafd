@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   applyRegionMove,
   applyRegionResize,
+  regionRectDuringResize,
+  regionRectsWithDrawnResize,
   rollbackRegionMove,
   rollbackRegionResize,
   type RegionMoveSnapshot,
@@ -93,6 +95,39 @@ describe('applyRegionResize', () => {
     };
     applyRegionResize(gesture, { x: 40, y: 30 }, identity);
     expect(context.block.pos).toEqual({ x: 0, y: 0, w: 40, h: 30 });
+  });
+});
+
+describe('regionRectDuringResize', () => {
+  it('returns the live pos for the region being resized', () => {
+    const context = contextNamed(DRAWN, 'Auth');
+    context.block.pos = { x: 0, y: 0, w: 40, h: 30 };
+    const gesture = { context, corner: 'se' as const, startRect: { x: 0, y: 0, w: 200, h: 120 }, startWorld: { x: 0, y: 0 } };
+    expect(regionRectDuringResize(context, gesture)).toEqual({ x: 0, y: 0, w: 40, h: 30 });
+  });
+
+  it('returns null for a different region', () => {
+    const context = contextNamed(DRAWN, 'Auth');
+    const other = contextNamed(DRAWN, 'Auth');
+    const gesture = { context, corner: 'se' as const, startRect: { x: 0, y: 0, w: 200, h: 120 }, startWorld: { x: 0, y: 0 } };
+    expect(regionRectDuringResize(other, gesture)).toBeNull();
+  });
+});
+
+describe('regionRectsWithDrawnResize', () => {
+  it('paints the drawn rectangle while shrinking past members', () => {
+    const context = contextNamed(DRAWN, 'Auth');
+    const frozen = new Map([[context.block, { x: 0, y: 0, w: 200, h: 120 }]]);
+    context.block.pos = { x: 0, y: 0, w: 40, h: 30 };
+    const painted = regionRectsWithDrawnResize(context, frozen);
+    expect(painted.get(context.block)).toEqual({ x: 0, y: 0, w: 40, h: 30 });
+  });
+
+  it('leaves the frozen map unchanged when there is no drawn pos', () => {
+    const context = contextNamed(MEMBER_DERIVED, 'Auth');
+    const frozen = new Map([[context.block, { x: 32, y: 32, w: 136, h: 80 }]]);
+    const painted = regionRectsWithDrawnResize(context, frozen);
+    expect(painted).toBe(frozen);
   });
 });
 

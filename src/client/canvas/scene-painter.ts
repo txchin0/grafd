@@ -80,7 +80,8 @@ export interface ScenePainterOptions {
   expansions: ExpansionLayer;
   // Where each region draws, when the caller has settled that itself. A node drag freezes every
   // region's frame at its start so dragging a member does not stretch the frame under the cursor
-  // (R18); everything else leaves this empty and the region is derived per pass.
+  // (R18); a resize in progress paints the drawn rectangle being dragged, not the union with
+  // members that would otherwise stick the frame at their bounds. Everything else derives per pass.
   regionRects?: ReadonlyMap<ContextBlock, Rect>;
 }
 

@@ -59,6 +59,8 @@ import {
 import {
   applyRegionMove,
   applyRegionResize,
+  regionRectDuringResize,
+  regionRectsWithDrawnResize,
   rollbackRegionMove,
   rollbackRegionResize,
 } from './region-gestures.js';
@@ -135,7 +137,14 @@ type Gesture =
       startWorld: Point;
       moved: boolean;
     }
-  | { type: 'region-resize'; context: ModelContext; corner: ResizeCorner; startRect: Rect; startWorld: Point }
+  | {
+      type: 'region-resize';
+      context: ModelContext;
+      corner: ResizeCorner;
+      startRect: Rect;
+      startWorld: Point;
+      frozenRegionRects: Map<ContextBlock, Rect>;
+    }
   | { type: 'create'; tool: Tool; startWorld: Point; startScreen: Point; rect: Rect | null }
   | { type: 'marquee'; startWorld: Point; rect: Rect | null }
   | { type: 'pinch'; pointers: [number, number]; start: PinchAnchor };
@@ -882,16 +891,19 @@ export class CanvasView {
 
     const regionHandle = this.hitRegionHandle(world);
     if (regionHandle) {
-      this.gesture = {
-        type: 'region-resize',
-        context: regionHandle.context,
-        corner: regionHandle.corner,
-        startRect: { ...this.regionRectOfContext(regionHandle.context)! },
-        startWorld: world,
-      };
+      const context = regionHandle.context;
+      const startRect = { ...this.regionRectOfContext(context)! };
       // A region with no drawn area acquires one the moment it is resized: the user is reserving
       // space, which is the only thing that ever authors a block's `pos`.
-      regionHandle.context.block.pos = { ...this.regionRectOfContext(regionHandle.context)! };
+      context.block.pos = { ...startRect };
+      this.gesture = {
+        type: 'region-resize',
+        context,
+        corner: regionHandle.corner,
+        startRect,
+        startWorld: world,
+        frozenRegionRects: this.freezeRegionRects(),
+      };
       return;
     }
 
@@ -1018,6 +1030,15 @@ export class CanvasView {
       }
     }
     return frozen;
+  }
+
+  private regionRectsForPainting(): ReadonlyMap<ContextBlock, Rect> | undefined {
+    const gesture = this.gesture;
+    if (gesture?.type === 'move') return gesture.regionRects;
+    if (gesture?.type === 'region-resize' && gesture.context.block.pos) {
+      return regionRectsWithDrawnResize(gesture.context, gesture.frozenRegionRects);
+    }
+    return undefined;
   }
 
   private membershipChangesFor(gesture: Extract<Gesture, { type: 'move' }>): MembershipChange[] {
@@ -1505,6 +1526,15 @@ export class CanvasView {
     return regionRectOf(this.model, context);
   }
 
+  private selectedRegionDisplayRect(): Rect | null {
+    if (!this.selectedRegion) return null;
+    const resizing = this.gesture?.type === 'region-resize' ? this.gesture : null;
+    return (
+      regionRectDuringResize(this.selectedRegion, resizing)
+      ?? this.regionRectOfContext(this.selectedRegion)
+    );
+  }
+
   private hitRegionHandle(world: Point): { context: ModelContext; corner: ResizeCorner } | null {
     if (!this.selectedRegion) return null;
     return hitRegionHandleAt(this.selectedRegion, this.model, world, this.view.scale);
@@ -1591,7 +1621,7 @@ export class CanvasView {
 
   private scenePainter(hiddenTitleNodeId: string | null): ScenePainter {
     return new ScenePainter({
-      regionRects: this.gesture?.type === 'move' ? this.gesture.regionRects : undefined,
+      regionRects: this.regionRectsForPainting(),
       ctx: this.ctx,
       rough: this.rough,
       baseRoughness: this.baseRoughness,
@@ -1781,7 +1811,7 @@ export class CanvasView {
   // frame rather than inside it, so the thing under the pointer is the thing that will move.
   private drawSelectedRegionDecorations(): void {
     if (!this.selectedRegion) return;
-    const rect = this.regionRectOfContext(this.selectedRegion);
+    const rect = this.selectedRegionDisplayRect();
     if (!rect) return;
     const { ctx } = this;
     ctx.save();

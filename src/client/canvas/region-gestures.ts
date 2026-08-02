@@ -1,7 +1,7 @@
 // Pure region move/resize math. Snap arrives as an argument so the canvas view stays the
 // place that owns the grid step; membership diffs stay in flow-doc and are computed at commit.
 
-import type { FlowNode, Rect } from '../../shared/flow-format.js';
+import type { ContextBlock, FlowNode, Rect } from '../../shared/flow-format.js';
 import type { ModelContext } from '../flow-doc.js';
 import { normalizedRect, type Point } from '../geometry.js';
 import type { ResizeCorner } from './resize-handles.js';
@@ -66,6 +66,25 @@ export function rollbackRegionMove(gesture: RegionMoveSnapshot): void {
 
 export function rollbackRegionResize(gesture: RegionResizeSnapshot): void {
   Object.assign(gesture.context.block.pos!, gesture.startRect);
+}
+
+// While a resize is in progress, trust the live `block.pos` rather than `regionRectOf`, which
+// unions member bounds and would stick the frame until release.
+export function regionRectDuringResize(
+  context: ModelContext,
+  gesture: Pick<RegionResizeSnapshot, 'context'> | null,
+): Rect | null {
+  return gesture?.context === context ? gesture.context.block.pos ?? null : null;
+}
+
+// Paint every region from the frozen map, swapping in the drawn rectangle for the one resizing.
+export function regionRectsWithDrawnResize(
+  resizing: ModelContext,
+  frozenRects: ReadonlyMap<ContextBlock, Rect>,
+): ReadonlyMap<ContextBlock, Rect> {
+  const drawn = resizing.block.pos;
+  if (!drawn) return frozenRects;
+  return new Map([...frozenRects, [resizing.block, { ...drawn }]]);
 }
 
 /** Nodes whose display rect is fully enclosed by `rect` — membership for a freshly drawn region. */
