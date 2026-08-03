@@ -2,11 +2,11 @@
 // canvas gestures (canvas-view.ts), document mutations (flow-doc.ts), the floating editors
 // (editors.ts), and inline subgraph expansion (expansion.ts).
 //
-// Files live in the active workspace (workspace.ts): the Graf server when one is answering
+// Files live in the active workspace (workspace.ts): the Grafd server when one is answering
 // (self-hosted mode), browser storage when the app is statically hosted (serverless mode),
 // or a local folder opened through the File System Access API in either mode. UI state —
 // entrypoint, active flow, per-flow cameras — persists to the workspace's
-// graf.manifest.json.
+// grafd.manifest.json.
 //
 // Sync model: the serialized file text is the source of truth. Every mutation edits the
 // parsed AST, re-renders immediately, and writes the re-serialized text to the workspace
@@ -151,7 +151,7 @@ const elements = {
   graphAddReference: elementById<HTMLButtonElement>('gp-add-reference'),
 };
 
-// graf.manifest.json — the workspace entrypoint plus the camera, open frames and active flow
+// grafd.manifest.json — the workspace entrypoint plus the camera, open frames and active flow
 // this browser last left behind. Sampled from the live view at save time.
 const uiState = createWorkspaceUiState({
   writeFile: sendWrite,
@@ -1391,10 +1391,10 @@ contextOps = createContextOrchestration({
 });
 
 function screenshotFileStem(): string {
-  if (!openFlow) return 'graf';
+  if (!openFlow) return 'grafd';
   const baseName = openFlow.path.split('/').pop()!.replace(/\.flow$/, '');
   const scoped = openFlow.scope ? `${baseName}-${openFlow.scope}` : baseName;
-  return safeFileStem(scoped) || 'graf';
+  return safeFileStem(scoped) || 'grafd';
 }
 
 const screenshot = createScreenshotDialog({ view, fileStem: screenshotFileStem });
@@ -1744,7 +1744,7 @@ async function exportWorkspace(): Promise<void> {
         return committed != null ? Promise.resolve(committed) : workspace!.readFile(path);
       },
       manifest: uiState.forExport(workspaceFiles),
-      workspaceLabel: workspace.kind === 'folder' ? workspace.label : 'graf-workspace',
+      workspaceLabel: workspace.kind === 'folder' ? workspace.label : 'grafd-workspace',
     });
   } catch (error) {
     console.error('Export failed', error);

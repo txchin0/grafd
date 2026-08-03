@@ -1,4 +1,4 @@
-# Graf — .flow canvas editor
+# Grafd — .flow canvas editor
 
 A freeform web canvas editor for the `.flow` diagram format defined in [FLOW-SPEC.md](FLOW-SPEC.md).
 
@@ -15,7 +15,7 @@ The app runs in two hosting modes with identical features:
 In either mode the user can open a local folder through the File System Access API
 (Chromium); a polling watcher keeps edits synchronized with other tools writing to the same
 folder. Any workspace can be exported from the UI as a .zip containing the .flow files,
-`graf.manifest.json`, and `SAVE-GUIDE.md` (the guide AI agents read to work in an exported
+`grafd.manifest.json`, and `SAVE-GUIDE.md` (the guide AI agents read to work in an exported
 workspace — keep it in sync with the format implementation).
 
 The codebase is TypeScript, compiled by `tsc` alone — no bundler. `npm run build` emits
@@ -44,7 +44,7 @@ Layout lives inside the `.flow` file itself, via the editor-owned properties `id
 `context:` block). This is spec'd — see FLOW-SPEC.md §11; there is no `.flow.meta` file and
 the spec no longer describes one.
 
-The one thing outside the spec is that each workspace has a `graf.manifest.json` at its root
+The one thing outside the spec is that each workspace has a `grafd.manifest.json` at its root
 (`src/shared/manifest.ts`): the workspace `entrypoint`, its `display` settings (canvas
 roughness and font), plus UI state (active flow, per-flow cameras). It
 is editor-owned, ignored by agents apart from `entrypoint`, and travels through the same
@@ -68,14 +68,14 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
 - `src/shared/flow-format.ts` — parse/serialize `.flow` text, format helpers. No DOM, no
   Node APIs.
 - `src/client/workspace.ts` — the `Workspace` interface the app shell talks to; backends:
-  `workspace-server.ts` (WebSocket/REST against the Graf server, plus the boot-time server
+  `workspace-server.ts` (WebSocket/REST against the Grafd server, plus the boot-time server
   probe), `workspace-browser.ts` (IndexedDB + BroadcastChannel), `workspace-folder.ts`
   (File System Access API + polling watcher).
 - `src/client/zip.ts` / `src/client/export.ts` — dependency-free stored-method ZIP writer
   and the workspace .zip export (flows + manifest + SAVE-GUIDE.md).
 - `src/client/file-tree.ts` — pure folder-tree builder behind the sidebar's collapsible
   file tree (rendering and delete interaction live in main.ts).
-- `src/shared/manifest.ts` — `graf.manifest.json` types, tolerant parsing, startup-flow
+- `src/shared/manifest.ts` — `grafd.manifest.json` types, tolerant parsing, startup-flow
   choice.
 - `src/shared/flow-scan.ts` — the linter's positioned re-walk of the line grammar: mirrors
   `parseFlow`'s branch structure but keeps line numbers and records every line the parser
@@ -157,7 +157,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   `themes.css` is the single source of truth for every colour, one `:root[data-theme="…"]`
   block per theme; DOM chrome reads the tokens directly, and `resolveCanvasPalette` resolves
   the `--canvas-*` ones into the palette `scene-painter.ts` draws from, refilled on each theme
-  change. Adding a theme means a new block plus one entry in `THEMES` — nothing else.
+  change. Adding a theme means a new block plus one entry in `THEMES` — nothing else —
+  and `npm run import:theme -- path/to/theme.color-theme.json` (src/tools/theme-import.ts)
+  does both from a VS Code color theme.
 - `src/client/main.ts` — app state, WebSocket sync, sidebar, keyboard shortcuts, and the action
   boundaries around edits that reach more than one document (`edit-session.ts` owns the history
   itself).

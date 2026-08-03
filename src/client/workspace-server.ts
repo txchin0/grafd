@@ -1,10 +1,10 @@
-// Self-hosted workspace: the Graf server owns the files on disk. Reads go through the REST
+// Self-hosted workspace: the Grafd server owns the files on disk. Reads go through the REST
 // endpoints, writes and external changes travel over the WebSocket (the server suppresses
 // echoes of its own writes by content hash and broadcasts everything else).
 
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
 
-// Relative so the probe works when the app is hosted under a subpath (where no Graf server
+// Relative so the probe works when the app is hosted under a subpath (where no Grafd server
 // answers and the app falls back to the serverless browser workspace).
 const FILES_ENDPOINT = './api/files';
 const PROJECT_ROOT_ENDPOINT = './api/project-root';

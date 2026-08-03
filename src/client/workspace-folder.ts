@@ -15,7 +15,7 @@ export function folderPickingIsSupported(): boolean {
 // Returns null when the user dismisses the picker.
 export async function pickWorkspaceFolder(): Promise<FileSystemDirectoryHandle | null> {
   try {
-    return (await window.showDirectoryPicker!({ id: 'graf-workspace', mode: 'readwrite' })) ?? null;
+    return (await window.showDirectoryPicker!({ id: 'grafd-workspace', mode: 'readwrite' })) ?? null;
   } catch {
     return null;
   }

@@ -6,7 +6,7 @@
 // displacement that pushes surrounding nodes clear of a growing frame.
 //
 // The open-set can be saved and restored via `openVisibleNodeIds` / `restoreOpen` (the
-// app shell persists it in graf.manifest.json). All derived geometry lives in
+// app shell persists it in grafd.manifest.json). All derived geometry lives in
 // `model.display`, which the canvas view prefers over a node's authored `pos`, so
 // committed positions never change.
 

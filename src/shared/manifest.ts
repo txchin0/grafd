@@ -1,4 +1,4 @@
-// graf.manifest.json is the editor-owned workspace state file that lives at the root of a
+// grafd.manifest.json is the editor-owned workspace state file that lives at the root of a
 // .flow workspace (a served project, an opened local folder, browser storage, or an
 // export). It records which flow is the workspace entrypoint, how the workspace's canvas is
 // drawn, plus session UI state — the last opened flow, per-flow cameras, and which nodes are
@@ -9,8 +9,8 @@
 // it (including inside a .zip export), which is why it sits beside `ui` rather than inside
 // it: `ui` is one browser's session state, and the editor ignores other clients' pushes of it.
 
-export const MANIFEST_FILE_NAME = 'graf.manifest.json';
-export const MANIFEST_FORMAT = 'graf-workspace/1';
+export const MANIFEST_FILE_NAME = 'grafd.manifest.json';
+export const MANIFEST_FORMAT = 'grafd-workspace/1';
 
 export const DEFAULT_ROUGHNESS = 1;
 export const MIN_ROUGHNESS = 0;

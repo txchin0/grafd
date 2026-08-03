@@ -56,7 +56,7 @@ describe('createZipArchive', () => {
     const files = [
       { path: 'main.flow', text: '---\nname: main\n---\n' },
       { path: 'auth/login.flow', text: 'Validate Input\n  -> Authenticate\n' },
-      { path: 'graf.manifest.json', text: '{"entrypoint": "main.flow"}\n' },
+      { path: 'grafd.manifest.json', text: '{"entrypoint": "main.flow"}\n' },
     ];
     const parsed = parseArchive(createZipArchive(files, new Date(2026, 6, 20, 12, 0, 0)));
     expect(parsed.map(({ path, text }) => ({ path, text }))).toEqual(files);

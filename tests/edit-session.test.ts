@@ -426,7 +426,7 @@ describe('undo across every document an edit can reach', () => {
     expect(allNodes(session.documentAt('main.flow')!)[0].id).toBe(id);
   });
 
-  // Restoring text written before Graf ever assigned ids mints fresh ones, so selection and
+  // Restoring text written before Grafd ever assigned ids mints fresh ones, so selection and
   // open editors bound to the old ids are dropped. Recorded because it reads like a defect and
   // is not one: committed text is the source of truth and that text never carried an id.
   it('mints new ids when restoring text that never carried any', () => {

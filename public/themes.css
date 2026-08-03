@@ -10,7 +10,7 @@
    theme changes. They are declared here so that adding a theme means editing one file. */
 
 :root,
-:root[data-theme="graf-dark"] {
+:root[data-theme="grafd-dark"] {
   /* Tells the browser which way to paint what a page cannot style: the native <select>
      popup, scrollbars, and form control internals. */
   --color-scheme: dark;
@@ -59,7 +59,7 @@
    The chrome follows VS Code's modern light surfaces: the cool near-white #fafafd for
    sidebar, topbar and overlays, separated from the white canvas by a visible hairline rather
    than by a difference in tone. */
-:root[data-theme="graf-light"] {
+:root[data-theme="grafd-light"] {
   --color-scheme: light;
   --bg: #ffffff;
   --panel: #fafafd;

@@ -1,6 +1,6 @@
 // Command line entry point for the .flow linter: `node dist/tools/flow-lint.js [workspace…]`.
 //
-// A workspace is a directory of .flow files with an optional graf.manifest.json at its root —
+// A workspace is a directory of .flow files with an optional grafd.manifest.json at its root —
 // the same shape the server watches — because the cross-file rules need the whole set to
 // resolve `expand` links against.
 

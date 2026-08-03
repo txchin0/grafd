@@ -2,7 +2,7 @@
 // beside the ones already in the workspace. Pure functions over the workspace's flat portable
 // paths — no DOM, no workspace I/O.
 //
-// Every "is this name taken" check is case-insensitive. The file systems Graf writes to are
+// Every "is this name taken" check is case-insensitive. The file systems Grafd writes to are
 // commonly case-insensitive, so a candidate differing only in case would clobber the file it
 // was meant to sit beside rather than becoming a new one.
 

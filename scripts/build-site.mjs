@@ -1,7 +1,7 @@
 // Assembles the serverless (static-host) build in site/: the shell from public/, the
 // compiled client and shared modules laid out exactly as the self-hosted server serves
 // them, the rough.js bundle, and SAVE-GUIDE.md for workspace export. Deploy the site/
-// directory to any static host; the app detects the missing Graf server and runs in
+// directory to any static host; the app detects the missing Grafd server and runs in
 // browser-storage mode.
 
 import { cp, mkdir, rm } from 'node:fs/promises';

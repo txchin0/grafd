@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Graf — .flow canvas</title>
+  <title>Grafd — .flow canvas</title>
   <link rel="icon" href="data:," />
   <link rel="preload" href="fonts/HankenGrotesk-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="fonts/PlaypenSans-Variable.woff2" as="font" type="font/woff2" crossorigin>
@@ -18,7 +18,7 @@
        src/client/preferences.ts. -->
   <script>
     try {
-      const stored = JSON.parse(localStorage.getItem('graf.preferences') || '{}');
+      const stored = JSON.parse(localStorage.getItem('grafd.preferences') || '{}');
       if (typeof stored.theme === 'string') document.documentElement.dataset.theme = stored.theme;
       if (stored.sidebarCollapsed === true) document.documentElement.dataset.sidebar = 'collapsed';
     } catch (error) {
@@ -31,7 +31,7 @@
     <aside id="sidebar">
       <header id="sidebar-header">
         <div id="sidebar-identity">
-          <span class="logo">✎ Graf</span>
+          <span class="logo">✎ Grafd</span>
           <span class="tagline">.flow canvas</span>
         </div>
         <button id="sidebar-toggle" type="button" aria-controls="sidebar" title="Hide sidebar (Ctrl+B)">«</button>
@@ -73,7 +73,7 @@
         <canvas id="canvas"></canvas>
 
         <div id="empty-state">
-          <h1>✎ Graf</h1>
+          <h1>✎ Grafd</h1>
           <p id="empty-state-hint">Select a flow from the sidebar, or create a new one.</p>
         </div>
 

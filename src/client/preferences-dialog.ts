@@ -9,7 +9,7 @@ import type { EditorLinkScheme } from './reference-link.js';
 import { isCanvasFontId, type CanvasFontId } from '../shared/manifest.js';
 import { THEMES, type ThemeId } from './theme.js';
 
-// Workspace-scoped settings live in graf.manifest.json, so the dialog reads and writes them
+// Workspace-scoped settings live in grafd.manifest.json, so the dialog reads and writes them
 // through the app rather than touching the localStorage the user-level preferences use.
 export interface WorkspaceDisplaySettings {
   roughness(): number;

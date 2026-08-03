@@ -9,7 +9,7 @@
 //   watcher for synchronized editing (workspace-folder.ts).
 //
 // Paths are portable (forward-slash, workspace-root-relative). The workspace manifest
-// (graf.manifest.json) travels through the same read/write calls as any other file;
+// (grafd.manifest.json) travels through the same read/write calls as any other file;
 // backends exclude it from file listings.
 
 export type WorkspaceKind = 'server' | 'browser' | 'folder';

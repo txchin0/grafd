@@ -1,9 +1,9 @@
 // User-level options for the editor chrome. These live in localStorage rather than in
-// graf.manifest.json because they describe how this browser draws any workspace, not
+// grafd.manifest.json because they describe how this browser draws any workspace, not
 // anything about a workspace's documents — the manifest travels inside a .zip export, and
 // one person's display choices must not ride along into someone else's copy.
 
-export const PREFERENCES_STORAGE_KEY = 'graf.preferences';
+export const PREFERENCES_STORAGE_KEY = 'grafd.preferences';
 
 import { EDITOR_LINK_SCHEMES, type EditorLinkScheme } from './reference-link.js';
 import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from './theme.js';

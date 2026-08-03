@@ -36,5 +36,5 @@ async function fetchSaveGuide(): Promise<string> {
 }
 
 function archiveName(workspaceLabel: string): string {
-  return `${safeFileStem(workspaceLabel) || 'graf-workspace'}.flow.zip`;
+  return `${safeFileStem(workspaceLabel) || 'grafd-workspace'}.flow.zip`;
 }

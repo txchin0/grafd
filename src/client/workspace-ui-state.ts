@@ -1,4 +1,4 @@
-// The workspace's `graf.manifest.json`: its entrypoint, its display settings, plus the UI
+// The workspace's `grafd.manifest.json`: its entrypoint, its display settings, plus the UI
 // state the editor remembers between sessions — which flow was open, where each flow's camera
 // sat, and which frames were unfolded in it.
 //

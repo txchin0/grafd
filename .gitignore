@@ -2,7 +2,7 @@ node_modules/
 dist/
 site/
 .tmp-font/
-graf.manifest.json
+grafd.manifest.json
 .env
 .env.*
 *.log

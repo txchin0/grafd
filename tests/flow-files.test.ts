@@ -7,7 +7,7 @@ import { contentHash, listFlowFiles, resolveWorkspacePath, toPortablePath } from
 let root: string;
 
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), 'graf-test-'));
+  root = await mkdtemp(path.join(tmpdir(), 'grafd-test-'));
   await mkdir(path.join(root, 'sub'));
   await mkdir(path.join(root, 'node_modules'));
   await mkdir(path.join(root, 'dist'));
@@ -31,8 +31,8 @@ describe('resolveWorkspacePath', () => {
   });
 
   it('resolves the workspace manifest at the root only', () => {
-    expect(resolveWorkspacePath(root, 'graf.manifest.json')).toBe(path.join(root, 'graf.manifest.json'));
-    expect(resolveWorkspacePath(root, 'sub/graf.manifest.json')).toBeNull();
+    expect(resolveWorkspacePath(root, 'grafd.manifest.json')).toBe(path.join(root, 'grafd.manifest.json'));
+    expect(resolveWorkspacePath(root, 'sub/grafd.manifest.json')).toBeNull();
   });
 
   it('rejects traversal outside the root', () => {

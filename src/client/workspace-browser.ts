@@ -1,4 +1,4 @@
-// Serverless default workspace: files persist in IndexedDB so a statically hosted Graf
+// Serverless default workspace: files persist in IndexedDB so a statically hosted Grafd
 // keeps the user's work across visits. Other tabs on the same origin edit the same store;
 // a BroadcastChannel relays writes between them (tagged with a sender id so a tab ignores
 // its own).
@@ -7,10 +7,10 @@ import { MANIFEST_FILE_NAME } from '../shared/manifest.js';
 import { newUuid } from '../shared/flow-format.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
 
-const DATABASE_NAME = 'graf-workspace';
+const DATABASE_NAME = 'grafd-workspace';
 const DATABASE_VERSION = 1;
 const FILE_STORE = 'files';
-const CHANNEL_NAME = 'graf-workspace';
+const CHANNEL_NAME = 'grafd-workspace';
 
 interface StoredFile {
   path: string;

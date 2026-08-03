@@ -10,13 +10,14 @@ export interface ThemeDescriptor {
 }
 
 export const THEMES = [
-  { id: 'graf-dark', label: 'Graf Dark' },
-  { id: 'graf-light', label: 'Graf Light' },
+  { id: 'grafd-dark', label: 'Grafd Dark' },
+  { id: 'grafd-light', label: 'Grafd Light' },
+  { id: 'monokai-night', label: 'Monokai Night' },
 ] as const satisfies readonly ThemeDescriptor[];
 
 export type ThemeId = (typeof THEMES)[number]['id'];
 
-export const DEFAULT_THEME_ID: ThemeId = 'graf-dark';
+export const DEFAULT_THEME_ID: ThemeId = 'grafd-dark';
 
 export function isThemeId(value: unknown): value is ThemeId {
   return THEMES.some((theme) => theme.id === value);

@@ -20,7 +20,7 @@ const developmentMode = commandLineArguments.includes('--dev');
 const workspaceArgument = commandLineArguments.find((argument) => !argument.startsWith('--'));
 const workspaceRoot = path.resolve(repoRoot, workspaceArgument ?? DEFAULT_WORKSPACE);
 // Reference targets are relative to the project root — the directory an agent works in,
-// which is where graf was launched from — not to the .flow workspace under it.
+// which is where Grafd was launched from — not to the .flow workspace under it.
 const projectRootArgument = commandLineArguments.find((argument) => argument.startsWith(PROJECT_ROOT_FLAG));
 const projectRoot = projectRootArgument
   ? path.resolve(projectRootArgument.slice(PROJECT_ROOT_FLAG.length))
@@ -204,5 +204,5 @@ if (developmentMode) watchCompiledOutputForReload();
 
 httpServer.listen(PORT, () => {
   const mode = developmentMode ? ', live reload on' : '';
-  console.log(`Graf editor running at http://localhost:${PORT} (watching ${workspaceRoot}${mode})`);
+  console.log(`Grafd editor running at http://localhost:${PORT} (watching ${workspaceRoot}${mode})`);
 });
