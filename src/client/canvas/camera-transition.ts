@@ -1,6 +1,7 @@
 import type { Rect } from '../../shared/flow-format.js';
 import { displayRects, type FlowModel } from '../flow-doc.js';
-import { boundsOfRects, lerp, rectCenter, type Point } from '../geometry.js';
+import { boundsOfRects } from '../../shared/rect-math.js';
+import { lerp, rectCenter, type Point } from '../geometry.js';
 import { subModelBounds, transformPoint, type FrameTransform } from './expansion.js';
 
 export interface View {

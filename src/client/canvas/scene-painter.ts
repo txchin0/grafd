@@ -18,7 +18,8 @@ import {
   type ModelEdge,
   type NodeTraits,
 } from '../flow-doc.js';
-import { unionRect, type Point } from '../geometry.js';
+import type { Point } from '../geometry.js';
+import { unionRect } from '../../shared/rect-math.js';
 import { canvasPalette } from '../theme.js';
 import type { HiddenCanvasTitles } from './canvas-view.js';
 import { edgeEnd, edgePathApproach, edgePathMidpoint } from './edge-path.js';

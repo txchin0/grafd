@@ -25,15 +25,14 @@ import * as FlowDoc from '../flow-doc.js';
 import type { EdgeSpec } from '../../shared/flow-format.js';
 import type { FlowModel, ModelEdge } from '../flow-doc.js';
 import {
-  boundsOfRects,
   easeInOutCubic,
   halfExtentAlong,
   lerp,
-  padRect,
   rectCenter,
   rectContains,
   type Point,
 } from '../geometry.js';
+import { boundsOfRects, padRect } from '../../shared/rect-math.js';
 
 export interface FrameTransform {
   scale: number;

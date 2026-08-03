@@ -28,17 +28,15 @@ import {
   type ModelEdge,
 } from '../flow-doc.js';
 import {
-  boundsOfRects,
   easeInOutCubic,
   normalizedRect,
-  padRect,
   rectBorderPointToward,
   rectCenter,
-  rectContainsRect,
   rectContains,
   rectsIntersect,
   type Point,
 } from '../geometry.js';
+import { boundsOfRects, padRect, rectContainsRect } from '../../shared/rect-math.js';
 import {
   distanceToEdgePath,
   type EdgeGeometry,

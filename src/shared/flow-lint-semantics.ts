@@ -8,8 +8,10 @@
 // as `unknown` and stays quiet about them; the workspace pass answers them for real.
 
 import { error, warning, type Diagnostic } from './flow-diagnostics.js';
-import { isLegalNodeName, parseEdgeExpression, parseExpandLink, parseListValue } from './flow-format.js';
+import { isLegalNodeName, parseEdgeExpression, parseExpandLink, parseListValue, parsePos, type Rect } from './flow-format.js';
 import { parseReferenceLineRange } from './reference-target.js';
+import { autoLayout, type LayoutEdge, type LayoutNode } from './auto-layout.js';
+import { rectContainsRect, regionRectFrom } from './rect-math.js';
 import type {
   ScannedContext,
   ScannedEdge,
@@ -209,6 +211,7 @@ function reportContextBlocks(file: ScannedFile, diagnostics: Diagnostic[]): void
     file.scopes.filter((scope) => scope.name != null).flatMap((scope) => scope.nodes.map((node) => node.name)),
   );
   const inherited = new Set(inheritedContextNames(file));
+  const placedRects = file.contexts.length > 0 ? placedTopLevelRects(file) : new Map<ScannedNode, Rect>();
 
   for (const block of file.contexts) {
     if (inherited.has(block.name)) {
@@ -222,6 +225,10 @@ function reportContextBlocks(file: ScannedFile, diagnostics: Diagnostic[]): void
     }
     reportContextMembers(block, topLevelNames, nestedNames, diagnostics);
     reportContextGeometry(block, diagnostics);
+    // A redeclared inherited context is inert — the declaring graph owns its membership — so a
+    // region drawn on the redeclaration cannot recruit nodes; flagging them would contradict the
+    // redeclaration warning above.
+    if (!inherited.has(block.name)) reportUnassignedRegionMembers(block, placedRects, diagnostics);
     reportReferences(block.references, diagnostics);
   }
 }
@@ -261,6 +268,59 @@ function reportContextGeometry(block: ScannedContext, diagnostics: Diagnostic[])
       `Context "${block.name}" lists no nodes and reserves no area, so nothing can read it and no region is drawn.`,
     ),
   );
+}
+
+// A region draws the area the user drew plus its members' padded bounds, and a node the canvas
+// would show fully inside that area is a member in all but name: the editor auto-assigns it on
+// the next drag through the region, while anyone reading the file sees the node as part of the
+// provider. Placement is the canvas's own — auto-layout for nodes without `pos` — so the linter
+// judges the same rects the painter would.
+function reportUnassignedRegionMembers(
+  block: ScannedContext,
+  placedRects: Map<ScannedNode, Rect>,
+  diagnostics: Diagnostic[],
+): void {
+  const blockPosProperty = findProperty(block, 'pos');
+  const blockPos = blockPosProperty ? parsePos(blockPosProperty.value) : null;
+  const memberRects = block.members
+    .map((member) => [...placedRects].find(([node]) => node.name === member.name)?.[1])
+    .filter((rect): rect is Rect => rect != null);
+  const region = regionRectFrom(blockPos, memberRects);
+  if (!region) return;
+
+  const memberNames = new Set(block.members.map((member) => member.name));
+  for (const [node, rect] of placedRects) {
+    if (memberNames.has(node.name) || !rectContainsRect(region, rect)) continue;
+    diagnostics.push(
+      warning(
+        'node-inside-unassigned-region',
+        node.line,
+        `"${node.name}" lies fully inside the region of context "${block.name}" but is not listed under its \`nodes:\`; drag it into the region or move it out.`,
+      ),
+    );
+  }
+}
+
+// The canvas places every top-level node before painting (flow-doc.ts buildModel): an authored
+// `pos` where the file has one, the auto-layout grid where it does not. Recomputing that here
+// keeps the region check honest for files the editor has not touched yet.
+function placedTopLevelRects(file: ScannedFile): Map<ScannedNode, Rect> {
+  const root = rootScope(file);
+  const nodes: LayoutNode[] = (root?.nodes ?? []).map((node) => ({
+    name: node.name,
+    pos: posOf(node),
+  }));
+  const nodesByName = new Map(nodes.map((node) => [node.name, node]));
+  const edges: LayoutEdge[] = (root?.nodes ?? []).flatMap((node) =>
+    node.edges.map((edge) => ({ from: nodesByName.get(node.name)!, spec: edge.spec, kind: 'flow' })),
+  );
+  autoLayout(nodes, edges);
+  return new Map((root?.nodes ?? []).map((node, index) => [node, nodes[index].pos!]));
+}
+
+function posOf(node: ScannedNode): Rect | null {
+  const property = findProperty(node, 'pos');
+  return property ? parsePos(property.value) : null;
 }
 
 function reportEdgeTarget(

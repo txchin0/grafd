@@ -43,6 +43,7 @@ import {
   type Rect,
   type Reference,
 } from '../shared/flow-format.js';
+import { DEFAULT_NODE_SIZE } from '../shared/auto-layout.js';
 import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, MembershipChange, ModelEdge } from './flow-doc.js';
 import type { Point } from './geometry.js';
@@ -453,7 +454,7 @@ function breadcrumbSeparator(): HTMLElement {
 }
 
 function centeredDefaultRect(worldPoint: Point): Rect {
-  const { w, h } = FlowDoc.DEFAULT_NODE_SIZE;
+  const { w, h } = DEFAULT_NODE_SIZE;
   return { x: Math.round(worldPoint.x - w / 2), y: Math.round(worldPoint.y - h / 2), w, h };
 }
 

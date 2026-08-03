@@ -4,6 +4,7 @@
 // each build on it without reaching for one another.
 
 import type { Rect } from '../shared/flow-format.js';
+import { padRect } from '../shared/rect-math.js';
 
 export interface Point {
   x: number;
@@ -29,15 +30,6 @@ export function rectContains(rect: Rect, point: Point): boolean {
   );
 }
 
-/** Whether `outer` fully encloses `inner`, touching borders included. */
-export function rectContainsRect(outer: Rect, inner: Rect): boolean {
-  return (
-    inner.x >= outer.x && inner.y >= outer.y &&
-    inner.x + inner.w <= outer.x + outer.w &&
-    inner.y + inner.h <= outer.y + outer.h
-  );
-}
-
 // Whether a point falls within `band` of the rect's outline, inside or out. What makes a region
 // grabbable by its frame while its interior stays free for gestures aimed past it.
 export function pointNearRectBorder(rect: Rect, point: Point, band: number): boolean {
@@ -51,21 +43,6 @@ export function rectsIntersect(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
-export function unionRect(a: Rect, b: Rect): Rect {
-  const left = Math.min(a.x, b.x);
-  const top = Math.min(a.y, b.y);
-  return {
-    x: left,
-    y: top,
-    w: Math.max(a.x + a.w, b.x + b.w) - left,
-    h: Math.max(a.y + a.h, b.y + b.h) - top,
-  };
-}
-
-export function padRect(rect: Rect, padding: number): Rect {
-  return { x: rect.x - padding, y: rect.y - padding, w: rect.w + padding * 2, h: rect.h + padding * 2 };
-}
-
 /** The axis-aligned rect spanned by two corners, in either order. */
 export function normalizedRect(pointA: Point, pointB: Point): Rect {
   return {
@@ -74,16 +51,6 @@ export function normalizedRect(pointA: Point, pointB: Point): Rect {
     w: Math.abs(pointA.x - pointB.x),
     h: Math.abs(pointA.y - pointB.y),
   };
-}
-
-/** The rect enclosing every rect given, or null when there are none to enclose. */
-export function boundsOfRects(rects: Rect[]): Rect | null {
-  if (rects.length === 0) return null;
-  const minX = Math.min(...rects.map((rect) => rect.x));
-  const minY = Math.min(...rects.map((rect) => rect.y));
-  const maxX = Math.max(...rects.map((rect) => rect.x + rect.w));
-  const maxY = Math.max(...rects.map((rect) => rect.y + rect.h));
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
 /** The unit vector pointing from one point to another, or a zero vector if they coincide. */

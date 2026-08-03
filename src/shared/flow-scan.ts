@@ -160,8 +160,8 @@ export function rootScope(file: ScannedFile): ScannedScope | null {
   return file.scopes.find((scope) => scope.name == null) ?? null;
 }
 
-export function findProperty(node: ScannedNode, key: string): ScannedProperty | null {
-  return node.properties.find((property) => property.key === key) ?? null;
+export function findProperty(holder: { properties: ScannedProperty[] }, key: string): ScannedProperty | null {
+  return holder.properties.find((property) => property.key === key) ?? null;
 }
 
 function skipBlankLines(lines: string[], index: number): number {

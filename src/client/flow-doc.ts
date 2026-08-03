@@ -34,7 +34,9 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import type { DisplayGeometry } from './canvas/expansion.js';
-import { boundsOfRects, padRect, rectContainsRect, unionRect, type Point } from './geometry.js';
+import type { Point } from './geometry.js';
+import { DEFAULT_NODE_SIZE, autoLayout } from '../shared/auto-layout.js';
+import { rectContainsRect, regionRectFrom } from '../shared/rect-math.js';
 
 export interface GhostNode {
   name: string;
@@ -109,17 +111,13 @@ export function displayRects(model: FlowModel): Rect[] {
   ].filter((rect): rect is Rect => rect != null);
 }
 
-// Where a region draws (spec §8.3): the union of the area the user drew, if any, with its
-// members' bounds — which is what makes every member contained by construction. Null when there
-// is neither, since the editor never invents geometry for a region and never writes one back.
+// Where a region draws: the shared derivation of a block's drawn area with its members' padded
+// bounds. Shared with the linter, which must flag against exactly what the canvas paints.
 export function regionRectOf(model: FlowModel, context: ModelContext): Rect | null {
   const memberRects = context.members
     .map((member) => displayRectOf(model, member))
     .filter((rect): rect is Rect => rect != null);
-  const memberBounds = boundsOfRects(memberRects);
-  if (!memberBounds) return context.block.pos;
-  const padded = padRect(memberBounds, REGION_MEMBER_PADDING);
-  return context.block.pos ? unionRect(context.block.pos, padded) : padded;
+  return regionRectFrom(context.block.pos, memberRects);
 }
 
 // Which providers a top-level node may read (spec §8.5): the blocks listing it, plus everything
@@ -207,14 +205,7 @@ export function displayRectOf(model: FlowModel, node: FlowNode): Rect {
   return model.display?.rects.get(node) ?? node.pos!;
 }
 
-export const DEFAULT_NODE_SIZE = { w: 200, h: 88 };
-// How far a region's frame stands off its members, so the enclosure reads as one and a member's
-// own outline never touches it.
-export const REGION_MEMBER_PADDING = 26;
 const EXTRACTED_SUBGRAPH_NAME = 'Subgraph';
-const LAYOUT_COLUMN_WIDTH = 280;
-const LAYOUT_ROW_HEIGHT = 140;
-const LAYOUT_ORIGIN = { x: 80, y: 80 };
 
 export function assignMissingIds(doc: FlowDocument): void {
   for (const node of allNodes(doc)) {
@@ -445,58 +436,6 @@ function contextNamesByNode(contexts: ModelContext[]): Map<FlowNode, string[]> {
     }
   }
   return namesByNode;
-}
-
-export function autoLayout(nodes: FlowNode[], edges: ModelEdge[]): void {
-  const unplaced = nodes.filter((node) => !node.pos);
-  if (unplaced.length === 0) return;
-
-  const depths = computeFlowDepths(nodes, edges);
-  const startY = bottomOfPlacedNodes(nodes) ?? LAYOUT_ORIGIN.y;
-  const rowsUsedPerColumn = new Map<number, number>();
-
-  for (const node of unplaced) {
-    const column = depths.get(node.name) ?? 0;
-    const row = rowsUsedPerColumn.get(column) ?? 0;
-    rowsUsedPerColumn.set(column, row + 1);
-    node.pos = {
-      x: LAYOUT_ORIGIN.x + column * LAYOUT_COLUMN_WIDTH,
-      y: startY + row * LAYOUT_ROW_HEIGHT,
-      w: DEFAULT_NODE_SIZE.w,
-      h: DEFAULT_NODE_SIZE.h,
-    };
-  }
-}
-
-function bottomOfPlacedNodes(nodes: FlowNode[]): number | null {
-  const placed = nodes.filter((node) => node.pos);
-  if (placed.length === 0) return null;
-  return Math.max(...placed.map((node) => node.pos!.y + node.pos!.h)) + 90;
-}
-
-function computeFlowDepths(nodes: FlowNode[], edges: ModelEdge[]): Map<string, number> {
-  const outgoing = new Map<string, string[]>(nodes.map((node) => [node.name, []]));
-  const namesWithIncoming = new Set<string>();
-  for (const edge of edges) {
-    if (edge.kind !== 'flow') continue;
-    outgoing.get(edge.from.name)?.push(edge.spec.target);
-    namesWithIncoming.add(edge.spec.target);
-  }
-
-  const depths = new Map<string, number>();
-  const queue = nodes
-    .filter((node) => !namesWithIncoming.has(node.name))
-    .map((node) => ({ name: node.name, depth: 0 }));
-
-  while (queue.length > 0) {
-    const { name, depth } = queue.shift()!;
-    if (depths.has(name)) continue;
-    depths.set(name, depth);
-    for (const targetName of outgoing.get(name) ?? []) {
-      queue.push({ name: targetName, depth: depth + 1 });
-    }
-  }
-  return depths;
 }
 
 export function ensureLayoutEverywhere(doc: FlowDocument): void {

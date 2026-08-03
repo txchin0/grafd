@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { REGION_MEMBER_PADDING } from '../src/shared/rect-math.js';
+import { DEFAULT_NODE_SIZE } from '../src/shared/auto-layout.js';
 import {
   emptyNode,
   getPreambleField,
@@ -25,7 +27,6 @@ import {
   displayRects,
   inheritedContextNames,
   groupNodesByOwner,
-  DEFAULT_NODE_SIZE,
   deleteContextBlock,
   deleteEdge,
   deleteNodes,
@@ -41,7 +42,6 @@ import {
   hostsOfExpansion,
   membershipChangesForNewNode,
   nodesIn,
-  REGION_MEMBER_PADDING,
   regionRectOf,
   renameGraphBlock,
   renameNode,
@@ -52,7 +52,7 @@ import {
   setNodeReferences,
   type ModelEdge,
 } from '../src/client/flow-doc.js';
-import { boundsOfRects } from '../src/client/geometry.js';
+import { boundsOfRects } from '../src/shared/rect-math.js';
 
 const PLACED = (x: number, y: number) => `pos: ${x}, ${y}, 200, 88`;
 

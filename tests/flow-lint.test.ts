@@ -261,6 +261,136 @@ describe('semantic rules', () => {
     expect(rulesOf(drawn)).not.toContain('context-region-has-no-geometry');
   });
 
+  it('reports a node lying fully inside a region that does not list it', () => {
+    const text = `---
+name: T
+---
+
+context: Cart
+  pos: 0, 0, 400, 300
+  nodes:
+    - A
+
+A
+  pos: 40, 40, 200, 88
+
+B
+  pos: 100, 100, 100, 50
+`;
+    const diagnostics = lintFlowFile(text);
+    expect(diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ rule: 'node-inside-unassigned-region', severity: 'warning', line: 13 }),
+      ]),
+    );
+    expect(rulesOf(text).filter((rule) => rule === 'node-inside-unassigned-region')).toHaveLength(1);
+  });
+
+  it('accepts a listed member inside its region, and a node that only overlaps it', () => {
+    const text = `---
+name: T
+---
+
+context: Cart
+  pos: 0, 0, 400, 300
+  nodes:
+    - A
+    - B
+
+A
+  pos: 40, 40, 200, 88
+
+B
+  pos: 100, 100, 100, 50
+
+C
+  pos: 300, 250, 200, 100
+`;
+    expect(rulesOf(text)).not.toContain('node-inside-unassigned-region');
+  });
+
+  // A region created by grouping a selection has no `pos` — its frame is the members' padded
+  // bounds (spec §8.3), so the padding band counts toward the drawn area.
+  it('derives a memberless region from the members\' bounds, padding included', () => {
+    const text = `---
+name: T
+---
+
+context: Cart
+  nodes:
+    - A
+
+A
+  pos: 40, 40, 200, 88
+
+B
+  pos: 60, 100, 80, 30
+`;
+    expect(rulesOf(text)).toContain('node-inside-unassigned-region');
+  });
+
+  // The canvas auto-lays out a node with no `pos` before painting, so the linter places it the
+  // same way instead of skipping it.
+  it('places a node without pos on the auto-layout grid before judging it', () => {
+    const text = `---
+name: T
+---
+
+context: Cart
+  pos: 0, 0, 400, 400
+  nodes:
+    - A
+
+A
+  pos: 40, 40, 200, 88
+
+B
+`;
+    expect(rulesOf(text)).toContain('node-inside-unassigned-region');
+  });
+
+  it('stays silent without any region geometry, or for nodes that cannot be members', () => {
+    const noGeometry = '---\nname: T\n---\n\ncontext: Cart\n  nodes:\n\nA\n';
+    expect(rulesOf(noGeometry)).not.toContain('node-inside-unassigned-region');
+
+    const nested = `---
+name: T
+---
+
+context: Cart
+  pos: 0, 0, 400, 300
+  nodes:
+
+A
+  pos: 500, 500, 100, 50
+  expand: Sub
+
+graph: Sub
+  Inner
+    pos: 100, 100, 100, 50
+`;
+    expect(rulesOf(nested)).not.toContain('node-inside-unassigned-region');
+  });
+
+  // A redeclared inherited context is inert — the declaring graph owns its membership — so a
+  // region drawn on the redeclaration must not recruit nodes; both warnings on one block would
+  // contradict each other.
+  it('does not report nodes inside a region that redeclares an inherited context', () => {
+    const text = `---
+name: T
+inherits: [Cart]
+---
+
+context: Cart
+  pos: 0, 0, 400, 300
+
+A
+  pos: 40, 40, 200, 88
+`;
+    expect(rulesOf(text)).toContain('context-redeclares-inherited');
+    expect(rulesOf(text)).not.toContain('node-inside-unassigned-region');
+  });
+
   it('reports a duplicated edge', () => {
     expect(rulesOf('---\nname: T\n---\n\nA\n  -> B\n  -> B\n\nB\n')).toContain('duplicate-edge');
   });
