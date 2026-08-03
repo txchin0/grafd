@@ -28,7 +28,9 @@ tests in `tests/`.
 
 `npm run lint:flow` builds, then lints every `.flow` file in `flows/` (pass one or more
 workspace directories to lint elsewhere; `--strict` also fails on warnings, `--format=json`
-emits machine-readable output). **Run it after editing any `.flow` file.**
+emits machine-readable output). It compiles into a scratch `.lint-build/` directory rather
+than `dist/`, so it is safe to run alongside `npm run dev` without killing the server.
+**Run it after editing any `.flow` file.**
 
 The parser is deliberately tolerant — it never reports an error and silently discards any
 line it does not recognize. Since the editor round-trips every file it opens (parse →

@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.lint-build/
 site/
 .tmp-font/
 grafd.manifest.json
