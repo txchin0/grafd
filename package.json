@@ -13,6 +13,7 @@
     "watch": "tsc -p tsconfig.build.json --watch",
     "typecheck": "tsc",
     "lint:flow": "npm run build && node dist/tools/flow-lint.js",
+    "import:theme": "npm run build && node dist/tools/theme-import.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },

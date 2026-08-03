@@ -97,3 +97,41 @@
   --canvas-marquee-fill: rgba(0, 95, 184, 0.1);
   --canvas-port-fill: #ffffff;
 }
+
+:root[data-theme="monokai-night"] {
+  --color-scheme: dark;
+  --bg: #1f1f1f;
+  --panel: #161616;
+  --panel-border: #000000;
+  --ink: #dddddd;
+  --muted: #666666;
+  --accent: #007acc;
+  --danger: #dddddd;
+  --success: #007acc;
+  --disabled: #363636;
+  --row-hover: #1f1f1f;
+  --row-active: #262626;
+  --field-bg: #363636;
+  --scrim: rgba(0, 0, 0, 0.55);
+  --shadow-floating: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.55);
+  --canvas-grid: #363636;
+  --canvas-ink: #dddddd;
+  --canvas-muted: rgba(102, 102, 102, 0.6);
+  --canvas-node-fill: rgba(31, 31, 31, 0.94);
+  --canvas-node-stroke: #666666;
+  --canvas-entry-stroke: #E6DB74;
+  --canvas-decision-stroke: #AE81FF;
+  --canvas-expand-stroke: #F92672;
+  --canvas-region-stroke: #A6E22E;
+  --canvas-region-fill: rgba(166, 226, 46, 0.13);
+  --canvas-ghost: rgba(102, 102, 102, 0.45);
+  --canvas-edge: #666666;
+  --canvas-edge-label: rgba(221, 221, 221, 0.75);
+  --canvas-edge-label-bg: #363636;
+  --canvas-error: #dddddd;
+  --canvas-updates: #007acc;
+  --canvas-select: #007acc;
+  --canvas-marquee-fill: rgba(0, 122, 204, 0.08);
+  --canvas-port-fill: #1f1f1f;
+}
