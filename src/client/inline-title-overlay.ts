@@ -44,15 +44,27 @@ function applyTypography(input: HTMLInputElement, box: InlineTitleBox): void {
   input.style.color = box.color;
 }
 
-export function positionInlineTitleInput(
+// The overlay's positioned element and the input whose typography tracks the canvas ink: the node
+// title editor positions the input itself, the region name editor positions its panel instead and
+// styles the input inside it. Both apply the same box, so they share the positioning core.
+function positionInlineTitle(
+  positioned: HTMLElement,
   input: HTMLInputElement,
   view: CanvasView,
   placement: TitlePlacement,
 ): void {
   const box = inlineTitleBox(view, placement);
-  input.style.left = `${box.left}px`;
-  input.style.top = `${box.top}px`;
+  positioned.style.left = `${box.left}px`;
+  positioned.style.top = `${box.top}px`;
   applyTypography(input, box);
+}
+
+export function positionInlineTitleInput(
+  input: HTMLInputElement,
+  view: CanvasView,
+  placement: TitlePlacement,
+): void {
+  positionInlineTitle(input, input, view, placement);
 }
 
 export function positionInlineTitlePanel(
@@ -61,8 +73,5 @@ export function positionInlineTitlePanel(
   view: CanvasView,
   placement: TitlePlacement,
 ): void {
-  const box = inlineTitleBox(view, placement);
-  panel.style.left = `${box.left}px`;
-  panel.style.top = `${box.top}px`;
-  applyTypography(input, box);
+  positionInlineTitle(panel, input, view, placement);
 }
