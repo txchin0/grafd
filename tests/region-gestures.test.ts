@@ -11,7 +11,7 @@ import {
 } from '../src/client/canvas/region-gestures.js';
 import type { ModelContext } from '../src/client/flow-doc.js';
 import { parseFlow } from '../src/shared/flow-format.js';
-import { buildModel, regionRectOf } from '../src/client/flow-doc.js';
+import { buildModel } from '../src/client/flow-doc.js';
 
 const identity = (value: number) => value;
 const snap8 = (value: number) => Math.round(value / 8) * 8;
@@ -43,6 +43,20 @@ Login
   pos: 40, 40, 120, 64
 `;
 
+// A second drawn region, used only to prove the move math translates carried blocks.
+const CONTAINED = `---
+name: Demo
+---
+
+context: Auth
+  pos: 0, 0, 200, 120
+  nodes:
+
+context: Inner
+  pos: 300, 300, 200, 120
+  nodes:
+`;
+
 function contextNamed(text: string, name: string): ModelContext {
   const model = buildModel(parseFlow(text), null);
   const context = model.contexts.find((entry) => entry.block.name === name);
@@ -56,8 +70,9 @@ describe('applyRegionMove', () => {
     const member = context.members[0];
     const gesture: RegionMoveSnapshot = {
       context,
-      startRect: { ...context.block.pos! },
+      carriedContexts: [],
       startPositions: new Map([[member, { x: member.pos!.x, y: member.pos!.y }]]),
+      startRects: new Map([[context.block, { ...context.block.pos! }]]),
       startWorld: { x: 10, y: 10 },
       moved: false,
     };
@@ -72,8 +87,9 @@ describe('applyRegionMove', () => {
     const member = context.members[0];
     const gesture: RegionMoveSnapshot = {
       context,
-      startRect: regionRectOf(buildModel(parseFlow(MEMBER_DERIVED), null), context)!,
+      carriedContexts: [],
       startPositions: new Map([[member, { x: 40, y: 40 }]]),
+      startRects: new Map(),
       startWorld: { x: 0, y: 0 },
       moved: false,
     };
@@ -81,6 +97,25 @@ describe('applyRegionMove', () => {
     expect(context.block.pos).toBeNull();
     expect(member.pos!.x).toBe(48);
     expect(member.pos!.y).toBe(48);
+  });
+
+  it('translates the pos of every region of the group by the same delta', () => {
+    const outer = contextNamed(DRAWN, 'Auth');
+    const inner = contextNamed(CONTAINED, 'Inner');
+    const gesture: RegionMoveSnapshot = {
+      context: outer,
+      carriedContexts: [inner],
+      startPositions: new Map(),
+      startRects: new Map([
+        [outer.block, { ...outer.block.pos! }],
+        [inner.block, { ...inner.block.pos! }],
+      ]),
+      startWorld: { x: 0, y: 0 },
+      moved: false,
+    };
+    applyRegionMove(gesture, { x: 40, y: 24 }, identity);
+    expect(outer.block.pos).toEqual({ x: 40, y: 24, w: 200, h: 120 });
+    expect(inner.block.pos).toEqual({ x: 340, y: 324, w: 200, h: 120 });
   });
 });
 
@@ -135,10 +170,15 @@ describe('rollback', () => {
   it('restores members and pos after an abandoned move', () => {
     const context = contextNamed(DRAWN, 'Auth');
     const member = context.members[0];
+    const inner = contextNamed(CONTAINED, 'Inner');
     const gesture: RegionMoveSnapshot = {
       context,
-      startRect: { x: 0, y: 0, w: 200, h: 120 },
+      carriedContexts: [inner],
       startPositions: new Map([[member, { x: 40, y: 40 }]]),
+      startRects: new Map([
+        [context.block, { x: 0, y: 0, w: 200, h: 120 }],
+        [inner.block, { x: 300, y: 300, w: 200, h: 120 }],
+      ]),
       startWorld: { x: 0, y: 0 },
       moved: true,
     };
@@ -146,6 +186,7 @@ describe('rollback', () => {
     rollbackRegionMove(gesture);
     expect(member.pos).toMatchObject({ x: 40, y: 40 });
     expect(context.block.pos).toEqual({ x: 0, y: 0, w: 200, h: 120 });
+    expect(inner.block.pos).toEqual({ x: 300, y: 300, w: 200, h: 120 });
   });
 
   it('restores pos after an abandoned resize', () => {

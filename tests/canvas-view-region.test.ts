@@ -3,7 +3,7 @@
 // its live one, which follows the node being dragged.
 
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { parseFlow, type FlowNode, type Rect } from '../src/shared/flow-format.js';
+import { parseFlow, serializeFlow, type FlowNode, type Rect } from '../src/shared/flow-format.js';
 import {
   allNodes,
   assignMissingIds,
@@ -92,6 +92,192 @@ Inside
 Far
   id: far-1
   pos: 1400, 900, 200, 88
+`;
+
+// A drawn region enclosing a second drawn region whose member belongs only to the inner one, so
+// a drag has to carry the group, not just the outer members (R28a).
+const NESTED_FLOW = `---
+name: Nested
+---
+
+context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+    - Inside
+
+context: Inner
+  pos: 400, 320, 200, 120
+  nodes:
+    - Deep
+
+Inside
+  id: in-1
+  pos: 200, 200, 200, 88
+
+Deep
+  id: deep-1
+  pos: 440, 360, 100, 50
+`;
+
+// Same layout, but Deep is listed by both regions: the shared member must be carried once.
+const SHARED_MEMBER_FLOW = `---
+name: Shared
+---
+
+context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+    - Inside
+    - Deep
+
+context: Inner
+  pos: 400, 320, 200, 120
+  nodes:
+    - Deep
+
+Inside
+  id: in-1
+  pos: 200, 200, 200, 88
+
+Deep
+  id: deep-1
+  pos: 440, 360, 100, 50
+`;
+
+// An inner region with no drawn area: carrying it means carrying its members, never writing a pos.
+const DERIVED_INNER_FLOW = `---
+name: Derived
+---
+
+context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+    - Inside
+
+context: Inner
+  nodes:
+    - Deep
+
+Inside
+  id: in-1
+  pos: 200, 200, 200, 88
+
+Deep
+  id: deep-1
+  pos: 440, 360, 100, 50
+`;
+
+// NESTED_FLOW plus a stationary node the group's move leaves inside the carried frame: the
+// carried region has to claim it, or it stays unassigned after the move.
+const SWEPT_INTO_INNER_FLOW = `---
+name: Swept
+---
+
+context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+    - Inside
+
+context: Inner
+  pos: 400, 320, 200, 120
+  nodes:
+    - Deep
+
+Inside
+  id: in-1
+  pos: 200, 200, 200, 88
+
+Deep
+  id: deep-1
+  pos: 440, 360, 100, 50
+
+Wanderer
+  id: w-1
+  pos: 1776, 936, 100, 50
+`;
+
+// DERIVED_INNER_FLOW plus a stationary node the move leaves inside the padded member bounds: the
+// pos-free carried region sweeps it in without ever gaining a pos of its own.
+const DERIVED_SWEEP_FLOW = `---
+name: DerivedSweep
+---
+
+context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+    - Inside
+
+context: Inner
+  nodes:
+    - Deep
+
+Inside
+  id: in-1
+  pos: 200, 200, 200, 88
+
+Deep
+  id: deep-1
+  pos: 440, 360, 100, 50
+
+Wanderer
+  id: w-1
+  pos: 1776, 936, 100, 50
+`;
+
+// Same geometry, with a member of the dragged region sitting inside the carried frame: it travels
+// with the group and the carried region claims its interior, exactly as the dragged one does.
+const LODGER_FLOW = `---
+name: Lodger
+---
+
+context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+    - Inside
+    - Lodger
+
+context: Inner
+  pos: 400, 320, 400, 200
+  nodes:
+    - Deep
+
+Inside
+  id: in-1
+  pos: 200, 200, 200, 88
+
+Deep
+  id: deep-1
+  pos: 440, 360, 100, 50
+
+Lodger
+  id: lod-1
+  pos: 560, 340, 120, 80
+`;
+
+// A stationary region the dragged frame comes to rest over: it stuck out of the frame at gesture
+// start, so it is not carried, and the move must leave its membership alone even though the frame
+// now encloses it. Passerby sits inside it unlisted, which is exactly the trap a sweep of the
+// live containment would fall into.
+const SWALLOW_FLOW = `---
+name: Swallow
+---
+
+context: Big
+  pos: 0, 0, 900, 900
+  nodes:
+
+context: Small
+  pos: 820, 100, 200, 200
+  nodes:
+    - InSmall
+
+InSmall
+  id: s-1
+  pos: 860, 140, 100, 50
+
+Passerby
+  id: p-1
+  pos: 880, 200, 100, 50
 `;
 
 let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
@@ -312,6 +498,116 @@ describe('moving a region', () => {
     expect(inside.pos).toEqual({ x: 200, y: 200, w: 200, h: 88 });
     expect(contextBlockNamed(doc, 'Zone')!.pos).toEqual({ x: 0, y: 0, w: 800, h: 600 });
     expect(actions.regionMoved).not.toHaveBeenCalled();
+  });
+});
+
+describe('moving a region over a contained region', () => {
+  // Dragging Zone by (1360, 600) lands every coordinate below on a grid multiple of 8.
+  it('carries the inner frame, its members, and the sweep-in, and writes the frame to the file (R28a)', () => {
+    const { doc, actions, canvas } = openedCanvas(NESTED_FLOW);
+    dragOnCanvas(canvas, { x: 0, y: 300 }, { x: 1360, y: 900 });
+
+    expect(contextBlockNamed(doc, 'Zone')!.pos).toEqual({ x: 1360, y: 600, w: 800, h: 600 });
+    expect(contextBlockNamed(doc, 'Inner')!.pos).toEqual({ x: 1760, y: 920, w: 200, h: 120 });
+    const deep = allNodes(doc).find((node) => node.name === 'Deep')!;
+    expect(deep.pos).toEqual({ x: 1800, y: 960, w: 100, h: 50 });
+
+    const movedCalls = (actions.regionMoved as unknown as { mock: { calls: [unknown, FlowNode[]][] } }).mock.calls;
+    expect(movedCalls[0][1].map((node) => node.name)).toEqual(['Inside', 'Deep']);
+    expect(asNames(regionChangesFrom(actions, 'regionMoved'))).toEqual([['Zone', 'Deep', 'joins']]);
+
+    // The carried frame is a block property like the dragged one's, so it must survive a
+    // serialize → parse round-trip, not just the in-memory mutation.
+    const reparsed = parseFlow(serializeFlow(doc));
+    expect(contextBlockNamed(reparsed, 'Inner')!.pos).toEqual({ x: 1760, y: 920, w: 200, h: 120 });
+  });
+
+  it('carries a member listed by both regions exactly once', () => {
+    const { actions, canvas } = openedCanvas(SHARED_MEMBER_FLOW);
+    dragOnCanvas(canvas, { x: 0, y: 300 }, { x: 1360, y: 900 });
+
+    const movedCalls = (actions.regionMoved as unknown as { mock: { calls: [unknown, FlowNode[]][] } }).mock.calls;
+    expect(movedCalls[0][1].map((node) => node.name)).toEqual(['Inside', 'Deep']);
+  });
+
+  it('leaves an inner region with no drawn area pos-free while carrying its members', () => {
+    const { doc, actions, canvas } = openedCanvas(DERIVED_INNER_FLOW);
+    dragOnCanvas(canvas, { x: 0, y: 300 }, { x: 1360, y: 900 });
+
+    expect(contextBlockNamed(doc, 'Inner')!.pos).toBeNull();
+    const deep = allNodes(doc).find((node) => node.name === 'Deep')!;
+    expect(deep.pos).toEqual({ x: 1800, y: 960, w: 100, h: 50 });
+    expect(asNames(regionChangesFrom(actions, 'regionMoved'))).toEqual([['Zone', 'Deep', 'joins']]);
+  });
+
+  it('rolls the carried region and its members back when the gesture is cancelled', () => {
+    const { doc, actions, canvas } = openedCanvas(NESTED_FLOW);
+    cancelledDrag(canvas, { x: 0, y: 300 }, { x: 1360, y: 900 });
+
+    expect(contextBlockNamed(doc, 'Zone')!.pos).toEqual({ x: 0, y: 0, w: 800, h: 600 });
+    expect(contextBlockNamed(doc, 'Inner')!.pos).toEqual({ x: 400, y: 320, w: 200, h: 120 });
+    const deep = allNodes(doc).find((node) => node.name === 'Deep')!;
+    expect(deep.pos).toEqual({ x: 440, y: 360, w: 100, h: 50 });
+    expect(actions.regionMoved).not.toHaveBeenCalled();
+  });
+
+  it('leaves a region it merely overlaps alone (R48)', () => {
+    const { doc, canvas } = openedCanvas(OVERLAPPING_FLOW);
+    dragOnCanvas(canvas, { x: 0, y: 300 }, { x: 48, y: 300 });
+
+    expect(contextBlockNamed(doc, 'Left')!.pos).toEqual({ x: 48, y: 0, w: 700, h: 700 });
+    expect(contextBlockNamed(doc, 'Right')!.pos).toEqual({ x: 400, y: 0, w: 700, h: 700 });
+    expect(allNodes(doc).find((node) => node.name === 'Outside')!.pos).toEqual({ x: 1600, y: 900, w: 200, h: 88 });
+  });
+
+  it('sweeps a stationary node the carried frame comes to rest over into the carried region', () => {
+    const { actions, canvas } = openedCanvas(SWEPT_INTO_INNER_FLOW);
+    dragOnCanvas(canvas, { x: 0, y: 300 }, { x: 1360, y: 900 });
+
+    expect(asNames(regionChangesFrom(actions, 'regionMoved')).sort()).toEqual([
+      ['Inner', 'Wanderer', 'joins'],
+      ['Zone', 'Deep', 'joins'],
+      ['Zone', 'Wanderer', 'joins'],
+    ]);
+  });
+
+  it('sweeps into a carried region with no drawn area, which stays pos-free', () => {
+    const { doc, actions, canvas } = openedCanvas(DERIVED_SWEEP_FLOW);
+    dragOnCanvas(canvas, { x: 0, y: 300 }, { x: 1360, y: 900 });
+
+    expect(contextBlockNamed(doc, 'Inner')!.pos).toBeNull();
+    expect(asNames(regionChangesFrom(actions, 'regionMoved')).sort()).toEqual([
+      ['Inner', 'Wanderer', 'joins'],
+      ['Zone', 'Deep', 'joins'],
+      ['Zone', 'Wanderer', 'joins'],
+    ]);
+  });
+
+  // The dragged region claims its whole interior (R29), and so does each carried one: a member of
+  // the dragged region already sitting inside the carried frame joins it as the group travels.
+  it('claims the carried frame for a travelling member that already sat inside it', () => {
+    const { actions, canvas } = openedCanvas(LODGER_FLOW);
+    dragOnCanvas(canvas, { x: 0, y: 300 }, { x: 1360, y: 900 });
+
+    expect(asNames(regionChangesFrom(actions, 'regionMoved')).sort()).toEqual([
+      ['Inner', 'Lodger', 'joins'],
+      ['Zone', 'Deep', 'joins'],
+    ]);
+  });
+
+  // The carried set was frozen at gesture start: a stationary region the dragged frame merely
+  // comes to rest over is not part of it, and its membership is untouched — Passerby sits inside
+  // Small unlisted, and stays unlisted.
+  it('leaves a stationary region the dragged frame comes to rest over unswept', () => {
+    const { doc, actions, canvas } = openedCanvas(SWALLOW_FLOW);
+    dragOnCanvas(canvas, { x: 0, y: 300 }, { x: 400, y: 300 });
+
+    expect(contextBlockNamed(doc, 'Big')!.pos).toEqual({ x: 400, y: 0, w: 900, h: 900 });
+    expect(contextBlockNamed(doc, 'Small')!.pos).toEqual({ x: 820, y: 100, w: 200, h: 200 });
+    expect(asNames(regionChangesFrom(actions, 'regionMoved')).sort()).toEqual([
+      ['Big', 'InSmall', 'joins'],
+      ['Big', 'Passerby', 'joins'],
+    ]);
   });
 });
 

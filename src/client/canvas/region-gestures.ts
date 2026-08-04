@@ -8,7 +8,17 @@ import type { ResizeCorner } from './resize-handles.js';
 
 export interface RegionMoveSnapshot {
   context: ModelContext;
-  startRect: Rect;
+  // The R28a group's other members: every region whose whole frame lay inside the dragged one's
+  // at gesture start. Frozen then — a region the dragged frame merely comes to rest over later is
+  // neither carried nor swept. The dragged context itself is not included.
+  carriedContexts: ModelContext[];
+  // The blocks with an authored `pos` that travel with the drag: the dragged region itself plus
+  // every carried region, with the `pos` each had then. A member-derived region has no entry —
+  // carrying it means carrying its members, never inventing a `pos` for it (R3).
+  startRects: ReadonlyMap<ContextBlock, Rect>;
+  // Every member of the dragged region and of each carried region, with the position it started
+  // at. A member shared by two regions of the group is recorded once, so the whole group moves
+  // and rolls back as one piece (R28a).
   startPositions: ReadonlyMap<FlowNode, Point>;
   startWorld: Point;
   moved: boolean;
@@ -34,10 +44,12 @@ export function applyRegionMove(gesture: RegionMoveSnapshot, world: Point, snap:
     member.pos!.x = snap(start.x + dx);
     member.pos!.y = snap(start.y + dy);
   }
-  const drawn = gesture.context.block.pos;
-  if (drawn) {
-    drawn.x = snap(gesture.startRect.x + dx);
-    drawn.y = snap(gesture.startRect.y + dy);
+  // The frames travel with the members they enclose: the dragged one and every carried one are
+  // translated by the same delta, or a carried region's members would slide out from under it
+  // (R28a).
+  for (const [block, start] of gesture.startRects) {
+    block.pos!.x = snap(start.x + dx);
+    block.pos!.y = snap(start.y + dy);
   }
 }
 
@@ -61,7 +73,7 @@ export function applyRegionResize(gesture: RegionResizeSnapshot, world: Point, s
 
 export function rollbackRegionMove(gesture: RegionMoveSnapshot): void {
   for (const [member, start] of gesture.startPositions) Object.assign(member.pos!, start);
-  if (gesture.context.block.pos) Object.assign(gesture.context.block.pos, gesture.startRect);
+  for (const [block, start] of gesture.startRects) Object.assign(block.pos!, start);
 }
 
 export function rollbackRegionResize(gesture: RegionResizeSnapshot): void {

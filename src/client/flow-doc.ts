@@ -120,6 +120,19 @@ export function regionRectOf(model: FlowModel, context: ModelContext): Rect | nu
   return regionRectFrom(context.block.pos, memberRects);
 }
 
+// The other contexts a dragged region carries: every one whose whole frame lies inside its
+// frame. Measured against the frames as they stand at gesture start, via the same regionRectOf
+// the painter draws and the hit-test reads, so what moves is exactly what the user sees enclosed.
+export function contextsContainedIn(model: FlowModel, context: ModelContext): ModelContext[] {
+  const frame = regionRectOf(model, context);
+  if (!frame) return [];
+  return model.contexts.filter((other) => {
+    if (other === context) return false;
+    const rect = regionRectOf(model, other);
+    return rect != null && rectContainsRect(frame, rect);
+  });
+}
+
 // Which providers a top-level node may read (spec §8.5): the blocks listing it, plus everything
 // the file inherits — an inherited provider is graph-wide in the file that receives it. The
 // linter answers the same question over its own scan; the two must agree, since this is what
@@ -182,6 +195,22 @@ export function membershipChangesForRegion(
     const isMember = context.members.includes(node);
     if (inside && !isMember) changes.push({ block: context.block, node, joins: true });
     else if (!inside && isMember && canRemove) changes.push({ block: context.block, node, joins: false });
+  }
+  return changes;
+}
+
+// What a region-move gesture did to membership across the group that travelled: the dragged
+// region and every carried one each sweep the non-members its frame comes to rest over, measured
+// against the frame where it landed (R29, R28a). A move can only ever add — every member
+// travelled with its own frame, so none can be shut out — so no region of the group removes.
+export function membershipChangesForRegionMove(
+  model: FlowModel,
+  group: readonly ModelContext[],
+): MembershipChange[] {
+  const changes: MembershipChange[] = [];
+  for (const context of group) {
+    const frame = regionRectOf(model, context);
+    if (frame) changes.push(...membershipChangesForRegion(model, context, frame, { canRemove: false }));
   }
   return changes;
 }

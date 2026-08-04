@@ -21,6 +21,7 @@ import {
   containingItems,
   contextBlockNamed,
   contextNamesReadableBy,
+  contextsContainedIn,
   referencesContext,
   renameContextBlock,
   renameContextReferences,
@@ -41,6 +42,7 @@ import {
   graphBlockNames,
   hostsOfExpansion,
   membershipChangesForNewNode,
+  membershipChangesForRegionMove,
   nodesIn,
   regionRectOf,
   renameGraphBlock,
@@ -542,6 +544,128 @@ context: Right
   });
 });
 
+describe('membershipChangesForRegionMove', () => {
+  function changesFor(groupNames: string[], text: string) {
+    const model = buildModel(docFrom(text), null);
+    const group = model.contexts.filter((entry) => groupNames.includes(entry.block.name));
+    return membershipChangesForRegionMove(model, group);
+  }
+
+  // The frames stand at their post-move rest, which is what a finished drag leaves behind: the
+  // sweep claims every non-member the dragged frame and each carried frame came to rest over.
+  it('sweeps a non-member into each region of the group', () => {
+    const changes = changesFor(['Zone', 'Inner'], `context: Zone
+  pos: 1360, 600, 800, 600
+  nodes:
+    - Inside
+
+context: Inner
+  pos: 1760, 920, 200, 120
+  nodes:
+    - Deep
+
+Inside
+  pos: 1560, 800, 200, 88
+
+Deep
+  pos: 1800, 960, 100, 50
+
+Wanderer
+  pos: 1776, 936, 100, 50
+`);
+    expect(changes.map((change) => [change.block.name, change.node.name, change.joins]).sort()).toEqual([
+      ['Inner', 'Wanderer', true],
+      ['Zone', 'Deep', true],
+      ['Zone', 'Wanderer', true],
+    ]);
+  });
+
+  it('sweeps a carried region with no drawn area through its padded member bounds', () => {
+    const changes = changesFor(['Zone', 'Inner'], `context: Zone
+  pos: 1360, 600, 800, 600
+  nodes:
+
+context: Inner
+  nodes:
+    - Deep
+
+Deep
+  pos: 1800, 960, 100, 50
+
+Wanderer
+  pos: 1776, 936, 100, 50
+`);
+    expect(changes.map((change) => [change.block.name, change.node.name, change.joins]).sort()).toEqual([
+      ['Inner', 'Wanderer', true],
+      ['Zone', 'Deep', true],
+      ['Zone', 'Wanderer', true],
+    ]);
+  });
+
+  // A move can only ever add: every member travelled with its own frame, and a region's frame
+  // unions its members in (R2), so nothing a region owns can be outside it.
+  it('never removes a member', () => {
+    const changes = changesFor(['Auth'], `context: Auth
+  pos: 0, 0, 60, 60
+  nodes:
+    - A
+
+A
+  pos: 400, 300, 200, 88
+`);
+    expect(changes).toEqual([]);
+  });
+
+  it('leaves a node outside every frame alone', () => {
+    const changes = changesFor(['Auth'], `context: Auth
+  pos: 0, 0, 800, 600
+  nodes:
+    - A
+
+A
+  pos: 200, 200, 200, 88
+
+Far
+  pos: 1400, 900, 200, 88
+`);
+    expect(changes).toEqual([]);
+  });
+
+  it('skips a region with no frame at all', () => {
+    const changes = changesFor(['Empty'], `context: Empty
+  nodes:
+
+A
+  pos: 100, 100, 200, 88
+`);
+    expect(changes).toEqual([]);
+  });
+
+  // The group is the contract: a region outside it is not swept, even one the dragged frame
+  // fully encloses — that one was never carried (R28a) and the move must leave it alone.
+  it('does not sweep a region outside the group, even one the dragged frame encloses', () => {
+    const changes = changesFor(['Big'], `context: Big
+  pos: 400, 0, 900, 900
+  nodes:
+
+context: Small
+  pos: 820, 100, 200, 200
+  nodes:
+    - InSmall
+
+InSmall
+  pos: 860, 140, 100, 50
+
+Passerby
+  pos: 880, 200, 100, 50
+`);
+    expect(changes.map((change) => [change.block.name, change.node.name, change.joins]).sort()).toEqual([
+      ['Big', 'InSmall', true],
+      ['Big', 'Passerby', true],
+    ]);
+  });
+});
+
 describe('regionRectOf', () => {
   const PADDING = REGION_MEMBER_PADDING;
 
@@ -582,6 +706,86 @@ describe('regionRectOf', () => {
     const { model } = regionOf(`context: Auth\n  pos: -400, -400, 100, 100\n  nodes:\n\nA\n  ${PLACED(0, 0)}\n`);
     expect(displayRects(model)).toContainEqual({ x: -400, y: -400, w: 100, h: 100 });
     expect(boundsOfRects(displayRects(model))).toMatchObject({ x: -400, y: -400 });
+  });
+});
+
+describe('contextsContainedIn', () => {
+  function containedNames(text: string, name: string): string[] {
+    const model = buildModel(docFrom(text), null);
+    const context = model.contexts.find((entry) => entry.block.name === name)!;
+    return contextsContainedIn(model, context).map((entry) => entry.block.name);
+  }
+
+  it('excludes the context itself', () => {
+    const names = containedNames(`context: Outer
+  pos: 0, 0, 800, 600
+  nodes:
+
+A
+  ${PLACED(100, 100)}
+`, 'Outer');
+    expect(names).toEqual([]);
+  });
+
+  it('includes a drawn region whose whole frame lies inside, and no region it only overlaps', () => {
+    const names = containedNames(`context: Outer
+  pos: 0, 0, 800, 600
+  nodes:
+
+context: Inner
+  pos: 300, 300, 200, 120
+  nodes:
+
+context: Straddler
+  pos: 600, 400, 700, 700
+  nodes:
+`, 'Outer');
+    expect(names).toEqual(['Inner']);
+  });
+
+  it('counts a region sharing the frame border as contained, since containment is inclusive', () => {
+    const names = containedNames(`context: Outer
+  pos: 0, 0, 800, 600
+  nodes:
+
+context: Touching
+  pos: 0, 0, 800, 600
+  nodes:
+`, 'Outer');
+    expect(names).toEqual(['Touching']);
+  });
+
+  it('includes a member-derived region whose padded member bounds fit inside', () => {
+    const names = containedNames(`context: Outer
+  pos: 0, 0, 800, 600
+  nodes:
+
+context: Derived
+  nodes:
+    - D
+
+D
+  ${PLACED(400, 400)}
+`, 'Outer');
+    expect(names).toEqual(['Derived']);
+  });
+
+  // The filter tests every context against the dragged frame, so a region nested two levels down
+  // is carried by the outermost drag even though it is not a direct "child" of its frame.
+  it('carries transitively: a region inside a contained region is contained itself', () => {
+    const names = containedNames(`context: Outer
+  pos: 0, 0, 800, 600
+  nodes:
+
+context: Inner
+  pos: 300, 300, 400, 280
+  nodes:
+
+context: Deep
+  pos: 350, 350, 100, 100
+  nodes:
+`, 'Outer');
+    expect(names).toEqual(['Inner', 'Deep']);
   });
 });
 

@@ -16,10 +16,12 @@ import rough from 'roughjs';
 import type { ContextBlock, FlowDocument, FlowNode, Rect } from '../../shared/flow-format.js';
 import { DEFAULT_ROUGHNESS } from '../../shared/manifest.js';
 import {
+  contextsContainedIn,
   displayRectOf,
   displayRects,
   membershipChangesForMove,
   membershipChangesForRegion,
+  membershipChangesForRegionMove,
   regionRectOf,
   type FlowModel,
   type GhostNode,
@@ -61,6 +63,7 @@ import {
   regionRectsWithDrawnResize,
   rollbackRegionMove,
   rollbackRegionResize,
+  type RegionMoveSnapshot,
 } from './region-gestures.js';
 import { hitRegionAt, hitRegionHandleAt } from './region-hit-test.js';
 import {
@@ -127,14 +130,7 @@ type Gesture =
       pressedNode: FlowNode;
       pressedBadge: BadgeHit | null;
     }
-  | {
-      type: 'region-move';
-      context: ModelContext;
-      startRect: Rect;
-      startPositions: Map<FlowNode, Point>;
-      startWorld: Point;
-      moved: boolean;
-    }
+  | { type: 'region-move' } & RegionMoveSnapshot
   | {
       type: 'region-resize';
       context: ModelContext;
@@ -967,11 +963,27 @@ export class CanvasView {
       this.selectedEdge = null;
       this.selectedRegion = region;
       this.actions.canvasClicked();
+      // A region whose frame lay inside the dragged one at gesture start is carried with it: its
+      // own frame translates and its members travel too, whether or not the outer region lists
+      // them, so nothing inside the carried region is left behind by the frame that used to hold
+      // it (R28a). The dragged region is just the group's first element — one snapshot pass
+      // covers both, and only a block that already had a drawn area keeps one (R3). The group is
+      // frozen here; a region the dragged frame merely comes to rest over later is not part of it.
+      const carriedContexts = contextsContainedIn(this.model, region);
+      const startPositions = new Map<FlowNode, Point>();
+      const startRects = new Map<ContextBlock, Rect>();
+      for (const entry of [region, ...carriedContexts]) {
+        if (entry.block.pos) startRects.set(entry.block, { ...entry.block.pos });
+        for (const member of entry.members) {
+          if (!startPositions.has(member)) startPositions.set(member, { x: member.pos!.x, y: member.pos!.y });
+        }
+      }
       this.gesture = {
         type: 'region-move',
         context: region,
-        startRect: { ...this.regionRectOfContext(region)! },
-        startPositions: new Map(region.members.map((member) => [member, { x: member.pos!.x, y: member.pos!.y }])),
+        carriedContexts,
+        startPositions,
+        startRects,
         startWorld: world,
         moved: false,
       };
@@ -1220,10 +1232,10 @@ export class CanvasView {
       if (clickCount < 2) this.actions.regionClicked(this.regionTargetOf(gesture.context));
       return;
     }
-    const frame = this.regionRectOfContext(gesture.context);
-    const changes = frame
-      ? membershipChangesForRegion(this.model, gesture.context, frame, { canRemove: false })
-      : [];
+    // Every frame of the group sweeps the non-members it came to rest over — the carried regions
+    // claim their interiors exactly as the dragged one does, or a node landed inside a carried
+    // frame would stay unassigned until a linter flagged it (R28a, R29).
+    const changes = membershipChangesForRegionMove(this.model, [gesture.context, ...gesture.carriedContexts]);
     this.actions.regionMoved(this.regionTargetOf(gesture.context), [...gesture.startPositions.keys()], changes);
   }
 
