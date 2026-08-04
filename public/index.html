@@ -58,7 +58,7 @@
           <div id="toolbar">
             <button id="tool-select-button" type="button" title="Select tool (V) — drag to multi-select">⬚ Select</button>
             <button id="tool-node-button" type="button" title="Add-node tool (N) — drag to create a node">▢ Node</button>
-            <button id="tool-context-button" type="button" title="Context tool (C) — drag to enclose nodes in a context region">◇ Context</button>
+            <button id="tool-context-button" type="button" title="Region tool (C) — drag to enclose nodes in a region">◇ Region</button>
           </div>
           <div id="view-controls">
             <button id="zoom-out-button" type="button" title="Zoom out">−</button>
@@ -106,7 +106,7 @@
 
         <div id="region-editor" class="floating hidden">
           <p id="re-name" class="field-caption"></p>
-          <textarea id="re-description" rows="3" placeholder="Description — what this context holds" spellcheck="false"></textarea>
+          <textarea id="re-description" rows="3" placeholder="Description — what this region holds" spellcheck="false"></textarea>
           <div id="re-references">
             <span class="field-caption">references</span>
             <div id="re-reference-rows"></div>
@@ -119,7 +119,7 @@
           </div>
           <div class="editor-actions">
             <span class="spacer"></span>
-            <button id="re-delete" type="button" class="danger-button">Delete context</button>
+            <button id="re-delete" type="button" class="danger-button">Delete region</button>
           </div>
         </div>
 
@@ -140,7 +140,7 @@
         <input id="title-editor" class="hidden" spellcheck="false" autocomplete="off" />
 
         <div id="region-name-editor" class="hidden">
-          <input id="region-name-input" spellcheck="false" autocomplete="off" placeholder="Context name" />
+          <input id="region-name-input" spellcheck="false" autocomplete="off" placeholder="Region name" />
           <span id="region-name-error"></span>
         </div>
 
@@ -162,8 +162,8 @@
         <div id="help-overlay" class="hidden">
           <h2>Shortcuts</h2>
           <table>
-            <tr><td>V / N / C</td><td>switch between the Select, Add-node and Context tools</td></tr>
-            <tr><td>Drag empty canvas (C)</td><td>draw a context region around the nodes it encloses</td></tr>
+            <tr><td>V / N / C</td><td>switch between the Select, Add-node and Region tools</td></tr>
+            <tr><td>Drag empty canvas (C)</td><td>draw a region around the nodes it encloses</td></tr>
             <tr><td>Drag a region's frame / corners</td><td>move / resize it (its interior still multi-selects)</td></tr>
             <tr><td>Drag empty canvas</td><td>multi-select (Select tool) / create a node (Add-node tool)</td></tr>
             <tr><td>Click a node</td><td>edit title &amp; description</td></tr>

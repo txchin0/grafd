@@ -211,7 +211,7 @@ export function createEditors(context: EditorContext): Editors {
     const named = readable.map((entry) => (entry.inherited ? `${entry.name} (inherited)` : entry.name));
     const passesDown = readable.length > 0 && getProp(node, 'expand') != null;
     elements.nodeContexts.textContent = readable.length === 0
-      ? 'reads no context'
+      ? 'reads no region'
       : `reads ${named.join(', ')}${passesDown ? ' — its expansion inherits them' : ''}`;
     elements.updatesOptions.replaceChildren(...readable.map((entry) => {
       const option = document.createElement('option');
@@ -266,7 +266,7 @@ export function createEditors(context: EditorContext): Editors {
   }
 
   function fillRegionFields(region: RegionTarget): void {
-    elements.regionName.textContent = `context: ${region.block.name}`;
+    elements.regionName.textContent = `region: ${region.block.name}`;
     setUnlessFocused(elements.regionDescription, context.regionDescriptionOf(region));
     regionReferenceRows.fill(context.regionReferencesOf(region));
     fillRegionMembers(region);
@@ -292,7 +292,7 @@ export function createEditors(context: EditorContext): Editors {
     if (region.block.members.length === 0) {
       const empty = document.createElement('li');
       empty.className = 'field-note';
-      empty.textContent = 'No nodes yet — nothing can read this context.';
+      empty.textContent = 'No nodes yet — nothing can read this region.';
       elements.regionMembers.appendChild(empty);
     }
   }

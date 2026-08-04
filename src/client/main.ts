@@ -1468,7 +1468,7 @@ function nodeMenuItems(node: FlowNode): MenuItem[] {
       onSelect: convertSelectionToSubgraph,
     });
     items.push({
-      label: `Group ${selectionCount} nodes into a context`,
+      label: `Group ${selectionCount} nodes into a region`,
       disabled: !contextOps.canGroupSelectionIntoContext(),
       onSelect: () => contextOps.groupSelectionIntoContext(),
     });

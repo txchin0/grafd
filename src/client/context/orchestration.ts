@@ -26,7 +26,7 @@ import { renameContextAcrossWorkspace, type WorkspaceRenameDeps } from './worksp
 
 // A region drawn or grouped into being is named on the spot; a provider with a placeholder name
 // helps nobody, and the name is what every other file refers to it by.
-export const NEW_REGION_NAME = 'Context';
+export const NEW_REGION_NAME = 'Region';
 
 export interface CreationTarget {
   owner: DocumentOwner;
@@ -139,10 +139,10 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
   // second one.
   function renameRegion(region: RegionTarget, requestedName: string): { rejected: string } | null {
     const name = sanitizeName(requestedName);
-    if (!name) return { rejected: 'A context needs a name.' };
+    if (!name) return { rejected: 'A region needs a name.' };
     if (name === region.block.name) return null;
     if (FlowDoc.contextBlocksIn(region.doc.items).some((other) => other !== region.block && other.name === name)) {
-      return { rejected: `This file already declares a context called "${name}".` };
+      return { rejected: `This file already declares a region called "${name}".` };
     }
     if (parseListValue(getPreambleField(region.doc, 'inherits')).includes(name)) {
       return { rejected: `"${name}" is inherited from the graph above, and is already readable here.` };
@@ -194,10 +194,10 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
   function deleteRegionMenuItems(region: RegionTarget, at: Point): MenuItem[] {
     const writers = membersUpdatingRegion(region);
     if (writers.length === 0) {
-      return [{ label: 'Delete context (keeps its nodes)', danger: true, onSelect: () => deleteRegion(region) }];
+      return [{ label: 'Delete region (keeps its nodes)', danger: true, onSelect: () => deleteRegion(region) }];
     }
     return [{
-      label: 'Delete context (keeps its nodes)',
+      label: 'Delete region (keeps its nodes)',
       danger: true,
       onSelect: () => options.openConfirmMenu([
         {

@@ -496,7 +496,7 @@ export function addContextBlock(
   memberNames: string[],
 ): ContextBlock {
   const takenNames = new Set(contextBlocksIn(items).map((block) => block.name));
-  const block = emptyContextBlock(uniqueName(takenNames, sanitizeName(requestedName) || 'Context'));
+  const block = emptyContextBlock(uniqueName(takenNames, sanitizeName(requestedName) || 'Region'));
   if (pos) {
     block.pos = { x: Math.round(pos.x), y: Math.round(pos.y), w: Math.round(pos.w), h: Math.round(pos.h) };
   }
