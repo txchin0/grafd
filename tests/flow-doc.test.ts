@@ -1464,6 +1464,124 @@ InnerB
     });
   });
 
+  it('replaces extracted members with the host in a region that held the whole selection', () => {
+    const doc = docFrom(`context: Pipeline
+  nodes:
+    - InnerA
+    - InnerB
+  pos: 0, 0, 800, 400
+
+InnerA
+  ${PLACED(100, 100)}
+
+InnerB
+  ${PLACED(400, 100)}
+`);
+    const [innerA, innerB] = allNodes(doc);
+    const { host } = extractSubgraph(doc.items, [innerA, innerB], doc);
+    expect(contextBlockNamed(doc, 'Pipeline')!.members).toEqual([host.name]);
+  });
+
+  it('keeps the host out of a region that held only part of the selection', () => {
+    const doc = docFrom(`context: Pipeline
+  nodes:
+    - InnerA
+  pos: 0, 0, 800, 400
+
+InnerA
+  ${PLACED(100, 100)}
+
+InnerB
+  ${PLACED(400, 100)}
+`);
+    const [innerA, innerB] = allNodes(doc);
+    const { host } = extractSubgraph(doc.items, [innerA, innerB], doc);
+    expect(contextBlockNamed(doc, 'Pipeline')!.members).toEqual([]);
+  });
+
+  it('adds the host to a region that held the whole selection and more', () => {
+    const doc = docFrom(`context: Pipeline
+  nodes:
+    - InnerA
+    - InnerB
+    - Outside
+  pos: 0, 0, 800, 400
+
+Outside
+  ${PLACED(600, 300)}
+
+InnerA
+  ${PLACED(100, 100)}
+
+InnerB
+  ${PLACED(400, 100)}
+`);
+    const [innerA, innerB] = allNodes(doc).filter((node) => node.name.startsWith('Inner'));
+    const { host } = extractSubgraph(doc.items, [innerA, innerB], doc);
+    expect(contextBlockNamed(doc, 'Pipeline')!.members).toEqual(['Outside', host.name]);
+  });
+
+  it('empties a region whose members all left while the selection reached beyond it', () => {
+    const doc = docFrom(`context: Pipeline
+  nodes:
+    - InnerA
+    - InnerB
+  pos: 0, 0, 800, 400
+
+InnerA
+  ${PLACED(100, 100)}
+
+InnerB
+  ${PLACED(400, 100)}
+
+InnerC
+  ${PLACED(700, 100)}
+`);
+    const [innerA, innerB, innerC] = allNodes(doc);
+    extractSubgraph(doc.items, [innerA, innerB, innerC], doc);
+    expect(contextBlockNamed(doc, 'Pipeline')!.members).toEqual([]);
+  });
+
+  it('leaves a region alone when no extracted node was a member', () => {
+    const doc = docFrom(`context: Pipeline
+  nodes:
+    - Outside
+  pos: 0, 0, 800, 400
+
+Outside
+  ${PLACED(600, 300)}
+
+InnerA
+  ${PLACED(100, 100)}
+
+InnerB
+  ${PLACED(400, 100)}
+`);
+    const [innerA, innerB] = allNodes(doc).filter((node) => node.name.startsWith('Inner'));
+    extractSubgraph(doc.items, [innerA, innerB], doc);
+    expect(contextBlockNamed(doc, 'Pipeline')!.members).toEqual(['Outside']);
+  });
+
+  it('leaves regions untouched when extracting from inside a graph block', () => {
+    const doc = docFrom(`context: Pipeline
+  nodes:
+    - Charge Card
+  pos: 0, 0, 800, 400
+
+Host
+  expand: Payment Steps
+
+graph: Payment Steps
+  Charge Card
+    ${PLACED(100, 100)}
+  Capture Funds
+    ${PLACED(400, 100)}
+`);
+    const [charge, capture] = allNodes(doc).filter((node) => node.name.startsWith('Charge') || node.name.startsWith('Capture'));
+    extractSubgraph(scopeItems(doc, 'Payment Steps'), [charge, capture], doc);
+    expect(contextBlockNamed(doc, 'Pipeline')!.members).toEqual(['Charge Card']);
+  });
+
   it('builds a model without ghosts and round-trips brace forms through serialize', () => {
     const doc = docFrom(`Outside
   ${PLACED(0, 0)}

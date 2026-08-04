@@ -654,8 +654,24 @@ export function extractSubgraph(
   redirectEdgesIntoHost(items, host, extractedSet, extractedNames);
   liftEscapingEdgesOntoHost(nodesToExtract, host, extractedNames);
   copyEntrypointToHost(nodesToExtract, host);
+  if (isTopLevel(items, doc)) transferRegionMembershipToHost(doc, nodesToExtract, host);
 
   return { host, blockName, innerNodes: nodesToExtract };
+}
+
+// A selection pulled into a subgraph carries its region membership along. Names that leave the
+// body for the new `graph:` block would otherwise stay listed and grant nothing; a region that
+// held the whole selection hands its members to the host that now stands in for them, while one
+// that held only part keeps the host out — it stands in for the whole subgraph, not the region.
+function transferRegionMembershipToHost(doc: FlowDocument, extractedNodes: FlowNode[], host: FlowNode): void {
+  const extractedNames = new Set(extractedNodes.map((node) => node.name));
+  for (const block of contextBlocksIn(doc.items)) {
+    const namedHere = block.members.filter((name) => extractedNames.has(name));
+    if (namedHere.length === 0) continue;
+    const remaining = block.members.filter((name) => !extractedNames.has(name));
+    if (namedHere.length === extractedNodes.length) remaining.push(host.name);
+    setContextMembers(block, remaining);
+  }
 }
 
 function nameForExtraction(doc: FlowDocument, items: FlowItem[], requestedName?: string): string {
