@@ -1,4 +1,4 @@
-# .flow Format Guide (flow/1.4)
+# .flow Format Guide (flow/1.5)
 
 You are reading a `.flow` workspace. This guide defines how to parse, interpret, and edit `.flow` files. Read once, then apply to every `.flow` file in the workspace.
 
@@ -8,14 +8,14 @@ You are reading a `.flow` workspace. This guide defines how to parse, interpret,
 2. **Leaf nodes (no `expand`) = you decide the implementation.**
 3. **Expanded nodes (has `expand`) = you follow the referenced graph.**
 4. Everything is a node. A graph is a node that has been expanded.
-5. `grafd.manifest.json` is the editor's workspace state file. Read its `entrypoint` field to find the root graph; ignore everything else in it and do not edit it.
+5. `grafd.manifest.json` is the editor's workspace state file. Read its `entrypoint` field to find the root graph and its `flowVersion` field to confirm which format version applies (this guide is that version). Ignore everything else in it and do not edit it.
 6. Nodes may carry the editor-owned properties `id` and `pos`. They are visual/identity metadata, not semantics — see [Editor-Owned Properties](#editor-owned-properties).
 
 ## Workspace Layout
 
 ```
 workspace/
-  grafd.manifest.json    # editor state: entrypoint + display and UI state (not for you)
+  grafd.manifest.json    # editor state: entrypoint + flowVersion + display and UI state (read entrypoint and flowVersion only)
   SAVE-GUIDE.md          # this guide
   main.flow              # root graph (whatever the manifest's entrypoint names)
   auth/

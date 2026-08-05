@@ -90,15 +90,13 @@ describe('lintWorkspace', () => {
     expect(rulesIn([file('a.flow', text)])['a.flow']).toContain('expansion-cycle');
   });
 
-  it('reports a file no expand link reaches, except the spec file', () => {
+  it('reports a file no expand link reaches', () => {
     const orphan = '---\nname: Orphan\n---\n\nAlone\n';
-    const spec = '---\nname: Spec\n---\n\nRead the guide\n';
     const rules = rulesIn(
-      [file('main.flow', MAIN), file('auth/login.flow', LOGIN), file('stray.flow', orphan), file('SPEC.flow', spec)],
+      [file('main.flow', MAIN), file('auth/login.flow', LOGIN), file('stray.flow', orphan)],
       manifestWithEntrypoint('main.flow'),
     );
     expect(rules['stray.flow']).toContain('unreachable-flow-file');
-    expect(rules['SPEC.flow']).not.toContain('unreachable-flow-file');
     expect(rules['auth/login.flow']).not.toContain('unreachable-flow-file');
   });
 

@@ -1,4 +1,0 @@
----
-name: Flow Format Spec
-description: "Format guide for LLM agents: read ../FLOW-SPEC.md (version flow/1.4) before processing any .flow file in this project. Canvas layout is editor-owned and lives on the node: `id` (UUID) and `pos: x, y, w, h`, the latter also on a body-level `context:` block. Preserve all of them, never author them, ignore their values."
----

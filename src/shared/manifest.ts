@@ -9,6 +9,8 @@
 // it (including inside a .zip export), which is why it sits beside `ui` rather than inside
 // it: `ui` is one browser's session state, and the editor ignores other clients' pushes of it.
 
+import { FLOW_FORMAT_VERSION } from './flow-format.js';
+
 export const MANIFEST_FILE_NAME = 'grafd.manifest.json';
 export const MANIFEST_FORMAT = 'grafd-workspace/1';
 
@@ -43,6 +45,10 @@ export interface DisplaySettings {
 
 export interface WorkspaceManifest {
   format: string;
+  // Which version of the .flow format this workspace's files conform to (FLOW-SPEC.md
+  // revision history). Agents read it alongside `entrypoint`; the format spec makes the
+  // workspace declare it here rather than in a per-project spec file.
+  flowVersion: string;
   entrypoint: string | null;
   display: DisplaySettings;
   ui: {
@@ -55,6 +61,7 @@ export interface WorkspaceManifest {
 export function emptyManifest(): WorkspaceManifest {
   return {
     format: MANIFEST_FORMAT,
+    flowVersion: FLOW_FORMAT_VERSION,
     entrypoint: null,
     display: { roughness: DEFAULT_ROUGHNESS, font: DEFAULT_CANVAS_FONT },
     ui: { activeFlow: null, cameras: {}, expansions: {} },
@@ -80,6 +87,7 @@ export function parseManifest(text: string | null | undefined): WorkspaceManifes
   const ui = (typeof record.ui === 'object' && record.ui != null ? record.ui : {}) as Record<string, unknown>;
   return {
     format: typeof record.format === 'string' ? record.format : MANIFEST_FORMAT,
+    flowVersion: typeof record.flowVersion === 'string' ? record.flowVersion : FLOW_FORMAT_VERSION,
     entrypoint: typeof record.entrypoint === 'string' ? record.entrypoint : null,
     display: readDisplay(record.display),
     ui: {

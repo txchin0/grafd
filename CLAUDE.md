@@ -47,10 +47,11 @@ Layout lives inside the `.flow` file itself, via the editor-owned properties `id
 the spec no longer describes one.
 
 The one thing outside the spec is that each workspace has a `grafd.manifest.json` at its root
-(`src/shared/manifest.ts`): the workspace `entrypoint`, its `display` settings (canvas
-roughness and font), plus UI state (active flow, per-flow cameras). It
-is editor-owned, ignored by agents apart from `entrypoint`, and travels through the same
-read/write path as .flow files.
+(`src/shared/manifest.ts`): the workspace `entrypoint`, its `flowVersion` (the format version
+this workspace conforms to, defined as `FLOW_FORMAT_VERSION` in `flow-format.ts`), its
+`display` settings (canvas roughness and font), plus UI state (active flow, per-flow cameras).
+It is editor-owned, ignored by agents apart from `entrypoint` and `flowVersion`, and travels
+through the same read/write path as .flow files.
 
 Everything else follows the spec. `src/shared/flow-format.ts` is the single
 parser/serializer, used by both the server and the browser, and defines the shared domain

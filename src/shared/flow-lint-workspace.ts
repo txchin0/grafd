@@ -28,10 +28,6 @@ export interface WorkspaceLintInput {
   manifest?: WorkspaceManifest | null;
 }
 
-// §2.4: the format spec file is a root-level document every project carries, not something the
-// graph links to, so it is never reported as unreachable.
-const SPEC_FILE_NAME = 'SPEC.flow';
-
 /** One expansion target: a whole file, or one local `graph:` block inside a file. */
 interface ExpansionUnit {
   key: string;
@@ -265,7 +261,7 @@ function reportUnreachableFiles(
 
   const reached = filesReachableFrom(entrypoint, scans);
   for (const path of paths) {
-    if (reached.has(path) || path === SPEC_FILE_NAME) continue;
+    if (reached.has(path)) continue;
     report(
       path,
       warning(

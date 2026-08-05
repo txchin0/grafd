@@ -1,6 +1,6 @@
 # .flow Format Specification
 
-**Version:** flow/1.4
+**Version:** flow/1.5
 **Status:** Draft
 
 ## Revision History
@@ -12,6 +12,7 @@
 | flow/1.2 | Edges may originate from a node inside a subgraph via an optional `{Inner Source}` prefix. |
 | flow/1.3 | Nodes and preambles may carry a `references` block linking to related source files, documents, and URLs. Indented blocks are generalized: a block belongs to the line directly above it. |
 | flow/1.4 | Context providers are declared only as a body-level `context:` block that defines the provider and scopes it to a listed set of nodes; the preamble `context:` field is removed, and `inherits` becomes the sole preamble carrier of context. Providers reach only their members' expansions. `.flow.meta` sidecar files are removed; canvas layout lives on the node as the editor-owned `id` and `pos` properties. |
+| flow/1.5 | The root `SPEC.flow` file is removed from the format. The workspace manifest (`grafd.manifest.json`) declares the format version in its `flowVersion` field, which agents read alongside the `entrypoint`; the manifest is the single source of truth for which version applies to the whole workspace. |
 
 ---
 
@@ -49,7 +50,7 @@ A `.flow` project has a root file and optionally many referenced graph files:
 
 ```
 project/
-  SPEC.flow              # Format spec (read by LLM agent first)
+  grafd.manifest.json     # Workspace manifest (format version + entrypoint)
   main.flow              # Root graph (entry point)
   auth/
     login.flow           # Referenced graph
@@ -58,9 +59,9 @@ project/
     payment.flow
 ```
 
-### 2.4 Spec File
+### 2.4 Spec Version
 
-Every project includes a `SPEC.flow` file (or equivalent) at the root. This contains the format guide and the format version for the LLM agent. The agent reads it once at the start of a session before processing any `.flow` files. Individual `.flow` files do not embed the spec or the format version — the spec file is the single source of truth for which version of the format applies to the entire project.
+The format version that applies to a project is declared in the workspace manifest's `flowVersion` field, alongside the `entrypoint`. The agent reads it once at the start of a session before processing any `.flow` files, together with the `entrypoint`. Individual `.flow` files do not embed the format version — the manifest is the single source of truth for which version of the format applies to the entire project. A workspace without a manifest defaults to the latest version.
 
 ---
 
@@ -1049,7 +1050,7 @@ The format has a minimal set of reserved keywords:
 | References        | `references:` block of `- [Label](target)` entries, one per line                  | Reads well at ten entries, not just one; labels and URLs carry commas, so an inline `[a, b]` list would need escaping. Kinds inferred from the target, keeping with implicit-over-explicit |
 | Reference paths   | Relative to the project root, unlike file-relative `expand`                       | Referenced code lives outside the `.flow` workspace; project-relative paths stay stable regardless of `.flow` nesting depth |
 | Comments          | # prefix                                                                          | Universal convention                             |
-| Versioning        | Defined in spec file, not in individual .flow files                               | Single source of truth, no duplication           |
-| Spec location     | Separate file, read once                                                          | No duplication across files                      |
+| Versioning        | Declared in the workspace manifest's `flowVersion`, not in individual .flow files | Single source of truth, no duplication           |
+| Spec location     | Workspace manifest, read alongside the `entrypoint`                                | No duplication across files, no extra root file  |
 
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { FLOW_FORMAT_VERSION } from '../src/shared/flow-format.js';
 import {
   DEFAULT_CANVAS_FONT,
   DEFAULT_ROUGHNESS,
@@ -15,6 +16,7 @@ import {
 describe('parseManifest', () => {
   it('round-trips a serialized manifest', () => {
     const manifest = emptyManifest();
+    manifest.flowVersion = 'flow/1.4';
     manifest.entrypoint = 'main.flow';
     manifest.ui.activeFlow = 'auth/login.flow';
     manifest.ui.cameras['main.flow'] = { x: 10, y: -20, scale: 1.5 };
@@ -35,6 +37,7 @@ describe('parseManifest', () => {
     const parsed = parseManifest('{"ui": {"cameras": {"a.flow": {"x": 1}, "b.flow": {"x": 1, "y": 2, "scale": 3}}}}');
     expect(parsed).toEqual({
       format: MANIFEST_FORMAT,
+      flowVersion: FLOW_FORMAT_VERSION,
       entrypoint: null,
       display: { roughness: DEFAULT_ROUGHNESS, font: DEFAULT_CANVAS_FONT },
       ui: { activeFlow: null, cameras: { 'b.flow': { x: 1, y: 2, scale: 3 } }, expansions: {} },

@@ -10,6 +10,10 @@
 // normalized. The format has no escape sequences, so double quotes are not allowed inside
 // labels and quoted values (see quoteValue).
 
+// The version of the .flow format this code implements (FLOW-SPEC.md revision history). A
+// workspace declares which version applies to it in grafd.manifest.json's `flowVersion`.
+export const FLOW_FORMAT_VERSION = 'flow/1.5';
+
 export interface Rect {
   x: number;
   y: number;
