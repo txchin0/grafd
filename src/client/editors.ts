@@ -154,7 +154,7 @@ export function createEditors(context: EditorContext): Editors {
   }
 
   function openTitleEditor(node: FlowNode): void {
-    regionNameEditor.close({ commit: false });
+    regionNameEditor.close();
     closeNodeEditor();
     closeEdgeEditor();
     closeRegionEditor();
@@ -165,13 +165,13 @@ export function createEditors(context: EditorContext): Editors {
     closeNodeEditor();
     closeEdgeEditor();
     closeRegionEditor();
-    titleEditor.close({ commit: false });
+    titleEditor.close();
     regionNameEditor.open(region, rename);
   }
 
   function openNodeEditor(node: FlowNode, { focusTitle = false }: { focusTitle?: boolean } = {}): void {
-    titleEditor.close({ commit: false });
-    regionNameEditor.close({ commit: false });
+    titleEditor.close();
+    regionNameEditor.close();
     closeEdgeEditor();
     closeRegionEditor();
     editingNodeId = node.id;
@@ -254,8 +254,8 @@ export function createEditors(context: EditorContext): Editors {
   // A region has no title of its own here: the name is edited in place on the canvas, and `pos`
   // is not a field at all — an area is what the user drew, not a number to type (R36).
   function openRegionEditor(region: RegionTarget): void {
-    titleEditor.close({ commit: false });
-    regionNameEditor.close({ commit: false });
+    titleEditor.close();
+    regionNameEditor.close();
     closeNodeEditor();
     closeEdgeEditor();
     editingRegion = region;
@@ -303,8 +303,8 @@ export function createEditors(context: EditorContext): Editors {
   }
 
   function openEdgeEditor(edge: ModelEdge): void {
-    titleEditor.close({ commit: false });
-    regionNameEditor.close({ commit: false });
+    titleEditor.close();
+    regionNameEditor.close();
     closeNodeEditor();
     closeRegionEditor();
     editingEdgeSpec = edge.spec;
@@ -472,9 +472,11 @@ export function createEditors(context: EditorContext): Editors {
     elements.edgeEditor.classList.add('hidden');
   }
 
+  // A canvas click closes every editor in pointerdown, before the browser fires blur — so the
+  // inline editors must commit here or the blur that would have committed never runs.
   function closeAll(): void {
-    titleEditor.close({ commit: false });
-    regionNameEditor.close({ commit: false });
+    titleEditor.close();
+    regionNameEditor.close();
     closeNodeEditor();
     closeEdgeEditor();
     closeRegionEditor();

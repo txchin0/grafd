@@ -1643,11 +1643,11 @@ function wireKeyboard(): void {
     } else if (ctrl && event.key === '-') {
       event.preventDefault();
       view.stepZoom(-1);
-    } else if (!ctrl && event.key.toLowerCase() === 'v') {
+    } else if (!ctrl && (event.key.toLowerCase() === 'v' || event.key === '1')) {
       setTool('select');
-    } else if (!ctrl && event.key.toLowerCase() === 'n') {
+    } else if (!ctrl && (event.key.toLowerCase() === 'n' || event.key === '2')) {
       setTool('node');
-    } else if (!ctrl && event.key.toLowerCase() === 'c') {
+    } else if (!ctrl && (event.key.toLowerCase() === 'c' || event.key === '3')) {
       setTool('context');
     } else if (event.key === 'Escape') {
       contextMenu.close();
