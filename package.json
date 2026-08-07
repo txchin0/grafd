@@ -8,7 +8,7 @@
     "access": "public"
   },
   "bin": {
-    "grafd": "./dist/cli-main.js"
+    "grafd": "dist/cli-main.js"
   },
   "files": [
     "dist",
