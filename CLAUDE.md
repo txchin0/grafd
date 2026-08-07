@@ -5,7 +5,7 @@ A freeform web canvas editor for the `.flow` diagram format defined in [FLOW-SPE
 The app runs in two hosting modes with identical features:
 
 - **Self-hosted** — `npm start` (builds, then serves), then open http://localhost:3103. The
-  server watches `flows/` by default for `*.flow` files (override with a path argument to
+  server watches `.grafd/` by default for `*.flow` files (override with a path argument to
   `node dist/server/server-main.js`), pushes changes to the browser over WebSocket, and writes
   canvas edits straight back to disk.
 - **Serverless** — `npm run build:site` assembles a fully static build in `site/` for any
@@ -26,7 +26,7 @@ tests in `tests/`.
 
 ## Linting .flow files
 
-`npm run lint:flow` builds, then lints every `.flow` file in `flows/` (pass one or more
+`npm run lint:flow` builds, then lints every `.flow` file in `.grafd/` (pass one or more
 workspace directories to lint elsewhere; `--strict` also fails on warnings, `--format=json`
 emits machine-readable output). It compiles into a scratch `.lint-build/` directory rather
 than `dist/`, so it is safe to run alongside `npm run dev` without killing the server.
@@ -63,7 +63,7 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   write/broadcast, chokidar file watcher (own writes are suppressed by content hash).
   Serves `public/` (static shell), `dist/client` at `/js`, `dist/shared` at `/shared`, and
   rough.js at `/vendor/roughjs` (mapped to the bare `roughjs` specifier by the import map
-  in `public/index.html`). Watches `flows/` by default (override via CLI path argument), and
+  in `public/index.html`). Watches `.grafd/` by default (override via CLI path argument), and
   reports the project root that node references resolve against — the launch directory,
   overridable with `--project-root=<path>` — over `/api/project-root`.
 - `src/server/flow-files.ts` — path safety (`.flow`-only, root-confined), portable path
@@ -75,7 +75,7 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   probe), `workspace-browser.ts` (IndexedDB + BroadcastChannel), `workspace-folder.ts`
   (File System Access API + polling watcher).
 - `src/client/zip.ts` / `src/client/export.ts` — dependency-free stored-method ZIP writer
-  and the workspace .zip export (flows + manifest + SAVE-GUIDE.md).
+  and the workspace .zip export (.grafd + manifest + SAVE-GUIDE.md).
 - `src/client/file-tree.ts` — pure folder-tree builder behind the sidebar's collapsible
   file tree (rendering and delete interaction live in main.ts).
 - `src/shared/manifest.ts` — `grafd.manifest.json` types, tolerant parsing, startup-flow

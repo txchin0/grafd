@@ -54,7 +54,7 @@ npx grafd start --open
 ```
 
 To run this repository directly, use `npm install && npm start` and open
-http://localhost:3103. The server watches the `flows/` directory (the example workspace)
+http://localhost:3103. The server watches the `.grafd/` directory (the example workspace)
 by default and writes every canvas edit straight back to disk. To serve a different
 workspace:
 
@@ -112,7 +112,7 @@ The codebase is plain TypeScript compiled by `tsc` — no bundler, no frontend f
 npm run dev          # tsc --watch + node --watch with live reload
 npm run typecheck    # type-check src, tests, and config without emitting
 npm test             # run the Vitest unit tests
-npm run lint:flow    # lint every .flow file in flows/ (see below)
+npm run lint:flow    # lint every .flow file in .grafd/ (see below)
 ```
 
 `npm run dev` rebuilds once so `dist/` exists, then recompiles on change in the background
@@ -127,7 +127,7 @@ file can lose content permanently on the next save. `npm run lint:flow` catches 
 it happens:
 
 ```sh
-npm run lint:flow                # lint flows/ (pass paths to lint other workspaces)
+npm run lint:flow                # lint .grafd/ (pass paths to lint other workspaces)
 npm run lint:flow -- --strict    # fail on warnings too
 npm run lint:flow -- --format=json
 ```
@@ -144,7 +144,7 @@ directory, so it is safe to run while a dev server is live.
   version, display settings, and UI state. Agents read `entrypoint` and `flowVersion`;
   everything else is editor state.
 
-The `flows/` directory in this repository is a working example workspace
+The `.grafd/` directory in this repository is a working example workspace
 (a user authentication app) you can open immediately.
 
 ## Project layout
@@ -157,7 +157,7 @@ src/
   tools/     flow-lint CLI, VS Code theme importer
 scripts/     dev server, static build, site preview
 tests/       Vitest unit tests (parser, canvas math, server logic, gestures)
-flows/       Example .flow workspace
+.grafd/      Example .flow workspace
 public/      Static shell, styles, themes, fonts
 ```
 

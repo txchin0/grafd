@@ -480,7 +480,7 @@ describe('cross-file context rules', () => {
 
 describe('the sample workspace', () => {
   it('has no errors', () => {
-    const root = path.resolve('flows');
+    const root = path.resolve('.grafd');
     const files = readdirSync(root, { recursive: true, encoding: 'utf8' })
       .filter((entry) => entry.endsWith('.flow'))
       .map((entry) => ({

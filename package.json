@@ -27,7 +27,7 @@
     "editor"
   ],
   "scripts": {
-    "start": "npm run build && node dist/server/server-main.js",
+    "start": "npm run build && node dist/server/server-main.js .grafd",
     "dev": "node scripts/dev.mjs",
     "prebuild": "node scripts/clean.mjs",
     "build": "tsc -p tsconfig.build.json",

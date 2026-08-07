@@ -10,7 +10,7 @@ import type { FlowNode, Rect } from '../src/shared/flow-format.js';
 import { VIEWPORT, createCanvasMock, createExpansionLayer, stubCanvasGlobals } from './canvas-mock.js';
 
 const DASHBOARD_FLOW = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), '../flows/dashboard.flow'),
+  join(dirname(fileURLToPath(import.meta.url)), '../.grafd/dashboard.flow'),
   'utf8',
 );
 

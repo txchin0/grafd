@@ -17,7 +17,7 @@ interface Options {
   format: 'text' | 'json';
 }
 
-const DEFAULT_WORKSPACE = 'flows';
+const DEFAULT_WORKSPACE = '.grafd';
 const USAGE = `Usage: grafd lint [workspace…] [options]
 
 Lints every .flow file in each workspace directory (default: ${DEFAULT_WORKSPACE}).

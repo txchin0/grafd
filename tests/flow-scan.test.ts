@@ -219,7 +219,7 @@ describe('scanFlow drop reporting', () => {
 });
 
 function sampleWorkspaceFiles(): string[] {
-  const root = path.resolve('flows');
+  const root = path.resolve('.grafd');
   return readdirSync(root, { recursive: true, encoding: 'utf8' })
     .filter((entry) => entry.endsWith('.flow'))
     .map((entry) => readFileSync(path.join(root, entry), 'utf8'));

@@ -522,17 +522,17 @@ describe('value helpers', () => {
 
 describe('resolveLinkPath', () => {
   it('resolves relative to the containing file directory', () => {
-    expect(resolveLinkPath('flows/main.flow', 'sub.flow')).toBe('flows/sub.flow');
-    expect(resolveLinkPath('flows/main.flow', './sub.flow')).toBe('flows/sub.flow');
-    expect(resolveLinkPath('flows/main.flow', '../other/sub.flow')).toBe('other/sub.flow');
+    expect(resolveLinkPath('.grafd/main.flow', 'sub.flow')).toBe('.grafd/sub.flow');
+    expect(resolveLinkPath('.grafd/main.flow', './sub.flow')).toBe('.grafd/sub.flow');
+    expect(resolveLinkPath('.grafd/main.flow', '../other/sub.flow')).toBe('other/sub.flow');
     expect(resolveLinkPath(null, 'sub.flow')).toBe('sub.flow');
   });
 });
 
 describe('external expand description', () => {
   it('resolves the expand target path and ignores local expands', () => {
-    expect(resolvedExpandPath('[Dashboard](dashboard.flow)', 'flows/main.flow')).toBe('flows/dashboard.flow');
-    expect(resolvedExpandPath('Local Graph', 'flows/main.flow')).toBeNull();
+    expect(resolvedExpandPath('[Dashboard](dashboard.flow)', '.grafd/main.flow')).toBe('.grafd/dashboard.flow');
+    expect(resolvedExpandPath('Local Graph', '.grafd/main.flow')).toBeNull();
   });
 
   it('prefers the expand target preamble over a legacy node prop', () => {

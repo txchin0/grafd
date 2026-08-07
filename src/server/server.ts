@@ -8,12 +8,12 @@ import chokidar from 'chokidar';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { contentHash, listFlowFiles, resolveWorkspacePath, toPortablePath } from './flow-files.js';
 
-export const DEFAULT_WORKSPACE = 'flows';
+export const DEFAULT_WORKSPACE = '.grafd';
 export const DEFAULT_PORT = 3103;
 export const DEFAULT_HOST = '127.0.0.1';
 const COMPILED_OUTPUT_SETTLE_MS = 120;
 // This file runs from dist/server, two levels below the package root. Static assets stay
-// under the package; the .flow workspace defaults to flows/ relative to the package root
+// under the package; the .flow workspace defaults to .grafd/ relative to the package root
 // and can be overridden with a path argument (absolute, or relative to the package root).
 const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 // The server used to serve `repoRoot/node_modules/roughjs/bundled`, which breaks in an
