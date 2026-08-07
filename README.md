@@ -103,6 +103,10 @@ At boot the client probes `./api/files`; with no server answering, it stores wor
 files in IndexedDB, synced across tabs via `BroadcastChannel`. Opening a local folder is
 available in both modes through the File System Access API.
 
+**GitHub Pages** — this repository publishes the serverless build automatically from
+`main` via `.github/workflows/deploy-pages.yml`. The live editor is at
+https://txchin0.github.io/grafd/.
+
 ## Development
 
 The codebase is plain TypeScript compiled by `tsc` — no bundler, no frontend framework.
