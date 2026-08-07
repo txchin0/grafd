@@ -36,21 +36,51 @@ Requirements: [Node.js](https://nodejs.org) 20+ and npm. A Chromium-based browse
 (Chrome, Edge, Brave) is recommended for opening local folders.
 
 ```sh
-npm install
-npm start
+npx grafd init
+npx grafd start --open
 ```
 
-Then open http://localhost:4600. The server watches the `flows/` directory (the example
-workspace) by default and writes every canvas edit straight back to disk. To serve a
-different workspace:
+`grafd init` creates a `.grafd/` workspace with `main.flow`, `grafd.manifest.json`, and
+`SAVE-GUIDE.md`. `grafd start` then serves it at http://localhost:3103, binding to
+`127.0.0.1` by default so CI and remote terminals never expose the editor unless you ask
+for it. `--open` is opt-in; pass `--host 0.0.0.0` to serve on the network.
+
+Teams that want reproducible versions install the package as a dev dependency instead of
+relying on `npx`:
 
 ```sh
-node dist/server/server.js path/to/workspace
+npm install --save-dev grafd
+npx grafd start --open
 ```
 
-The port is configurable with the `PORT` environment variable, and the project root used
-to resolve file references defaults to the launch directory (`--project-root=<path>` to
-override).
+To run this repository directly, use `npm install && npm start` and open
+http://localhost:3103. The server watches the `flows/` directory (the example workspace)
+by default and writes every canvas edit straight back to disk. To serve a different
+workspace:
+
+```sh
+node dist/server/server-main.js path/to/workspace
+```
+
+The port is configurable with `--port` (default `3103`), the `PORT` environment variable
+takes precedence when `--port` is not passed, and the project root used to resolve file
+references defaults to the launch directory (`--project-root=<path>` to override).
+
+## npm CLI
+
+The `grafd` package ships one command with three subcommands:
+
+```sh
+npx grafd            # shorthand for npx grafd start
+npx grafd init
+npx grafd start [workspace] [--port <n>] [--host <host>] [--open] [--project-root=<path>]
+npx grafd lint [workspace...] [--strict] [--format=json]
+```
+
+Running `grafd` with no command is shorthand for `grafd start`. `grafd start` and
+`grafd lint` use `.grafd/` when it exists, otherwise the current directory when it
+contains `.flow` files, otherwise they exit with a hint to run `grafd init`. `grafd init`
+never overwrites an existing `.grafd/` workspace.
 
 ## Hosting modes
 

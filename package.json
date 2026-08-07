@@ -1,11 +1,33 @@
 {
-  "name": "grafd-flow-editor",
+  "name": "grafd",
   "version": "0.1.0",
-  "private": true,
+  "description": "Freeform web canvas editor for .flow files",
   "license": "Apache-2.0",
   "type": "module",
+  "bin": {
+    "grafd": "./dist/cli-main.js"
+  },
+  "files": [
+    "dist",
+    "public",
+    "SAVE-GUIDE.md",
+    "FLOW-SPEC.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/txchin0/grafd.git"
+  },
+  "keywords": [
+    "flow",
+    "diagram",
+    "canvas",
+    "editor"
+  ],
   "scripts": {
-    "start": "npm run build && node dist/server/server.js",
+    "start": "npm run build && node dist/server/server-main.js",
     "dev": "node scripts/dev.mjs",
     "prebuild": "node scripts/clean.mjs",
     "build": "tsc -p tsconfig.build.json",
@@ -13,10 +35,12 @@
     "serve:site": "npm run build:site && node scripts/serve-site.mjs",
     "watch": "tsc -p tsconfig.build.json --watch",
     "typecheck": "tsc",
-    "lint:flow": "node scripts/clean.mjs .lint-build && tsc -p tsconfig.lint.json && node .lint-build/tools/flow-lint.js",
+    "lint:flow": "node scripts/clean.mjs .lint-build && tsc -p tsconfig.lint.json && node .lint-build/tools/flow-lint-main.js",
     "import:theme": "npm run build && node dist/tools/theme-import.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test"
   },
   "dependencies": {
     "chokidar": "^3.6.0",

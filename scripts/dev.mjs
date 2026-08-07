@@ -27,7 +27,7 @@ await runToCompletion('tsc -p tsconfig.build.json');
 
 const compiler = run('tsc -p tsconfig.build.json --watch --preserveWatchOutput');
 const server = run(
-  ['node --watch dist/server/server.js --dev', ...workspaceArguments].join(' '),
+  ['node --watch dist/server/server-main.js --dev', ...workspaceArguments].join(' '),
   { inheritExit: true },
 );
 

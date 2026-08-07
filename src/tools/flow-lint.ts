@@ -18,7 +18,7 @@ interface Options {
 }
 
 const DEFAULT_WORKSPACE = 'flows';
-const USAGE = `Usage: flow-lint [workspace…] [options]
+const USAGE = `Usage: grafd lint [workspace…] [options]
 
 Lints every .flow file in each workspace directory (default: ${DEFAULT_WORKSPACE}).
 
@@ -27,13 +27,11 @@ Options:
   --format=json    emit diagnostics as JSON instead of text
   --help           show this message`;
 
-main();
-
-async function main(): Promise<void> {
-  const options = parseOptions(process.argv.slice(2));
+export async function runFlowLint(argv: string[]): Promise<number> {
+  const options = parseOptions(argv);
   if (options === 'help' || options === 'invalid') {
     console.log(USAGE);
-    process.exit(options === 'help' ? 0 : 2);
+    return options === 'help' ? 0 : 2;
   }
 
   const results: FileDiagnostics[] = [];
@@ -45,8 +43,7 @@ async function main(): Promise<void> {
   if (options.format === 'json') console.log(JSON.stringify({ files: results, ...counts }, null, 2));
   else printReport(results, counts.errors, counts.warnings);
 
-  const failed = counts.errors > 0 || (options.strict && counts.warnings > 0);
-  process.exit(failed ? 1 : 0);
+  return counts.errors > 0 || (options.strict && counts.warnings > 0) ? 1 : 0;
 }
 
 function parseOptions(argv: string[]): Options | 'help' | 'invalid' {

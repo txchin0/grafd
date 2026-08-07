@@ -4,9 +4,9 @@ A freeform web canvas editor for the `.flow` diagram format defined in [FLOW-SPE
 
 The app runs in two hosting modes with identical features:
 
-- **Self-hosted** — `npm start` (builds, then serves), then open http://localhost:4600. The
+- **Self-hosted** — `npm start` (builds, then serves), then open http://localhost:3103. The
   server watches `flows/` by default for `*.flow` files (override with a path argument to
-  `node dist/server/server.js`), pushes changes to the browser over WebSocket, and writes
+  `node dist/server/server-main.js`), pushes changes to the browser over WebSocket, and writes
   canvas edits straight back to disk.
 - **Serverless** — `npm run build:site` assembles a fully static build in `site/` for any
   static host. The client probes `./api/files` at boot; with no server answering it stores
