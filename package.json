@@ -1,9 +1,12 @@
 {
-  "name": "grafd",
+  "name": "@txchin0/grafd",
   "version": "0.1.0",
   "description": "Freeform web canvas editor for .flow files",
   "license": "Apache-2.0",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "grafd": "./dist/cli-main.js"
   },
