@@ -49,7 +49,7 @@ Teams that want reproducible versions install the package as a dev dependency in
 relying on `npx`:
 
 ```sh
-npm install --save-dev @txchin0/grafd
+npm install --save-dev grafd-ai
 npx grafd start --open
 ```
 
