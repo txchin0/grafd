@@ -9,6 +9,7 @@ import {
   assignMissingIds,
   buildModel,
   contextBlockNamed,
+  addContextMember,
   type MembershipChange,
 } from '../src/client/flow-doc.js';
 import type { Point } from '../src/client/geometry.js';
@@ -280,6 +281,26 @@ Passerby
   pos: 880, 200, 100, 50
 `;
 
+// A stationary region that does not travel with the drag: the dragged region's member N comes to
+// rest fully inside B's frame, so the move adds N to B's list without sweeping anything else.
+const ABSORBED_MEMBER_FLOW = `---
+name: Absorb
+---
+
+context: A
+  pos: 0, 0, 800, 600
+  nodes:
+    - N
+
+context: B
+  pos: 900, 0, 400, 300
+  nodes:
+
+N
+  id: n-1
+  pos: 200, 200, 200, 88
+`;
+
 let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
 beforeAll(async () => {
@@ -498,6 +519,21 @@ describe('moving a region', () => {
     expect(inside.pos).toEqual({ x: 200, y: 200, w: 200, h: 88 });
     expect(contextBlockNamed(doc, 'Zone')!.pos).toEqual({ x: 0, y: 0, w: 800, h: 600 });
     expect(actions.regionMoved).not.toHaveBeenCalled();
+  });
+});
+
+describe('moving a region so a carried member lands inside a stationary region', () => {
+  it('adds the member to the stationary region and reports it as a join', () => {
+    const { doc, actions, canvas } = openedCanvas(ABSORBED_MEMBER_FLOW);
+    // The stub records the report like the real action, then applies the membership change the
+    // way the action's commit would, so the file effect is asserted alongside the gesture.
+    actions.regionMoved = vi.fn((_region, _movedNodes, membershipChanges: MembershipChange[]) => {
+      for (const change of membershipChanges) addContextMember(change.block, change.node.name);
+    }) as unknown as typeof actions.regionMoved;
+    dragOnCanvas(canvas, { x: 0, y: 300 }, { x: 800, y: 300 });
+
+    expect(asNames(regionChangesFrom(actions, 'regionMoved'))).toEqual([['B', 'N', 'joins']]);
+    expect(contextBlockNamed(doc, 'B')!.members).toEqual(['N']);
   });
 });
 

@@ -199,18 +199,33 @@ export function membershipChangesForRegion(
   return changes;
 }
 
-// What a region-move gesture did to membership across the group that travelled: the dragged
-// region and every carried one each sweep the non-members its frame comes to rest over, measured
-// against the frame where it landed (R29, R28a). A move can only ever add — every member
-// travelled with its own frame, so none can be shut out — so no region of the group removes.
+// What a region-move gesture did to membership. The group that travelled sweeps the non-members
+// each frame comes to rest over into its own membership (R28a, R29), and the carried nodes —
+// every member of the group, deduped — join any stationary region whose frame fully contains
+// them where they landed. A move can only ever add: every member travelled with its own frame,
+// so none can be shut out, and a stationary region never sweeps or drops anything else.
 export function membershipChangesForRegionMove(
   model: FlowModel,
   group: readonly ModelContext[],
 ): MembershipChange[] {
+  const groupBlocks = new Set(group.map((entry) => entry.block));
+  const carriedNodes = [...new Set(group.flatMap((entry) => entry.members))].filter((node) =>
+    model.nodes.includes(node),
+  );
   const changes: MembershipChange[] = [];
-  for (const context of group) {
+  for (const context of model.contexts) {
     const frame = regionRectOf(model, context);
-    if (frame) changes.push(...membershipChangesForRegion(model, context, frame, { canRemove: false }));
+    if (!frame) continue;
+    if (groupBlocks.has(context.block)) {
+      changes.push(...membershipChangesForRegion(model, context, frame, { canRemove: false }));
+      continue;
+    }
+    for (const node of carriedNodes) {
+      if (context.members.includes(node)) continue;
+      if (rectContainsRect(frame, displayRectOf(model, node))) {
+        changes.push({ block: context.block, node, joins: true });
+      }
+    }
   }
   return changes;
 }

@@ -1232,11 +1232,11 @@ export class CanvasView {
       if (clickCount < 2) this.actions.regionClicked(this.regionTargetOf(gesture.context));
       return;
     }
-    // Every frame of the group sweeps the non-members it came to rest over — the carried regions
-    // claim their interiors exactly as the dragged one does, or a node landed inside a carried
-    // frame would stay unassigned until a linter flagged it (R28a, R29).
+    // The group sweeps the non-members its frames came to rest over (R28a, R29), and the members
+    // it carried join any stationary region whose frame fully contains them where they landed.
+    const movedNodes = [...gesture.startPositions.keys()];
     const changes = membershipChangesForRegionMove(this.model, [gesture.context, ...gesture.carriedContexts]);
-    this.actions.regionMoved(this.regionTargetOf(gesture.context), [...gesture.startPositions.keys()], changes);
+    this.actions.regionMoved(this.regionTargetOf(gesture.context), movedNodes, changes);
   }
 
   private commitRegionResize(gesture: Extract<Gesture, { type: 'region-resize' }>): void {

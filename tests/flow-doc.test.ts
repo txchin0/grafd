@@ -664,6 +664,74 @@ Passerby
       ['Big', 'Passerby', true],
     ]);
   });
+
+  it('adds a carried node to a stationary region that fully contains it', () => {
+    const changes = changesFor(['A'], `context: A
+  pos: 0, 0, 800, 600
+  nodes:
+    - N
+
+context: B
+  pos: 900, 0, 400, 300
+  nodes:
+
+N
+  pos: 1000, 100, 200, 88
+`);
+    expect(changes.map((change) => [change.block.name, change.node.name, change.joins])).toEqual([['B', 'N', true]]);
+  });
+
+  it('does not add a carried node that only overlaps the stationary frame', () => {
+    const changes = changesFor(['A'], `context: A
+  pos: 0, 0, 800, 600
+  nodes:
+    - N
+
+context: B
+  pos: 900, 0, 400, 300
+  nodes:
+
+N
+  pos: 1150, 100, 200, 88
+`);
+    expect(changes).toEqual([]);
+  });
+
+  it('leaves unrelated non-members inside a stationary region alone', () => {
+    const changes = changesFor(['A'], `context: A
+  pos: 0, 0, 800, 600
+  nodes:
+    - N
+
+context: B
+  pos: 900, 0, 400, 300
+  nodes:
+
+N
+  pos: 1000, 100, 200, 88
+
+Stranger
+  pos: 1260, 230, 30, 30
+`);
+    expect(changes.map((change) => [change.block.name, change.node.name, change.joins])).toEqual([['B', 'N', true]]);
+  });
+
+  it('never removes a carried node from a stationary region it left', () => {
+    const changes = changesFor(['A'], `context: A
+  pos: 0, 0, 800, 600
+  nodes:
+    - N
+
+context: B
+  pos: 900, 0, 400, 300
+  nodes:
+    - N
+
+N
+  pos: 1400, 500, 200, 88
+`);
+    expect(changes).toEqual([]);
+  });
 });
 
 describe('regionRectOf', () => {
