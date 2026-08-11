@@ -1,5 +1,7 @@
 # Grafd
 
+<img width="1369" height="812" alt="image" src="https://github.com/user-attachments/assets/cd0f635f-8be0-4551-b371-6b7e8714e21c" />
+
 **Grafd** is a freeform web canvas editor for `.flow` files — a text-based diagram
 format for solution design. You sketch graphs visually in the browser; the same `.flow`
 files are read, interpreted, and implemented by AI agents, so the diagram is the spec.
