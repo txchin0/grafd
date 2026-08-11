@@ -13,6 +13,22 @@ export function folderOf(path: string): string {
   return slash === -1 ? '' : path.slice(0, slash);
 }
 
+// The path from `fromFolder` ('' for the workspace root) to the file `toPath`, e.g.
+// from "a/b" to "a/c/d.flow" is "../c/d.flow". Used when a rename changes the relative
+// path other files need to spell to reach it.
+export function relativizePath(fromFolder: string, toPath: string): string {
+  const fromSegments = fromFolder ? fromFolder.split('/') : [];
+  const toSegments = toPath.split('/');
+  const toFolderDepth = toSegments.length - 1;
+  let common = 0;
+  while (common < fromSegments.length && common < toFolderDepth && fromSegments[common] === toSegments[common]) {
+    common += 1;
+  }
+  const climbs = fromSegments.length - common;
+  const rest = toSegments.slice(common).join('/');
+  return climbs === 0 ? rest : `${'../'.repeat(climbs)}${rest}`;
+}
+
 function join(folder: string, name: string): string {
   return folder ? `${folder}/${name}` : name;
 }

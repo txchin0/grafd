@@ -189,6 +189,41 @@ describe('ExpansionLayer', () => {
     expect(layer.documentAt('dashboard.flow')).toBe(doc);
   });
 
+  it('re-keys an in-flight load to the renamed path when it settles', async () => {
+    const onNeedsRender = vi.fn();
+    let resolveRead: (text: string) => void = () => {};
+    const readExternalFile = vi.fn(
+      () => new Promise<string>((resolve) => { resolveRead = resolve; }),
+    );
+    const layer = new ExpansionLayer({ onNeedsRender, readExternalFile });
+    const pending = layer.ensureDocument('login.flow');
+    layer.retargetPath('login.flow', 'signin.flow');
+    resolveRead('---\nname: Signin\n---\n\nStart\n');
+    const doc = await pending;
+    expect(doc).not.toBeNull();
+    expect(layer.documentAt('login.flow')).toBeNull();
+    expect(layer.documentAt('signin.flow')).toBe(doc);
+    expect(layer.watchesPath('login.flow')).toBe(false);
+    expect(layer.watchesPath('signin.flow')).toBe(true);
+    const [node] = allNodes(doc!);
+    expect(layer.ownerOf(node)?.path).toBe('signin.flow');
+  });
+
+  it('re-keys a failed in-flight load to the renamed path', async () => {
+    const onNeedsRender = vi.fn();
+    let rejectRead: (error: Error) => void = () => {};
+    const readExternalFile = vi.fn(
+      () => new Promise<string>((_resolve, reject) => { rejectRead = reject; }),
+    );
+    const layer = new ExpansionLayer({ onNeedsRender, readExternalFile });
+    const pending = layer.ensureDocument('login.flow');
+    layer.retargetPath('login.flow', 'signin.flow');
+    rejectRead(new Error('not found'));
+    expect(await pending).toBeNull();
+    expect(layer.watchesPath('login.flow')).toBe(false);
+    expect(layer.watchesPath('signin.flow')).toBe(true);
+  });
+
   it('adoptDocument stores the same object and invalidates sub-models', () => {
     const { layer } = layerWithSpy();
     const hostDoc = parseFlow('Host\n  id: host\n  pos: 0, 0, 120, 80\n  expand: [X](sub.flow)\n');

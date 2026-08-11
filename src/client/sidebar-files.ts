@@ -25,6 +25,11 @@ export interface SidebarFilesOptions {
   openFile(path: string): void;
   deleteFile(path: string): void;
   duplicateFile(path: string): void;
+  // Renames a file in place. Resolves to null when the editor should close (a valid rename
+  // or an unchanged no-op), otherwise why the rename cannot happen — shown beneath the name
+  // box. The promise settles only once the backend confirms the move, so a refused rename
+  // keeps the editor open with its error.
+  renameFile(path: string, requested: string): Promise<string | null>;
   // Null when the flow was created, otherwise why it was not — shown beneath the name box.
   createFile(path: string): string | null;
 }
@@ -36,8 +41,13 @@ export interface SidebarFiles {
 export function createSidebarFiles(options: SidebarFilesOptions): SidebarFiles {
   const { fileList, newFileButton, newFileInput, newFileError, contextMenu } = options;
   const collapsedFolders = new Set<string>();
+  let renameEditor: { path: string; input: HTMLInputElement; error: HTMLSpanElement } | null = null;
+  let renamePending = false;
 
   function render(): void {
+    // Any re-render (our own after a rename, or a filesChanged from another tab) replaces the
+    // live row, so an open rename editor must be closed before the tree is rebuilt.
+    cancelRenameEditor(false);
     const rows: HTMLElement[] = [];
     appendFolderRows(buildFileTree(options.files()), 0, rows);
     fileList.replaceChildren(...rows);
@@ -95,20 +105,103 @@ export function createSidebarFiles(options: SidebarFilesOptions): SidebarFiles {
     row.addEventListener('contextmenu', (event) => {
       event.preventDefault();
       const at = { x: event.clientX, y: event.clientY };
-      contextMenu.open(fileMenuItems(file, at), at);
+      contextMenu.open(fileMenuItems(file, row, at), at);
     });
     return row;
   }
 
-  function fileMenuItems(file: TreeFile, at: { x: number; y: number }): MenuItem[] {
+  function fileMenuItems(file: TreeFile, row: HTMLElement, at: { x: number; y: number }): MenuItem[] {
     const folder = folderOf(file.path);
     return [
       { label: 'Open', onSelect: () => options.openFile(file.path) },
+      { label: 'Rename', disabled: renamePending, onSelect: () => startRename(file, row) },
       { label: 'New flow here', onSelect: () => promptForNewFile(folder ? `${folder}/` : undefined) },
       { label: 'Duplicate', onSelect: () => options.duplicateFile(file.path) },
       { separator: true },
       { label: 'Delete', danger: true, onSelect: () => confirmDelete(file, at) },
     ];
+  }
+
+  // The row's name span becomes an input prefilled with the basename. Enter commits, Escape
+  // cancels, and blur commits too — a rejected name keeps the box open with its error and
+  // refocuses the input, the same inline discipline as the new-file form, which is why no
+  // `prompt` dialog is involved.
+  function startRename(file: TreeFile, row: HTMLElement): void {
+    // A rename is still in flight; opening another editor would let that rename's result
+    // close or error the new one. The menu item is disabled too — this is the second guard.
+    if (renamePending) return;
+    cancelRenameEditor();
+    hideInput();
+    // Cancelling an editor on another row rebuilt the tree, which detached this row — find
+    // its replacement by the path the row carries in its title.
+    const liveRow = row.isConnected
+      ? row
+      : ([...fileList.children] as HTMLElement[]).find((child) => child.title === file.path);
+    if (!liveRow) return;
+    const input = document.createElement('input');
+    input.className = 'file-rename-input';
+    input.value = file.name;
+    input.title = 'Rename file — Enter to save, Escape to cancel';
+    input.spellcheck = false;
+    input.autocomplete = 'off';
+    const error = document.createElement('span');
+    error.className = 'file-rename-error hidden';
+    renameEditor = { path: file.path, input, error };
+    liveRow.classList.add('editing');
+    liveRow.replaceChildren(input, error);
+    input.focus();
+    input.select();
+    input.addEventListener('click', (event) => event.stopPropagation());
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') submitRename();
+      else if (event.key === 'Escape') cancelRenameEditor();
+      else clearRenameError();
+      event.stopPropagation();
+    });
+    input.addEventListener('blur', () => void submitRename());
+  }
+
+  async function submitRename(): Promise<void> {
+    const editor = renameEditor;
+    if (!editor || renamePending) return;
+    renamePending = true;
+    try {
+      let error: string | null;
+      try {
+        error = await options.renameFile(editor.path, editor.input.value);
+      } catch {
+        error = 'Rename failed unexpectedly.';
+      }
+      // The editor may have been cancelled or replaced while the backend answered; the
+      // result belongs to the editor that asked, not to whatever is open now.
+      if (renameEditor !== editor) return;
+      if (error) showRenameError(error);
+      else cancelRenameEditor();
+    } finally {
+      renamePending = false;
+    }
+  }
+
+  function cancelRenameEditor(rebuild = true): void {
+    if (!renameEditor) return;
+    renameEditor = null;
+    clearRenameError();
+    if (rebuild) render();
+  }
+
+  function showRenameError(message: string): void {
+    const editor = renameEditor;
+    if (!editor) return;
+    editor.error.textContent = message;
+    editor.error.classList.remove('hidden');
+    editor.input.classList.add('invalid');
+    editor.input.focus();
+  }
+
+  function clearRenameError(): void {
+    const editor = renameEditor;
+    editor?.error.classList.add('hidden');
+    editor?.input.classList.remove('invalid');
   }
 
   // The menu reopens with an explicit confirm rather than deleting on first click — the same
@@ -145,6 +238,7 @@ export function createSidebarFiles(options: SidebarFilesOptions): SidebarFiles {
   // A folder prefix (e.g. "auth/") seeds "New flow here" so the file lands inside the
   // right-clicked folder, with the caret left after the slash rather than selecting it.
   function promptForNewFile(prefill?: string): void {
+    cancelRenameEditor();
     const value = prefill ?? nextUntitledFlowName(options.files());
     clearError();
     newFileButton.classList.add('hidden');

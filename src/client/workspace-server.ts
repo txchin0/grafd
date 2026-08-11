@@ -25,6 +25,9 @@ export class ServerWorkspace implements Workspace {
   readonly label = 'server';
   // Absolute path node references resolve against; only this backend can know it.
   projectRoot: string | null = null;
+  // Portable path of the workspace root relative to the project root, e.g. ".grafd" when the
+  // flow files live in a subfolder of the project; '' when the workspace is the project root.
+  workspaceRootPrefix: string | null = null;
   private delegate: WorkspaceDelegate | null = null;
   private socket: WebSocket | null = null;
   private stopped = false;
@@ -32,8 +35,14 @@ export class ServerWorkspace implements Workspace {
   // server restarted on a recompile, so the page is reloaded to pick up the new modules.
   private reloadOnReconnect = false;
   private hasConnectedBefore = false;
-  // Messages composed while the socket was down, flushed in order on reconnect. Order
-  // matters: a delete followed by a re-create must replay as such.
+  // The rename whose server result is still awaited, if any. A rename is only sent while the
+  // socket is open, so a pending slot always has a message in flight. Every message carries
+  // an id so a slow result from an earlier rename can never settle a later one.
+  private pendingRename: { id: number; resolve: (ok: boolean) => void } | null = null;
+  private nextRenameId = 1;
+  // Messages composed while the socket was down, flushed in order on reconnect (renames are
+  // never queued — see renameFile). Order matters: a delete followed by a re-create must
+  // replay as such.
   private readonly pendingMessages: string[] = [];
 
   async start(delegate: WorkspaceDelegate): Promise<string[]> {
@@ -49,10 +58,12 @@ export class ServerWorkspace implements Workspace {
     try {
       const response = await fetch(PROJECT_ROOT_ENDPOINT);
       if (!response.ok) return;
-      const body = (await response.json()) as { root?: unknown };
+      const body = (await response.json()) as { root?: unknown; workspaceRoot?: unknown };
       if (typeof body.root === 'string') this.projectRoot = body.root;
+      if (typeof body.workspaceRoot === 'string') this.workspaceRootPrefix = body.workspaceRoot;
     } catch {
       this.projectRoot = null;
+      this.workspaceRootPrefix = null;
     }
   }
 
@@ -73,6 +84,21 @@ export class ServerWorkspace implements Workspace {
 
   deleteFile(path: string): void {
     this.send(JSON.stringify({ type: 'delete', path }));
+  }
+
+  renameFile(from: string, to: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (this.socket?.readyState !== WebSocket.OPEN) {
+        // Never queue a rename for replay: a queued message could move the file after the
+        // editor has already shown the rename as refused.
+        resolve(false);
+        return;
+      }
+      const id = this.nextRenameId++;
+      this.pendingRename?.resolve(false);
+      this.pendingRename = { id, resolve };
+      this.socket.send(JSON.stringify({ type: 'rename', from, to, id }));
+    });
   }
 
   private send(message: string): void {
@@ -99,13 +125,27 @@ export class ServerWorkspace implements Workspace {
         | { type: 'files'; files: string[] }
         | { type: 'file'; path: string; text: string }
         | { type: 'hello'; reloadOnReconnect: boolean }
+        | { type: 'rename'; from: string; to: string }
+        | { type: 'rename-result'; ok: boolean; id?: number }
         | { type: 'reload' };
       if (message.type === 'files') this.delegate?.filesChanged(message.files);
       else if (message.type === 'file') this.delegate?.fileChanged(message.path, message.text);
       else if (message.type === 'hello') this.reloadOnReconnect = message.reloadOnReconnect;
+      else if (message.type === 'rename-result') {
+        const pending = this.pendingRename;
+        if (pending && message.id === pending.id) {
+          pending.resolve(message.ok);
+          this.pendingRename = null;
+        }
+      }
+      else if (message.type === 'rename') {
+        this.delegate?.fileRenamed?.(message.from, message.to);
+      }
       else if (message.type === 'reload') location.reload();
     });
     socket.addEventListener('close', () => {
+      this.pendingRename?.resolve(false);
+      this.pendingRename = null;
       this.delegate?.connectionChanged(false);
       if (!this.stopped) setTimeout(() => this.connect(), 1000);
     });

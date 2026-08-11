@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { mkdir, readFile, readdir, rm, rmdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -83,9 +83,11 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   });
 
   // Reports the absolute root so the client can turn a node's file references into editor
-  // deep links. It exposes a path only — no file access hangs off it.
+  // deep links, plus the workspace's portable path under that root so a rename can rewrite
+  // project-root-relative reference targets. It exposes paths only — no file access hangs
+  // off it.
   app.get('/api/project-root', (_request, response) => {
-    response.json({ root: projectRoot });
+    response.json({ root: projectRoot, workspaceRoot: toPortablePath(projectRoot, workspaceRoot) });
   });
 
   app.get('/SAVE-GUIDE.md', (_request, response) => {
@@ -124,12 +126,29 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     path: string;
   }
 
-  type ClientMessage = WriteMessage | DeleteMessage;
+  interface RenameMessage {
+    type: 'rename';
+    from: string;
+    to: string;
+    id?: number;
+  }
+
+  type ClientMessage = WriteMessage | DeleteMessage | RenameMessage;
 
   function broadcast(message: object, { except }: { except?: WebSocket } = {}): void {
     const payload = JSON.stringify(message);
     for (const client of socketServer.clients) {
       if (client !== except && client.readyState === client.OPEN) client.send(payload);
+    }
+  }
+
+  // The rename result gates client-side state (the editor only re-keys its handles after the
+  // move is confirmed), so it must always be sent for an attempted rename — even when the
+  // operation fails after the move. A socket that closed mid-rename is skipped; the client
+  // reconciles through the next file-list broadcast.
+  function sendRenameResult(socket: WebSocket, ok: boolean, id?: number): void {
+    if (socket.readyState === socket.OPEN) {
+      socket.send(JSON.stringify({ type: 'rename-result', ok, id }));
     }
   }
 
@@ -140,17 +159,22 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   // the longer one's tail past the end of the file: silent corruption that the tolerant .flow
   // parser then reads as extra nodes. Chaining also keeps `lastWrittenHashes` and the broadcast
   // in the order the writes actually land.
-  function queueFileOperation(absolute: string, operation: () => Promise<void>): Promise<void> {
-    const settled = fileOperations.get(absolute) ?? Promise.resolve();
+  //
+  // A rename spans two paths, so it chains onto both queues: it waits for anything already
+  // queued on either, and anything queued after it on either waits for the move.
+  function queueFileOperation(paths: string[], operation: () => Promise<void>): Promise<void> {
+    const settled = Promise.allSettled(paths.map((filePath) => fileOperations.get(filePath) ?? Promise.resolve()));
     // `.then(op, op)` rather than `.finally`: a failed operation must not cancel the ones queued
     // behind it, which are usually the writes that would have corrected it.
     const next = settled.then(operation, operation);
     const tracked = next.catch((error) => {
-      console.error('File operation failed', absolute, error);
+      console.error('File operation failed', paths.join(' -> '), error);
     });
-    fileOperations.set(absolute, tracked);
+    for (const filePath of paths) fileOperations.set(filePath, tracked);
     void tracked.then(() => {
-      if (fileOperations.get(absolute) === tracked) fileOperations.delete(absolute);
+      for (const filePath of paths) {
+        if (fileOperations.get(filePath) === tracked) fileOperations.delete(filePath);
+      }
     });
     return tracked;
   }
@@ -160,18 +184,18 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     // restarts the server before its own reload broadcast can go out.
     socket.send(JSON.stringify({ type: 'hello', reloadOnReconnect: developmentMode }));
     socket.on('message', (raw) => {
-      let message: Partial<ClientMessage>;
+      let message: ClientMessage;
       try {
-        message = JSON.parse(raw.toString());
+        message = JSON.parse(raw.toString()) as ClientMessage;
       } catch {
         return;
       }
-      const absolute = resolveWorkspacePath(workspaceRoot, message.path);
-      if (!absolute) return;
-      const portablePath = message.path!;
-      if (message.type === 'write' && typeof (message as Partial<WriteMessage>).text === 'string') {
-        const text = (message as WriteMessage).text;
-        void queueFileOperation(absolute, async () => {
+      if (message.type === 'write') {
+        const { path: portablePath, text } = message;
+        if (typeof text !== 'string') return;
+        const absolute = resolveWorkspacePath(workspaceRoot, portablePath);
+        if (!absolute) return;
+        void queueFileOperation([absolute], async () => {
           // Recorded here rather than on receipt so the watcher's echo suppression follows the
           // order the writes land in, not the order they were queued.
           lastWrittenHashes.set(absolute, contentHash(text));
@@ -180,15 +204,101 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
           broadcast({ type: 'file', path: portablePath, text }, { except: socket });
         });
       } else if (message.type === 'delete') {
-        void queueFileOperation(absolute, async () => {
+        const { path: portablePath } = message;
+        const absolute = resolveWorkspacePath(workspaceRoot, portablePath);
+        if (!absolute) return;
+        void queueFileOperation([absolute], async () => {
           lastWrittenHashes.delete(absolute);
           await rm(absolute, { force: true });
           await removeEmptyParentDirectories(path.dirname(absolute));
           await broadcastFileList();
         });
+      } else if (message.type === 'rename') {
+        const { from, to, id } = message;
+        // Renames move .flow files only — the manifest is client-owned UI state and must not
+        // be relocatable through the same path. resolveWorkspacePath also admits the manifest
+        // for read/write, so the extension is enforced here rather than by that helper.
+        const absolute = resolveWorkspacePath(workspaceRoot, from);
+        const toAbsolute = resolveWorkspacePath(workspaceRoot, to);
+        if (!absolute || !toAbsolute || !from.endsWith('.flow') || !to.endsWith('.flow')) {
+          sendRenameResult(socket, false, id);
+          return;
+        }
+        void queueFileOperation([absolute, toAbsolute], async () => {
+          let ok = false;
+          try {
+            ok = await renameWorkspaceFile(absolute, toAbsolute, from, to, socket);
+          } catch (error) {
+            console.error('Failed to rename', absolute, 'to', toAbsolute, error);
+          }
+          sendRenameResult(socket, ok, id);
+        });
       }
     });
   });
+
+  // The move itself, plus the watcher-echo suppression and the list broadcast that go with
+  // it. Returns whether the file actually moved.
+  async function renameWorkspaceFile(
+    absolute: string,
+    toAbsolute: string,
+    portableFrom: string,
+    portableTo: string,
+    except: WebSocket,
+  ): Promise<boolean> {
+    if (!(await isFile(absolute))) return false;
+    // Never let a rename overwrite an existing file; a case-only rename is the same file on
+    // a case-insensitive filesystem and is the one exception.
+    if ((await pathExists(toAbsolute)) && !(await sameFilePath(absolute, toAbsolute))) return false;
+    try {
+      await rename(absolute, toAbsolute);
+    } catch (error) {
+      console.error('Failed to rename', absolute, 'to', toAbsolute, error);
+      return false;
+    }
+    const hash = lastWrittenHashes.get(absolute);
+    if (hash) {
+      lastWrittenHashes.delete(absolute);
+      // Carried to the new path so the watcher's `add` echo for the moved file is
+      // suppressed here too: other clients receive the file list, not a content push,
+      // exactly as with an external rename.
+      lastWrittenHashes.set(toAbsolute, hash);
+    }
+    // Other clients retarget their open flow and cached documents from this message; it goes
+    // out before the file list so the old path is never mistaken for a deletion.
+    broadcast({ type: 'rename', from: portableFrom, to: portableTo }, { except });
+    await broadcastFileList();
+    return true;
+  }
+
+  // Whether two absolute paths name the same entry. realpath resolves to the on-disk casing
+  // on Windows, so the two spellings of one file compare equal there, while two genuinely
+  // distinct files — e.g. main.flow and Main.flow both present on a case-sensitive
+  // filesystem — never do.
+  async function sameFilePath(a: string, b: string): Promise<boolean> {
+    try {
+      return (await realpath(a)) === (await realpath(b));
+    } catch {
+      return false;
+    }
+  }
+
+  async function pathExists(absolute: string): Promise<boolean> {
+    try {
+      await access(absolute);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function isFile(absolute: string): Promise<boolean> {
+    try {
+      return (await stat(absolute)).isFile();
+    } catch {
+      return false;
+    }
+  }
 
   async function removeEmptyParentDirectories(directory: string): Promise<void> {
     try {

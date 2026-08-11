@@ -30,6 +30,12 @@ export class FolderWorkspace implements Workspace {
   private fileHandles = new Map<string, FileSystemFileHandle>();
   private readonly lastModified = new Map<string, number>();
   private readonly lastSeenText = new Map<string, string>();
+  // Mutations run one at a time in the order they were asked for, so a delete can never land
+  // before the write that created the file, a rename before the edit it moves, or a poll's
+  // directory snapshot before the mutation that changed it. Polls run through the same chain
+  // for that last reason: a snapshot taken mid-rename would otherwise re-key the handle map
+  // back to the old name until the next poll.
+  private mutationChain: Promise<void> = Promise.resolve();
 
   constructor(root: FileSystemDirectoryHandle) {
     this.root = root;
@@ -61,16 +67,44 @@ export class FolderWorkspace implements Workspace {
   }
 
   writeFile(path: string, text: string): void {
-    void this.performWrite(path, text).catch((error) => {
-      console.error(`Failed to write ${path} to the opened folder`, error);
-      this.delegate?.connectionChanged(false);
+    void this.enqueueMutation(async () => {
+      try {
+        await this.performWrite(path, text);
+      } catch (error) {
+        console.error(`Failed to write ${path} to the opened folder`, error);
+        this.delegate?.connectionChanged(false);
+      }
     });
   }
 
   deleteFile(path: string): void {
-    void this.performDelete(path).catch((error) => {
-      console.error(`Failed to delete ${path} from the opened folder`, error);
+    void this.enqueueMutation(async () => {
+      try {
+        await this.performDelete(path);
+      } catch (error) {
+        console.error(`Failed to delete ${path} from the opened folder`, error);
+      }
     });
+  }
+
+  renameFile(from: string, to: string): Promise<boolean> {
+    let renamed = false;
+    const done = this.enqueueMutation(async () => {
+      try {
+        renamed = await this.performRename(from, to);
+      } catch (error) {
+        console.error(`Failed to rename ${from} to ${to} in the opened folder`, error);
+      }
+    });
+    return done.then(() => renamed);
+  }
+
+  private enqueueMutation(mutation: () => Promise<void>): Promise<void> {
+    // A failed mutation must not cancel the ones queued behind it, which are usually the
+    // writes that would have corrected it — same policy as the server's file queue.
+    const next = this.mutationChain.then(mutation, mutation);
+    this.mutationChain = next.catch(() => undefined);
+    return next;
   }
 
   private async performDelete(path: string): Promise<void> {
@@ -89,6 +123,55 @@ export class FolderWorkspace implements Workspace {
     this.lastModified.delete(path);
     this.lastSeenText.delete(path);
     this.delegate?.filesChanged(this.sortedFlowPaths());
+  }
+
+  private async performRename(from: string, to: string): Promise<boolean> {
+    const handle = this.fileHandles.get(from) ?? (await this.locateFile(from, { create: false }));
+    if (!handle) return false;
+    const fileName = to.split('/').pop()!;
+    // The handle map is only as fresh as the last poll, so a target that appeared on disk
+    // since then is checked directly — and refused unless it is the file being renamed (a
+    // case-only rename is the same entry on a case-insensitive filesystem).
+    const existing = await this.locateFile(to, { create: false });
+    const sameEntry =
+      existing != null && typeof handle.isSameEntry === 'function'
+        ? await handle.isSameEntry(existing)
+        : false;
+    if (existing && !sameEntry) return false;
+    const move = (handle as FileSystemFileHandle & { move?(name: string): Promise<unknown> }).move;
+    if (!move) {
+      // Older Chromium without FileSystemHandle.move: copy to the new name, then remove the
+      // old entry. A same-entry target is a case-only rename, which the copy/delete pair
+      // cannot express (the copy and delete would hit the same file), so those are refused.
+      if (sameEntry) return false;
+      const file = await handle.getFile();
+      const text = await file.text();
+      await this.performWrite(to, text);
+      try {
+        await this.performDelete(from);
+      } catch (error) {
+        // performDelete only throws before the old entry is removed, so the source still
+        // exists here; undo the copy so a failed fallback does not leave both files behind.
+        try {
+          await this.performDelete(to);
+        } catch {
+          // The disk is authoritative — leave both files rather than lose data.
+        }
+        throw error;
+      }
+      return true;
+    }
+    await move.call(handle, fileName);
+    this.fileHandles.delete(from);
+    this.fileHandles.set(to, handle);
+    const modified = this.lastModified.get(from);
+    const seen = this.lastSeenText.get(from);
+    this.lastModified.delete(from);
+    this.lastSeenText.delete(from);
+    if (modified != null) this.lastModified.set(to, modified);
+    if (seen != null) this.lastSeenText.set(to, seen);
+    this.delegate?.filesChanged(this.sortedFlowPaths());
+    return true;
   }
 
   // Innermost first; a non-empty directory ends the walk because its parents contain it.
@@ -162,25 +245,32 @@ export class FolderWorkspace implements Workspace {
 
   private async poll(): Promise<void> {
     if (!this.delegate) return;
-    let discovered: Map<string, FileSystemFileHandle>;
-    try {
-      discovered = await this.discoverFlowFiles();
-    } catch {
-      this.delegate.connectionChanged(false);
-      return;
-    }
-    this.delegate.connectionChanged(true);
+    let merged = false;
+    await this.enqueueMutation(async () => {
+      let discovered: Map<string, FileSystemFileHandle>;
+      try {
+        discovered = await this.discoverFlowFiles();
+      } catch {
+        this.delegate?.connectionChanged(false);
+        return;
+      }
+      this.delegate?.connectionChanged(true);
 
-    const removedPaths = [...this.fileHandles.keys()].filter((path) => !discovered.has(path));
-    const addedPaths = [...discovered.keys()].filter((path) => !this.fileHandles.has(path));
-    this.fileHandles = discovered;
-    for (const path of removedPaths) {
-      this.lastModified.delete(path);
-      this.lastSeenText.delete(path);
-    }
-    if (removedPaths.length > 0 || addedPaths.length > 0) {
-      this.delegate.filesChanged(this.sortedFlowPaths());
-    }
+      // The scan and this merge are serialized against every mutation, so the snapshot is
+      // never older than the rename that re-keyed the map: wholesale replacement is safe.
+      const removedPaths = [...this.fileHandles.keys()].filter((path) => !discovered.has(path));
+      const addedPaths = [...discovered.keys()].filter((path) => !this.fileHandles.has(path));
+      this.fileHandles = discovered;
+      for (const path of removedPaths) {
+        this.lastModified.delete(path);
+        this.lastSeenText.delete(path);
+      }
+      if (removedPaths.length > 0 || addedPaths.length > 0) {
+        this.delegate?.filesChanged(this.sortedFlowPaths());
+      }
+      merged = true;
+    });
+    if (!merged) return;
     await this.emitChangedFiles();
   }
 

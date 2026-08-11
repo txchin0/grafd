@@ -11,20 +11,24 @@ interface Harness {
   session: EditSession;
   writes: { path: string; text: string }[];
   adopted: { path: string; doc: FlowDocument }[];
+  retargeted: { from: string; to: string }[];
   lastWriteTo(path: string): string | undefined;
 }
 
 function createHarness(): Harness {
   const writes: { path: string; text: string }[] = [];
   const adopted: { path: string; doc: FlowDocument }[] = [];
+  const retargeted: { from: string; to: string }[] = [];
   const session = new EditSession({
     writeFile: (path, text) => writes.push({ path, text }),
     adoptDocument: (path, doc) => adopted.push({ path, doc }),
+    retargetDocument: (from, to) => retargeted.push({ from, to }),
   });
   return {
     session,
     writes,
     adopted,
+    retargeted,
     lastWriteTo: (path) => [...writes].reverse().find((write) => write.path === path)?.text,
   };
 }
@@ -442,5 +446,89 @@ describe('undo across every document an edit can reach', () => {
     const restoredId = allNodes(session.documentAt('main.flow')!)[0].id;
     expect(restoredId).toBeTruthy();
     expect(restoredId).not.toBe(assignedId);
+  });
+});
+
+describe('retarget', () => {
+  it('moves a tracked document to the new path and re-keys the published entry', () => {
+    const { session, adopted, retargeted } = createHarness();
+    const doc = session.adoptText('a.flow', flowText('Start'));
+    session.retarget('a.flow', 'b.flow');
+    expect(session.documentAt('a.flow')).toBeNull();
+    expect(session.documentAt('b.flow')).toBe(doc);
+    expect(retargeted).toEqual([{ from: 'a.flow', to: 'b.flow' }]);
+    expect(adopted).toEqual([{ path: 'a.flow', doc }]);
+  });
+
+  it('commits a pending debounce to the new path', () => {
+    const { session, writes, lastWriteTo } = createHarness();
+    const doc = session.adoptText('a.flow', flowText('Start'));
+    renameFirstNode(doc, 'Renamed');
+    session.commitAfter('a.flow', 'debounce');
+    session.retarget('a.flow', 'b.flow');
+    vi.advanceTimersByTime(COMMIT_DEBOUNCE_MS);
+    expect(lastWriteTo('b.flow')).toBe(serializeFlow(doc));
+    expect(lastWriteTo('a.flow')).toBeUndefined();
+    expect(writes).toHaveLength(1);
+  });
+
+  it('clamps undo history at the rename boundary', () => {
+    const { session, lastWriteTo } = createHarness();
+    const doc = session.adoptText('a.flow', flowText('Start'));
+    session.runAction(() => {
+      renameFirstNode(doc, 'Renamed');
+      session.commitAfter('a.flow', 'now');
+    });
+    session.retarget('a.flow', 'b.flow');
+
+    expect(session.undo()).toEqual([]);
+    expect(session.documentAt('a.flow')).toBeNull();
+    expect(session.documentAt('b.flow')).toBe(doc);
+    expect(serializeFlow(doc)).not.toBe(flowText('Start'));
+    expect(lastWriteTo('b.flow')).toBeUndefined();
+  });
+
+  it('clamps history even when the renamed file was never tracked', () => {
+    const { session, retargeted } = createHarness();
+    const doc = session.adoptText('a.flow', flowText('Start'));
+    session.runAction(() => {
+      renameFirstNode(doc, 'Renamed');
+      session.commitAfter('a.flow', 'now');
+    });
+    session.retarget('other.flow', 'moved.flow');
+
+    expect(session.undo()).toEqual([]);
+    expect(session.documentAt('a.flow')).toBe(doc);
+    expect(serializeFlow(doc)).not.toBe(flowText('Start'));
+    expect(retargeted).toEqual([{ from: 'other.flow', to: 'moved.flow' }]);
+  });
+
+  it('does not invalidate in-flight action continuations', () => {
+    const { session } = createHarness();
+    session.adoptText('a.flow', flowText('Start'));
+    const continuation = session.suspendAction();
+    session.retarget('a.flow', 'b.flow');
+    expect(continuation.resume(() => 'still alive')).toBe('still alive');
+  });
+});
+
+describe('commitWithoutUndo', () => {
+  it('writes a mutated tracked document without creating an undo step', () => {
+    const { session, lastWriteTo } = createHarness();
+    const doc = session.adoptText('a.flow', flowText('Start'));
+    renameFirstNode(doc, 'Renamed');
+    session.commitWithoutUndo('a.flow');
+    expect(lastWriteTo('a.flow')).toBe(serializeFlow(doc));
+    expect(session.undo()).toEqual([]);
+    expect(lastWriteTo('a.flow')).toBe(serializeFlow(doc));
+  });
+
+  it('writes a ripple rewrite for a document tracked with its baseline', () => {
+    const { session, lastWriteTo } = createHarness();
+    const doc = parseFlow(flowText('Start'));
+    session.trackWithBaseline('a.flow', doc);
+    renameFirstNode(doc, 'Renamed');
+    session.commitWithoutUndo('a.flow');
+    expect(lastWriteTo('a.flow')).toBe(serializeFlow(doc));
   });
 });

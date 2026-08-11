@@ -19,7 +19,8 @@ interface StoredFile {
 
 type ChannelMessage =
   | { sender: string; kind: 'file'; path: string; text: string }
-  | { sender: string; kind: 'delete'; path: string };
+  | { sender: string; kind: 'delete'; path: string }
+  | { sender: string; kind: 'rename'; from: string; to: string };
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -84,6 +85,61 @@ export class BrowserWorkspace implements Workspace {
     };
   }
 
+  renameFile(from: string, to: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const transaction = this.database!.transaction(FILE_STORE, 'readwrite');
+      const store = transaction.objectStore(FILE_STORE);
+      // Issued first so its result is settled before the source read's success handler runs.
+      const toRequest = store.get(to) as IDBRequest<StoredFile | undefined>;
+      const fromRequest = store.get(from) as IDBRequest<StoredFile | undefined>;
+      let settled = false;
+      const finish = (ok: boolean): void => {
+        if (settled) return;
+        settled = true;
+        resolve(ok);
+      };
+      fromRequest.onsuccess = () => {
+        const stored = fromRequest.result;
+        if (!stored) {
+          finish(false);
+          return;
+        }
+        // IDB keys are case-sensitive, so a hit at the exact target key is a different file —
+        // never let a rename overwrite it (the folder and server backends refuse too). A
+        // case-variant collision is refused on top of that, matching the file list the
+        // sidebar validates against.
+        if (toRequest.result || this.hasCaseVariant(from, to)) {
+          finish(false);
+          return;
+        }
+        store.put({ path: to, text: stored.text } satisfies StoredFile);
+        store.delete(from);
+      };
+      fromRequest.onerror = () => finish(false);
+      toRequest.onerror = () => finish(false);
+      transaction.oncomplete = () => {
+        // The source read may have already rejected the rename (missing source, target
+        // taken); the transaction still auto-commits, so the state only moves on a
+        // completed, accepted move.
+        if (settled) return;
+        this.knownFiles = this.knownFiles.filter((known) => known !== from);
+        if (!this.knownFiles.includes(to)) {
+          this.knownFiles.push(to);
+          this.knownFiles.sort();
+        }
+        this.channel?.postMessage({ sender: this.clientId, kind: 'rename', from, to } satisfies ChannelMessage);
+        finish(true);
+      };
+      transaction.onabort = () => finish(false);
+      transaction.onerror = () => finish(false);
+    });
+  }
+
+  private hasCaseVariant(from: string, to: string): boolean {
+    const lowered = to.toLowerCase();
+    return this.knownFiles.some((known) => known !== from && known.toLowerCase() === lowered);
+  }
+
   private fileStore(mode: IDBTransactionMode): IDBObjectStore {
     return this.database!.transaction(FILE_STORE, mode).objectStore(FILE_STORE);
   }
@@ -101,6 +157,15 @@ export class BrowserWorkspace implements Workspace {
     if (message.kind === 'delete') {
       this.knownFiles = this.knownFiles.filter((known) => known !== message.path);
       this.delegate?.filesChanged([...this.knownFiles]);
+      return;
+    }
+    if (message.kind === 'rename') {
+      this.knownFiles = this.knownFiles.filter((known) => known !== message.from);
+      if (!this.knownFiles.includes(message.to)) {
+        this.knownFiles.push(message.to);
+        this.knownFiles.sort();
+      }
+      this.delegate?.fileRenamed?.(message.from, message.to);
       return;
     }
     if (message.path !== MANIFEST_FILE_NAME && !this.knownFiles.includes(message.path)) {

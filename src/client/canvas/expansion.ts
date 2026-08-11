@@ -122,6 +122,10 @@ interface ToggleEntry {
 }
 
 interface ExternalDocEntry {
+  // The key this entry is currently cached under. A rename re-keys the entry while its load
+  // is in flight, so the settle handler has to write back to the current key rather than the
+  // one the fetch was started with.
+  key?: string;
   doc?: FlowDocument;
   loading?: boolean;
   missing?: boolean;
@@ -396,6 +400,17 @@ export class ExpansionLayer {
     this.subModels.clear();
   }
 
+  // A file was renamed: move its cached entry — document, load state, in-flight load promise —
+  // wholesale, so the new path resolves to the same object the old one did.
+  retargetPath(from: string, to: string): void {
+    const entry = this.externalDocs.get(from);
+    if (!entry) return;
+    this.externalDocs.delete(from);
+    entry.key = to;
+    this.externalDocs.set(to, entry);
+    this.subModels.clear();
+  }
+
   private progressOf(entry: ToggleEntry, now: number): number {
     const elapsed = Math.min(1, (now - entry.startTime) / TOGGLE_DURATION_MS);
     const target = entry.targetOpen ? 1 : 0;
@@ -544,20 +559,23 @@ export class ExpansionLayer {
   private externalDoc(path: string): FlowDocument | null {
     const cached = this.externalDocs.get(path);
     if (cached) return cached.doc ?? null;
-    const entry: ExternalDocEntry = { loading: true };
+    const entry: ExternalDocEntry = { key: path, loading: true };
     entry.loadPromise = this.readExternalFile(path)
       .then((text) => {
         if (text == null) throw new Error('not found');
         // A later adoptDocument (open file) or adoptExternalText (watcher) may have replaced
-        // this entry; do not clobber that live document with the late fetch.
-        const current = this.externalDocs.get(path);
+        // this entry — or a rename may have re-keyed it while the fetch was in flight — so
+        // settle under the key it currently holds and never clobber a live replacement.
+        const key = entry.key ?? path;
+        const current = this.externalDocs.get(key);
         if (current?.doc && current !== entry) return current.doc;
-        this.adoptExternalText(path, text);
-        return this.documentAt(path);
+        this.adoptExternalText(key, text);
+        return this.documentAt(key);
       })
       .catch(() => {
-        if (this.externalDocs.get(path) !== entry) return null;
-        this.externalDocs.set(path, { missing: true });
+        const key = entry.key ?? path;
+        if (this.externalDocs.get(key) !== entry) return null;
+        this.externalDocs.set(key, { key, missing: true });
         return null;
       });
     this.externalDocs.set(path, entry);

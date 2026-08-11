@@ -20,6 +20,7 @@ import {
   type CanvasFontId,
   type WorkspaceManifest,
 } from '../shared/manifest.js';
+import { renameManifestPaths } from './file-rename.js';
 import type { View } from './canvas/canvas-view.js';
 
 const SAVE_DEBOUNCE_MS = 800;
@@ -121,6 +122,13 @@ export function createWorkspaceUiState(options: WorkspaceUiStateOptions) {
       delete manifest.ui.expansions[path];
       if (manifest.ui.activeFlow === path) manifest.ui.activeFlow = null;
       if (manifest.entrypoint === path) manifest.entrypoint = defaultEntrypoint(remainingFiles);
+      scheduleSave();
+    },
+
+    // A file was renamed: every manifest path field follows it, and the next save persists
+    // the moved keys instead of leaving the old path's state orphaned.
+    renameFlow(from: string, to: string): void {
+      renameManifestPaths(manifest, from, to);
       scheduleSave();
     },
   };

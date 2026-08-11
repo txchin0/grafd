@@ -95,6 +95,7 @@ import {
   nextUntitledFlowName,
   normalizeFlowPath,
 } from './flow-paths.js';
+import { renameTargetPath, rewriteFileReferences, validateFlowRename } from './file-rename.js';
 
 // TrailEntry and DiveTarget live in dive-navigation.ts.
 
@@ -109,6 +110,7 @@ const navigation = { trail: [] as TrailEntry[], inProgress: false };
 const session = new EditSession({
   writeFile: sendWrite,
   adoptDocument: (path, doc) => expansions.adoptDocument(path, doc),
+  retargetDocument: (from, to) => expansions.retargetPath(from, to),
 });
 
 let currentPreferences: Preferences = loadPreferences();
@@ -218,6 +220,7 @@ const sidebarFiles = createSidebarFiles({
   openFile: (path) => openFlowFromSidebar(path),
   deleteFile: deleteFlowFile,
   duplicateFile: (path) => void duplicateFlowFile(path),
+  renameFile: renameFlowFile,
   createFile: createFlowFile,
 });
 
@@ -287,6 +290,11 @@ const workspaceDelegate: WorkspaceDelegate = {
     workspaceFiles = files;
     renderFileList();
     if (openFlow && !files.includes(openFlow.path)) void closeIfFileGone(openFlow.path);
+  },
+  fileRenamed(from, to) {
+    // Another client renamed a file. The server broadcasts this before the follow-up file
+    // list, so the open flow is retargeted here and is never mistaken for a deleted file.
+    retargetFileState(from, to);
   },
   fileChanged(path, text) {
     // Manifest changes from other clients are UI state, not content — adopting them
@@ -422,6 +430,85 @@ async function duplicateFlowFile(path: string): Promise<void> {
   const text = session.committedTextAt(path) ?? (await workspace?.readFile(path));
   if (text == null) return;
   registerCreatedFlowFile(copyFlowPath(workspaceFiles, path), text);
+}
+
+// Renames a file in place (same folder), then moves every handle that knows the old path —
+// the session, the expansion cache, the open flow, the navigation trail, and the manifest —
+// and finally rewrites every reference to it across the workspace. Resolves to null when the
+// editor should close (a valid rename or an unchanged no-op), otherwise why the rename
+// cannot happen. State only moves after the backend confirms the file actually moved, so a
+// refused rename leaves the workspace and every reference untouched.
+async function renameFlowFile(path: string, requested: string): Promise<string | null> {
+  const error = validateFlowRename(workspaceFiles, path, requested);
+  if (error) return error;
+  const to = renameTargetPath(path, requested);
+  if (!to || to === path) return null;
+  // Pending commits must land before the move so a debounced write can't re-create the old
+  // file after it moved; every backend serializes the rename after the flush's writes.
+  session.flush();
+  if (!workspace) {
+    return 'The workspace is not connected — reopen a workspace before renaming a file.';
+  }
+  const renamed = await workspace.renameFile(path, to);
+  if (!renamed) {
+    return `Could not rename ${path} — the file may have changed, the name may be taken, or this browser cannot perform the rename.`;
+  }
+  retargetFileState(path, to);
+  void rippleFileRename(path, to);
+  return null;
+}
+
+// Moves every handle that knows the old path — the session, the expansion cache, the open
+// flow, the navigation trail, and the manifest — after a file was renamed, whether by this
+// tab or by another client.
+function retargetFileState(from: string, to: string): void {
+  const index = workspaceFiles.indexOf(from);
+  if (index !== -1) workspaceFiles.splice(index, 1, to);
+  else workspaceFiles.push(to);
+  workspaceFiles.sort();
+  session.retarget(from, to);
+  let trailRetargeted = false;
+  for (const entry of navigation.trail) {
+    if (entry.path === from) {
+      entry.path = to;
+      trailRetargeted = true;
+    }
+  }
+  if (openFlow?.path === from) {
+    openFlow.path = to;
+    location.hash = to;
+    refresh();
+  } else if (trailRetargeted) {
+    // The trail can name the renamed file even when a deeper file is open; retargeting the
+    // entry is not enough — the breadcrumb is only re-rendered by refresh.
+    renderBreadcrumb(openFlow);
+  }
+  uiState.renameFlow(from, to);
+  renderFileList();
+}
+
+// A rename reaches past the documents the expansion layer happens to have loaded: expand
+// links and references rows pointing at the old path can sit in any file. The load spans a
+// turn, so the rewrite resumes under the same generation guard the node/context ripples use —
+// an undo or watcher push during the load abandons it rather than rewriting documents a
+// restore just replaced.
+async function rippleFileRename(from: string, to: string): Promise<void> {
+  const continuation = session.suspendAction();
+  // References resolve against the project root (spec §4.5), so the rewrite needs the
+  // workspace's prefix under it — ".grafd/" in the default layout, '' when the workspace is
+  // the project root itself.
+  const workspacePrefix = workspace?.workspaceRootPrefix ?? '';
+  await loadEveryWorkspaceDocument();
+  continuation.resume(() => {
+    // An edit that landed while the workspace was loading still has a pending commit.
+    // Commit it first — recording its undo step — so the ripple's write never swallows a
+    // user's edit without a history entry.
+    session.flush();
+    for (const entry of knownDocuments()) {
+      const containingPath = entry.path === from ? to : entry.path;
+      applyRippleToDoc(entry, () => rewriteFileReferences(entry.doc, containingPath, from, to, workspacePrefix));
+    }
+  });
 }
 
 function renderBreadcrumb(flow: OpenFlow | null): void {
@@ -849,6 +936,22 @@ function applyToDoc(owner: DocumentOwner, mutation: () => void, { commit = 'debo
   session.commitAfter(owner.path, commit);
 }
 
+// Applies a non-undoable rewrite to one document, mirroring applyToDoc's baseline capture and
+// refresh routing. The baseline is recorded before the mutation so commitWithoutUndo sees the
+// pre-rewrite text and writes the rewrite to disk. Documents the rewrite leaves unchanged are
+// left alone: no baseline, no refresh, no write.
+function applyRippleToDoc(owner: DocumentOwner, mutation: () => boolean): void {
+  session.trackWithBaseline(owner.path, owner.doc);
+  if (!mutation()) return;
+  if (owner.doc === openFlow?.doc) {
+    refresh();
+  } else {
+    expansions.invalidateSubModels();
+    view.requestRender();
+  }
+  session.commitWithoutUndo(owner.path);
+}
+
 function applyEdit(node: FlowNode, mutation: () => void, options?: { commit?: CommitTiming }): void {
   applyToDoc(ownerOf(node), mutation, options);
 }
@@ -975,10 +1078,10 @@ function knownDocuments(): DocumentOwner[] {
 // has to reach past the documents the expansion layer happens to have loaded. Loads are cached
 // by the expansion layer, so this costs one pass per session.
 async function loadEveryWorkspaceDocument(): Promise<void> {
-  const unloaded = workspaceFiles.filter(
-    (path) => path !== openFlow?.path && path.endsWith('.flow') && !expansions.watchesPath(path),
-  );
-  await Promise.all(unloaded.map((path) => expansions.ensureDocument(path)));
+  const paths = workspaceFiles.filter((path) => path !== openFlow?.path && path.endsWith('.flow'));
+  // ensureDocument awaits loads already in flight as well as starting new ones, so a ripple
+  // never rewrites without the copy that was being fetched when it began.
+  await Promise.all(paths.map((path) => expansions.ensureDocument(path)));
 }
 
 async function retargetInnersAcrossWorkspace(

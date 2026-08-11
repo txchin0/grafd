@@ -70,6 +70,9 @@ export interface EditSessionOptions {
   // Publishes a freshly parsed document to the expansion cache by identity. See the parse
   // identity note above.
   adoptDocument(path: string, doc: FlowDocument): void;
+  // Re-keys a document entry in the expansion cache after its file was renamed, so the cache
+  // and the tracked-document map stay the same object under the new path.
+  retargetDocument(from: string, to: string): void;
   debounceMs?: number;
 }
 
@@ -79,6 +82,7 @@ export class EditSession {
   private readonly redoStack: HistoryStep[] = [];
   private readonly writeFile: (path: string, text: string) => void;
   private readonly adoptDocument: (path: string, doc: FlowDocument) => void;
+  private readonly retargetDocument: (from: string, to: string) => void;
   private readonly debounceMs: number;
   // Every wholesale replacement of a tracked document bumps this, so a continuation that finds
   // it moved knows the documents it described are gone.
@@ -86,9 +90,15 @@ export class EditSession {
   private nextActionId = 1;
   private currentAction: ActionId | null = null;
 
-  constructor({ writeFile, adoptDocument, debounceMs = COMMIT_DEBOUNCE_MS }: EditSessionOptions) {
+  constructor({
+    writeFile,
+    adoptDocument,
+    retargetDocument,
+    debounceMs = COMMIT_DEBOUNCE_MS,
+  }: EditSessionOptions) {
     this.writeFile = writeFile;
     this.adoptDocument = adoptDocument;
+    this.retargetDocument = retargetDocument;
     this.debounceMs = debounceMs;
   }
 
@@ -157,6 +167,48 @@ export class EditSession {
     clearTimeout(entry.timer);
     this.tracked.delete(path);
     this.replacements += 1;
+  }
+
+  // Moves a tracked document to a new path after its file was renamed. Pending commits follow
+  // the move (re-armed against the new path). The expansion cache is re-keyed through
+  // `retargetDocument`, so both maps keep pointing at the same document object. Deliberately
+  // does not bump `replacements`: nothing was re-parsed, so in-flight action continuations
+  // stay valid.
+  //
+  // History is clamped here: every earlier step restores pre-rename text that still spells
+  // the old path, and the move itself is not undoable, so those steps can no longer describe
+  // a real state. This holds even when the renamed file was never tracked — steps for other
+  // documents name the old path too.
+  retarget(from: string, to: string): void {
+    const entry = this.tracked.get(from);
+    if (entry) {
+      if (entry.timer) {
+        clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => this.commitPending(to), this.debounceMs);
+      }
+      this.tracked.delete(from);
+      this.tracked.set(to, entry);
+    }
+    this.retargetDocument(from, to);
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
+  }
+
+  // Writes a document's current serialized text without recording an undo step — the
+  // file-rename ripple's writes are not part of undo history because the path move itself is
+  // not undoable, and an undo that reverted only the links would leave them naming a file
+  // that no longer exists.
+  commitWithoutUndo(path: string): void {
+    const entry = this.tracked.get(path);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    entry.timer = undefined;
+    entry.pendingAction = null;
+    FlowDoc.ensureLayoutEverywhere(entry.doc);
+    const text = serializeFlow(entry.doc);
+    if (text === entry.committedText) return;
+    entry.committedText = text;
+    this.writeFile(path, text);
   }
 
   commitAfter(path: string, timing: CommitTiming): void {
