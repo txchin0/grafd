@@ -21,7 +21,7 @@ import type { RegionTarget } from '../canvas/canvas-view.js';
 import type { MenuItem } from '../context-menu.js';
 import type { ActionContinuation, CommitTiming } from '../edit-session.js';
 import type { RenameRegion } from '../region-name-editor.js';
-import { syncInheritsForMembers, type InheritsSyncDeps } from './inherits.js';
+import { syncInheritsForMembers, syncInheritsForPath, type InheritsSyncDeps } from './inherits.js';
 import { renameContextAcrossWorkspace, type WorkspaceRenameDeps } from './workspace-rename.js';
 
 // A region drawn or grouped into being is named on the spot; a provider with a placeholder name
@@ -68,6 +68,7 @@ export interface ContextOrchestration {
   readableContexts(node: FlowNode): { name: string; inherited: boolean }[];
   regionMenuItems(region: RegionTarget, at: Point): MenuItem[];
   syncInheritsForMembers(owner: DocumentOwner, memberNames: Iterable<string>): void;
+  syncInheritsForExpansionPaths(owner: DocumentOwner, paths: Iterable<string>): void;
 }
 
 export function createContextOrchestration(options: ContextOrchestrationOptions): ContextOrchestration {
@@ -85,6 +86,12 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
 
   function syncMembers(owner: DocumentOwner, memberNames: Iterable<string>): void {
     syncInheritsForMembers(options.inherits, owner, memberNames);
+  }
+
+  // For edits that remove the host a path was reached through: the file keeps its `inherits`
+  // derived from the hosts that remain — possibly none — with stale `updates:` stripped.
+  function syncExpansionPaths(owner: DocumentOwner, paths: Iterable<string>): void {
+    for (const path of new Set(paths)) void syncInheritsForPath(options.inherits, owner, path, new Set());
   }
 
   // A region is written into the body of the document the drawing landed in — a `graph:` block
@@ -161,13 +168,17 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
   }
 
   // Deleting a region removes the provider and nothing else: its members are ordinary nodes that
-  // happened to be listed by it (R32).
+  // happened to be listed by it (R32). The `updates:` claims that named it go with it, since a
+  // provider nobody declares can be read by nobody (R33, R40c).
   function deleteRegion(region: RegionTarget): void {
     const owner = ownerOfRegion(region);
     const orphanedMembers = [...region.block.members];
     options.clearSelection();
     options.runAction(() => {
-      options.applyToDoc(owner, () => FlowDoc.deleteContextBlock(owner.doc.items, region.block), { commit: 'now' });
+      options.applyToDoc(owner, () => {
+        FlowDoc.deleteContextBlock(owner.doc.items, region.block);
+        FlowDoc.removeUnreadableUpdates(owner.doc);
+      }, { commit: 'now' });
       syncMembers(owner, orphanedMembers);
     });
   }
@@ -181,8 +192,8 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
       .map((name) => ({ name, inherited: inherited.has(name) }));
   }
 
-  // A member declaring `updates:` on this provider would be left naming a context nothing
-  // declares, so that deletion asks twice and says why (R33).
+  // A member declaring `updates:` on this provider is about to lose that claim — the deletion
+  // strips it — so the user is told what the delete will remove before it happens (R33).
   function regionMenuItems(region: RegionTarget, at: Point): MenuItem[] {
     const items: MenuItem[] = [
       { label: 'Edit', onSelect: () => options.openRegionEditor(region) },
@@ -201,7 +212,7 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
       danger: true,
       onSelect: () => options.openConfirmMenu([
         {
-          label: `${writers.join(', ')} still updates ${region.block.name} — delete anyway?`,
+          label: `${writers.join(', ')} updates ${region.block.name} — deleting removes those updates.`,
           danger: true,
           onSelect: () => deleteRegion(region),
         },
@@ -220,6 +231,7 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     readableContexts,
     regionMenuItems,
     syncInheritsForMembers: syncMembers,
+    syncInheritsForExpansionPaths: syncExpansionPaths,
   };
 }
 

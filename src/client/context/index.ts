@@ -2,6 +2,7 @@ export { getBlockProp, setBlockProp } from './block-props.js';
 export {
   syncInheritsForMember,
   syncInheritsForMembers,
+  syncInheritsForPath,
   readableContextsForChildPath,
   sameNameSet,
   type InheritsSyncDeps,

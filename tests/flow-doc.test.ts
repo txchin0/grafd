@@ -7,6 +7,7 @@ import {
   getProp,
   parseFlow,
   parseEdgeExpression,
+  parseListValue,
   serializeFlow,
   type FlowNode,
   type GraphItem,
@@ -45,6 +46,7 @@ import {
   membershipChangesForRegionMove,
   nodesIn,
   regionRectOf,
+  removeUnreadableUpdates,
   renameGraphBlock,
   renameNode,
   retargetInnerRefs,
@@ -497,9 +499,120 @@ B
     expect(contextNamesReadableBy(docFrom('context: Session\n  nodes:\n\nA\n'), 'A')).toEqual([]);
   });
 
+  it('gives a node inside a graph block what its host can read', () => {
+    const doc = docFrom(`context: Auth
+  nodes:
+    - Host
+
+Host
+  expand: Steps
+
+graph: Steps
+  Worker
+`);
+    expect(contextNamesReadableBy(doc, 'Worker')).toEqual(['Auth']);
+  });
+
+  it('does not grant a nested node a region its host is not a member of', () => {
+    const doc = docFrom(`context: Auth
+  nodes:
+    - Other
+
+Host
+  expand: Steps
+
+graph: Steps
+  Worker
+`);
+    expect(contextNamesReadableBy(doc, 'Worker')).toEqual([]);
+  });
+
   it('reads the preamble list the editor generates', () => {
     expect(inheritedContextNames(docFrom(DOC))).toEqual(['Billing']);
     expect(inheritedContextNames(docFrom('A\n'))).toEqual([]);
+  });
+});
+
+describe('removeUnreadableUpdates', () => {
+  const DOC = `---
+name: T
+inherits: [Billing]
+---
+
+context: Session
+  nodes:
+    - A
+
+context: Cart
+  nodes:
+    - B
+
+A
+  updates: [Billing, Session, Ghost]
+
+B
+  updates: [Billing, Cart]
+`;
+
+  it('strips names the node cannot read and keeps the readable ones', () => {
+    const doc = docFrom(DOC);
+    const a = allNodes(doc).find((node) => node.name === 'A')!;
+    const b = allNodes(doc).find((node) => node.name === 'B')!;
+    const changed = removeUnreadableUpdates(doc);
+    expect(changed).toEqual([a]);
+    expect(parseListValue(getProp(a, 'updates'))).toEqual(['Billing', 'Session']);
+    expect(parseListValue(getProp(b, 'updates'))).toEqual(['Billing', 'Cart']);
+  });
+
+  it('clears the property when nothing readable remains', () => {
+    const doc = docFrom(`A
+  updates: Ghost
+`);
+    removeUnreadableUpdates(doc);
+    expect(getProp(allNodes(doc)[0], 'updates')).toBeNull();
+  });
+
+  it('leaves readable entries untouched, so no-op nodes are not reported', () => {
+    const doc = docFrom(DOC);
+    const a = allNodes(doc).find((node) => node.name === 'A')!;
+    const b = allNodes(doc).find((node) => node.name === 'B')!;
+    const changed = removeUnreadableUpdates(doc, [b]);
+    expect(changed).toEqual([]);
+    expect(parseListValue(getProp(a, 'updates'))).toEqual(['Billing', 'Session', 'Ghost']);
+  });
+
+  it('keeps membership-derived names a nested node still reads through its host', () => {
+    const doc = docFrom(`context: Auth
+  nodes:
+    - Host
+
+Host
+  expand: Steps
+
+graph: Steps
+  Worker
+    updates: Auth
+`);
+    const worker = nodesIn(scopeItems(doc, 'Steps'))[0];
+    expect(removeUnreadableUpdates(doc, [worker])).toEqual([]);
+    expect(parseListValue(getProp(worker, 'updates'))).toEqual(['Auth']);
+  });
+
+  it('strips a nested updates claim once no host of its graph can read the provider', () => {
+    const doc = docFrom(`context: Auth
+  nodes:
+    - Other
+
+Host
+  expand: Steps
+
+graph: Steps
+  Worker
+    updates: Auth
+`);
+    const worker = nodesIn(scopeItems(doc, 'Steps'))[0];
+    expect(removeUnreadableUpdates(doc, [worker]).length).toBe(1);
+    expect(getProp(worker, 'updates')).toBeNull();
   });
 });
 
@@ -1650,6 +1763,60 @@ graph: Payment Steps
     expect(contextBlockNamed(doc, 'Pipeline')!.members).toEqual(['Charge Card']);
   });
 
+  it('keeps updates naming a region the extracted nodes still read through the host', () => {
+    const doc = docFrom(`---
+name: T
+inherits: [Billing]
+---
+
+context: Pipeline
+  nodes:
+    - InnerA
+    - InnerB
+
+InnerA
+  ${PLACED(100, 100)}
+  updates: [Pipeline, Billing]
+
+InnerB
+  ${PLACED(400, 100)}
+  updates: Pipeline
+`);
+    const [innerA, innerB] = allNodes(doc);
+    extractSubgraph(doc.items, [innerA, innerB], doc);
+    expect(contextBlockNamed(doc, 'Pipeline')!.members).toEqual(['Subgraph']);
+    expect(parseListValue(getProp(innerA, 'updates'))).toEqual(['Pipeline', 'Billing']);
+    expect(parseListValue(getProp(innerB, 'updates'))).toEqual(['Pipeline']);
+  });
+
+  it('strips a partially extracted region from the extracted nodes only', () => {
+    const doc = docFrom(`context: Pipeline
+  nodes:
+    - InnerA
+    - Kept
+
+InnerA
+  ${PLACED(100, 100)}
+  updates: Pipeline
+
+InnerB
+  ${PLACED(100, 200)}
+  updates: Pipeline
+
+Kept
+  ${PLACED(400, 100)}
+  updates: Pipeline
+`);
+    const innerA = allNodes(doc).find((node) => node.name === 'InnerA')!;
+    const innerB = allNodes(doc).find((node) => node.name === 'InnerB')!;
+    const kept = allNodes(doc).find((node) => node.name === 'Kept')!;
+    extractSubgraph(doc.items, [innerA, innerB], doc);
+    expect(contextBlockNamed(doc, 'Pipeline')!.members).toEqual(['Kept']);
+    expect(getProp(innerA, 'updates')).toBeNull();
+    expect(getProp(innerB, 'updates')).toBeNull();
+    expect(parseListValue(getProp(kept, 'updates'))).toEqual(['Pipeline']);
+  });
+
   it('builds a model without ghosts and round-trips brace forms through serialize', () => {
     const doc = docFrom(`Outside
   ${PLACED(0, 0)}
@@ -1875,6 +2042,55 @@ graph: Nested
     expect(serializeFlow(extracted)).toBe('---\nname: Planned\n---\n');
     const host = allNodes(doc).find((node) => node.name === 'Host')!;
     expect(getProp(host, 'expand')).toBe('[Planned](planned.flow)');
+  });
+
+  it('generates inherits from the union of what the hosts can read', () => {
+    const doc = docFrom(`---
+name: Main
+---
+
+context: Auth
+  nodes:
+    - Host
+
+context: Cart
+  nodes:
+    - Other Host
+
+Host
+  ${PLACED(0, 0)}
+  expand: Shared
+
+Other Host
+  ${PLACED(300, 0)}
+  expand: Shared
+
+graph: Shared
+  Step
+    ${PLACED(0, 0)}
+`);
+    const extracted = extractGraphBlockToDocument(doc, 'Shared', 'shared.flow');
+    expect(parseListValue(getPreambleField(extracted, 'inherits'))).toEqual(['Auth', 'Cart']);
+  });
+
+  it('strips updates the generated inherits does not back', () => {
+    const doc = docFrom(`context: Auth
+  nodes:
+    - Host
+
+Host
+  ${PLACED(0, 0)}
+  expand: Shared
+
+graph: Shared
+  Step
+    ${PLACED(0, 0)}
+    updates: [Auth, Ghost]
+`);
+    const extracted = extractGraphBlockToDocument(doc, 'Shared', 'shared.flow');
+    expect(parseListValue(getPreambleField(extracted, 'inherits'))).toEqual(['Auth']);
+    const step = allNodes(extracted).find((node) => node.name === 'Step')!;
+    expect(parseListValue(getProp(step, 'updates'))).toEqual(['Auth']);
   });
 });
 

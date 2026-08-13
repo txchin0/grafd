@@ -42,22 +42,60 @@ export async function syncInheritsForMember(
   // A local `graph:` block has no preamble to carry `inherits`; its nodes read through this host.
   const path = resolvedExpandPath(getProp(node, 'expand'), owner.path);
   if (!path) return;
+  await syncInheritsForPath(deps, owner, path, new Set());
+}
 
-  // Fetching the child resumes in a later turn when it was not already loaded, so the write
-  // belongs to the action that changed the membership rather than to a step of its own.
-  const continuation = deps.suspendAction();
-  const doc = deps.expandTargetDoc(path) ?? await deps.ensureDocument(path);
-  if (!doc) return;
+// Rewrites the `inherits` of the file at `path` from the hosts in `owner`, strips the
+// `updates:` claims that rewrite makes unreadable, then descends into that file's own
+// expansions so a provider lost here is lost through the whole chain. `visited` records
+// every file already used as an owner or rewritten, so an expand cycle cannot write a
+// descendant's readable set back onto an ancestor (R6). A path reached by several parents
+// is synced from the first one that reaches it.
+export async function syncInheritsForPath(
+  deps: InheritsSyncDeps,
+  owner: DocumentOwner,
+  path: string,
+  visited: Set<string>,
+): Promise<void> {
+  visited.add(owner.path);
+  if (visited.has(path)) return;
+  visited.add(path);
+  const loaded = deps.expandTargetDoc(path);
+  if (loaded == null) {
+    // Fetching the child resumes in a later turn when it was not already loaded, so the write
+    // belongs to the action that changed the membership rather than to a step of its own.
+    const continuation = deps.suspendAction();
+    const fetched = await deps.ensureDocument(path);
+    if (!fetched) return;
+    continuation.resume(() => rewriteInheritsAndDescend(deps, owner, { doc: fetched, path }, visited));
+    return;
+  }
+  rewriteInheritsAndDescend(deps, owner, { doc: loaded, path }, visited);
+}
 
-  continuation.resume(() => {
-    const readable = readableContextsForChildPath(owner, path);
-    if (sameNameSet(FlowDoc.inheritedContextNames(doc), readable)) return;
-    deps.applyToDoc(
-      { doc, path },
-      () => setPreambleField(doc, 'inherits', readable.length > 0 ? formatListValue(readable) : null),
-      { commit: 'now' },
-    );
-  });
+function rewriteInheritsAndDescend(
+  deps: InheritsSyncDeps,
+  owner: DocumentOwner,
+  child: DocumentOwner,
+  visited: Set<string>,
+): void {
+  const readable = readableContextsForChildPath(owner, child.path);
+  deps.applyToDoc(
+    child,
+    () => {
+      if (!sameNameSet(FlowDoc.inheritedContextNames(child.doc), readable)) {
+        setPreambleField(child.doc, 'inherits', readable.length > 0 ? formatListValue(readable) : null);
+      }
+      // `updates:` is kept in step with what the file can now back: anything the rewrite made
+      // unreadable is stripped, so a provider that left the chain takes its claims with it (R40c).
+      FlowDoc.removeUnreadableUpdates(child.doc);
+    },
+    { commit: 'now' },
+  );
+  for (const host of FlowDoc.allNodes(child.doc)) {
+    const grandchildPath = resolvedExpandPath(getProp(host, 'expand'), child.path);
+    if (grandchildPath) void syncInheritsForPath(deps, child, grandchildPath, visited);
+  }
 }
 
 /** Union of contexts readable by every host in `owner` that expands to `childPath`. */
@@ -71,7 +109,7 @@ export function readableContextsForChildPath(owner: DocumentOwner, childPath: st
 }
 
 function hostsExpandingTo(owner: DocumentOwner, childPath: string): FlowNode[] {
-  return FlowDoc.nodesIn(owner.doc.items).filter((node) => {
+  return FlowDoc.allNodes(owner.doc).filter((node) => {
     return resolvedExpandPath(getProp(node, 'expand'), owner.path) === childPath;
   });
 }

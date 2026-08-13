@@ -17,6 +17,7 @@ import {
   readableContextsForChildPath,
   renameContextAcrossWorkspace,
   syncInheritsForMember,
+  syncInheritsForPath,
   type InheritsSyncDeps,
   type WorkspaceRenameDeps,
 } from '../src/client/context/index.js';
@@ -250,6 +251,198 @@ Validate
     await syncInheritsForMember(deps, parent, 'Login Host');
     expect(getPreambleField(child.doc, 'inherits')).toBeNull();
   });
+
+  it('strips unreadable updates in the child when inherits loses a provider', async () => {
+    const parent = owner('main.flow', `---
+name: Main
+---
+
+context: Cart
+  nodes:
+    - Login Host
+
+Login Host
+  expand: [Login](auth/login.flow)
+`);
+    const child = owner('auth/login.flow', `---
+name: Login
+inherits: [Auth]
+---
+
+Validate
+  updates: [Auth, Cart]
+
+Checkout
+  updates: Auth
+`);
+    const deps: InheritsSyncDeps = {
+      suspendAction: liveContinuation,
+      expandTargetDoc: () => child.doc,
+      ensureDocument: async () => child.doc,
+      applyToDoc: (_entry, mutation) => { mutation(); },
+    };
+
+    await syncInheritsForMember(deps, parent, 'Login Host');
+    expect(inheritsOf(child.doc)).toEqual(['Cart']);
+    expect(updatesOf(child.doc, 'Validate')).toEqual(['Cart']);
+    expect(updatesOf(child.doc, 'Checkout')).toEqual([]);
+  });
+
+  it('ripples an inherits loss down the expansion chain, stripping updates at every level', async () => {
+    const root = owner('main.flow', `---
+name: Main
+---
+
+Child Host
+  expand: [Child](child.flow)
+`);
+    const child = owner('child.flow', `---
+name: Child
+inherits: [Auth]
+---
+
+Grandchild Host
+  expand: [Grandchild](grandchild.flow)
+
+Child Worker
+  updates: Auth
+`);
+    const grandchild = owner('grandchild.flow', `---
+name: Grandchild
+inherits: [Auth]
+---
+
+Leaf Worker
+  updates: Auth
+`);
+    const docs = new Map<string, FlowDocument>([
+      [root.path, root.doc],
+      [child.path, child.doc],
+      [grandchild.path, grandchild.doc],
+    ]);
+    const deps: InheritsSyncDeps = {
+      suspendAction: liveContinuation,
+      expandTargetDoc: (path) => docs.get(path) ?? null,
+      ensureDocument: async (path) => docs.get(path) ?? null,
+      applyToDoc: (_entry, mutation) => { mutation(); },
+    };
+
+    await syncInheritsForMember(deps, root, 'Child Host');
+    expect(getPreambleField(child.doc, 'inherits')).toBeNull();
+    expect(updatesOf(child.doc, 'Child Worker')).toEqual([]);
+    expect(getPreambleField(grandchild.doc, 'inherits')).toBeNull();
+    expect(updatesOf(grandchild.doc, 'Leaf Worker')).toEqual([]);
+  });
+
+  it('ripples an inherits loss through a nested expand host', async () => {
+    const root = owner('main.flow', `---
+name: Main
+---
+
+Child Host
+  expand: [Child](child.flow)
+`);
+    const child = owner('child.flow', `---
+name: Child
+inherits: [Auth]
+---
+
+Outer
+  expand: Nested
+
+graph: Nested
+  Grandchild Host
+    expand: [Grandchild](grandchild.flow)
+`);
+    const grandchild = owner('grandchild.flow', `---
+name: Grandchild
+inherits: [Auth]
+---
+
+Leaf Worker
+  updates: Auth
+`);
+    const docs = new Map<string, FlowDocument>([
+      [root.path, root.doc],
+      [child.path, child.doc],
+      [grandchild.path, grandchild.doc],
+    ]);
+    const deps: InheritsSyncDeps = {
+      suspendAction: liveContinuation,
+      expandTargetDoc: (path) => docs.get(path) ?? null,
+      ensureDocument: async (path) => docs.get(path) ?? null,
+      applyToDoc: (_entry, mutation) => { mutation(); },
+    };
+
+    await syncInheritsForMember(deps, root, 'Child Host');
+    expect(getPreambleField(child.doc, 'inherits')).toBeNull();
+    expect(getPreambleField(grandchild.doc, 'inherits')).toBeNull();
+    expect(updatesOf(grandchild.doc, 'Leaf Worker')).toEqual([]);
+  });
+
+  it('terminates when expansions form a cycle', async () => {
+    const root = owner('main.flow', `---
+name: Main
+---
+
+context: Cart
+  nodes:
+    - A Host
+
+A Host
+  expand: [Child](child.flow)
+`);
+    const child = owner('child.flow', `---
+name: Child
+inherits: [Auth]
+---
+
+B Host
+  expand: [Root](main.flow)
+`);
+    const docs = new Map<string, FlowDocument>([
+      [root.path, root.doc],
+      [child.path, child.doc],
+    ]);
+    const deps: InheritsSyncDeps = {
+      suspendAction: liveContinuation,
+      expandTargetDoc: (path) => docs.get(path) ?? null,
+      ensureDocument: async (path) => docs.get(path) ?? null,
+      applyToDoc: (_entry, mutation) => { mutation(); },
+    };
+
+    await syncInheritsForMember(deps, root, 'A Host');
+    expect(inheritsOf(child.doc)).toEqual(['Cart']);
+    expect(getPreambleField(root.doc, 'inherits')).toBeNull();
+  });
+
+  it('syncInheritsForPath recomputes from the hosts that remain after a delete', async () => {
+    const parent = owner('main.flow', `---
+name: Main
+---
+
+Survivor Host
+  expand: [Login](auth/login.flow)
+`);
+    const child = owner('auth/login.flow', `---
+name: Login
+inherits: [Auth]
+---
+
+Validate
+  updates: Auth
+`);
+    const deps: InheritsSyncDeps = {
+      suspendAction: liveContinuation,
+      expandTargetDoc: () => child.doc,
+      ensureDocument: async () => child.doc,
+      applyToDoc: (_entry, mutation) => { mutation(); },
+    };
+
+    await syncInheritsForPath(deps, parent, 'auth/login.flow', new Set());
+    expect(getPreambleField(child.doc, 'inherits')).toBeNull();
+    expect(updatesOf(child.doc, 'Validate')).toEqual([]);
+  });
 });
 
 describe('readableContextsForChildPath', () => {
@@ -273,5 +466,24 @@ B
   expand: [Login](auth/login.flow)
 `);
     expect(readableContextsForChildPath(parent, 'auth/login.flow').sort()).toEqual(['Auth', 'Cart']);
+  });
+
+  it('includes a nested host that reads the provider through its local-graph host', () => {
+    const parent = owner('main.flow', `---
+name: Main
+---
+
+context: Auth
+  nodes:
+    - Host
+
+Host
+  expand: Steps
+
+graph: Steps
+  Inner
+    expand: [Login](auth/login.flow)
+`);
+    expect(readableContextsForChildPath(parent, 'auth/login.flow')).toEqual(['Auth']);
   });
 });

@@ -133,19 +133,83 @@ export function contextsContainedIn(model: FlowModel, context: ModelContext): Mo
   });
 }
 
-// Which providers a top-level node may read (spec §8.5): the blocks listing it, plus everything
-// the file inherits — an inherited provider is graph-wide in the file that receives it. The
-// linter answers the same question over its own scan; the two must agree, since this is what
-// generates the `inherits` the linter then checks.
+// Which providers a node may read (spec §8.5). A top-level node reads the blocks listing it plus
+// everything the file inherits. A node inside a `graph:` block is a member of nothing (§8.2
+// rule 6) and reads what the node expanding that block reads (§8.4). The linter answers the
+// same question over its own scan (`readableContextsByNode`); the two must agree, since this
+// is what generates the `inherits` the linter then checks and what `removeUnreadableUpdates`
+// uses to strip claims.
 export function contextNamesReadableBy(doc: FlowDocument, nodeName: string): string[] {
-  const fromBlocks = contextBlocksIn(doc.items)
-    .filter((block) => block.members.includes(nodeName))
-    .map((block) => block.name);
-  return [...new Set([...inheritedContextNames(doc), ...fromBlocks])];
+  const inherited = inheritedContextNames(doc);
+  return [...(readableContextNamesByNode(doc).get(nodeName) ?? new Set(inherited))];
 }
 
 export function inheritedContextNames(doc: FlowDocument): string[] {
   return parseListValue(getPreambleField(doc, 'inherits'));
+}
+
+function readableContextNamesByNode(doc: FlowDocument): Map<string, Set<string>> {
+  const inherited = inheritedContextNames(doc);
+  const readable = new Map<string, Set<string>>();
+  for (const node of nodesIn(doc.items)) {
+    const fromBlocks = contextBlocksIn(doc.items)
+      .filter((block) => block.members.includes(node.name))
+      .map((block) => block.name);
+    readable.set(node.name, new Set([...inherited, ...fromBlocks]));
+  }
+  const hostsByBlockName = localExpansionHostsByBlockName(doc);
+  const graphs = doc.items.filter((item): item is GraphItem => item.kind === 'graph');
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const graph of graphs) {
+      const hosts = hostsByBlockName.get(graph.name) ?? [];
+      const throughHosts = hosts.flatMap((host) => [...(readable.get(host.name) ?? inherited)]);
+      const scopeWide = new Set([...inherited, ...throughHosts]);
+      for (const inner of nodesIn(graph.items)) {
+        const current = readable.get(inner.name);
+        if (current && sameStringSet(current, scopeWide)) continue;
+        readable.set(inner.name, scopeWide);
+        changed = true;
+      }
+    }
+  }
+  return readable;
+}
+
+function localExpansionHostsByBlockName(doc: FlowDocument): Map<string, FlowNode[]> {
+  const hostsByBlockName = new Map<string, FlowNode[]>();
+  for (const node of allNodes(doc)) {
+    const expandValue = getProp(node, 'expand');
+    if (!expandValue || parseExpandLink(expandValue)) continue;
+    const hosts = hostsByBlockName.get(expandValue) ?? [];
+    hosts.push(node);
+    hostsByBlockName.set(expandValue, hosts);
+  }
+  return hostsByBlockName;
+}
+
+function sameStringSet(left: Set<string>, right: Set<string>): boolean {
+  return left.size === right.size && [...left].every((name) => right.has(name));
+}
+
+// The editor's cleanup counterpart to the linter's `updates-undeclared-context`: an edit that
+// can shrink what a node reads strips every name the node can no longer read from `updates:`,
+// so no editor gesture leaves behind a claim the file cannot back (spec §8.6). A state that
+// arrived through the file is repaired the moment the editor touches the document it lives in.
+export function removeUnreadableUpdates(doc: FlowDocument, nodes: FlowNode[] = allNodes(doc)): FlowNode[] {
+  const readableByName = readableContextNamesByNode(doc);
+  const inherited = inheritedContextNames(doc);
+  const changed: FlowNode[] = [];
+  for (const node of nodes) {
+    const readable = [...(readableByName.get(node.name) ?? new Set(inherited))];
+    const kept = parseListValue(getProp(node, 'updates')).filter((name) => readable.includes(name));
+    const current = parseListValue(getProp(node, 'updates'));
+    if (kept.length === current.length && kept.every((name, index) => name === current[index])) continue;
+    setProp(node, 'updates', kept.length > 0 ? formatListValue(kept) : null);
+    changed.push(node);
+  }
+  return changed;
 }
 
 /** One node joining or leaving one region, as a drag resolved it. */
@@ -669,7 +733,12 @@ export function extractSubgraph(
   redirectEdgesIntoHost(items, host, extractedSet, extractedNames);
   liftEscapingEdgesOntoHost(nodesToExtract, host, extractedNames);
   copyEntrypointToHost(nodesToExtract, host);
-  if (isTopLevel(items, doc)) transferRegionMembershipToHost(doc, nodesToExtract, host);
+  if (isTopLevel(items, doc)) {
+    transferRegionMembershipToHost(doc, nodesToExtract, host);
+    // Inner nodes read through the host (§8.2 rule 6): a region the host still belongs to
+    // stays readable, and `updates:` naming one it does not are stripped (R40c).
+    removeUnreadableUpdates(doc, nodesToExtract);
+  }
 
   return { host, blockName, innerNodes: nodesToExtract };
 }
@@ -805,6 +874,11 @@ export function extractGraphBlockToDocument(
   };
   moveDescriptionOfSoleHost(doc, blockName, extracted);
   moveReferencesOfSoleHost(doc, blockName, extracted);
+  // The new file's nodes read through the hosts that expanded the block, so its `inherits` is
+  // generated from them exactly as a membership change generates it in place (R40a). Computed
+  // before the relink rewrites the hosts' `expand` values.
+  const readable = unionOfHostReadableContexts(doc, blockName);
+  if (readable.length > 0) setPreambleField(extracted, 'inherits', formatListValue(readable));
   relinkExpandsToPath(doc, blockName, linkPath, graphName);
 
   const movedNames = reachableBlockNames(doc, [blockName]);
@@ -816,7 +890,18 @@ export function extractGraphBlockToDocument(
     if (name === blockName) extracted.items.push(...items);
     else extracted.items.push({ kind: 'graph', name, items });
   }
+  // Anything the extracted nodes claimed to update but the generated `inherits` does not back
+  // is stripped, so the new file starts clean of dangling `updates:` (R40c).
+  removeUnreadableUpdates(extracted);
   return extracted;
+}
+
+function unionOfHostReadableContexts(doc: FlowDocument, blockName: string): string[] {
+  const names = new Set<string>();
+  for (const host of allNodes(doc).filter((node) => getProp(node, 'expand') === blockName)) {
+    for (const name of contextNamesReadableBy(doc, host.name)) names.add(name);
+  }
+  return [...names];
 }
 
 function graphBlockByName(doc: FlowDocument, name: string): GraphItem | null {

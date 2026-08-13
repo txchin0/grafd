@@ -736,16 +736,31 @@ function deleteNodesAction(nodes: FlowNode[]): void {
     for (const { owner, itemGroups } of FlowDoc.groupNodesByOwner(nodes, ownerOf)) {
       // Captured before the delete, while the nodes are still resolvable in their document.
       const clears = expansionIdentitiesOf(owner, itemGroups);
+      const expansionPaths = expansionPathsOf(owner, itemGroups);
       applyToDoc(owner, () => {
         for (const { items, nodes: group } of itemGroups) {
           FlowDoc.deleteNodes(items, group, owner.doc, { path: owner.path });
         }
       }, { commit: 'now' });
+      // A deleted host stops reading whatever it read, so the file it expanded must stop
+      // inheriting it — recomputed from the hosts that remain, stale `updates:` stripped (R40c).
+      contextOps.syncInheritsForExpansionPaths(owner, expansionPaths);
       for (const { identity, name } of clears) {
         void retargetInnersAcrossWorkspace(identity, name, null, owner.doc);
       }
     }
   });
+}
+
+function expansionPathsOf(owner: DocumentOwner, itemGroups: FlowDoc.ItemGroup[]): string[] {
+  const paths: string[] = [];
+  for (const { nodes } of itemGroups) {
+    for (const node of nodes) {
+      const path = resolvedExpandPath(getProp(node, 'expand'), owner.path);
+      if (path) paths.push(path);
+    }
+  }
+  return paths;
 }
 
 // The expansions the given nodes host, paired with the names those expansions are reached by —
@@ -1139,7 +1154,18 @@ function repointOrRenameExpansion(node: FlowNode, requestedValue: string): strin
   const repointing = !requested || parseExpandLink(requested) != null
     || FlowDoc.graphBlockNamed(owner.doc, requested) != null;
   if (repointing) {
-    applyToDoc(owner, () => setProp(node, 'expand', requested || null), { commit: 'now' });
+    const previousPath = resolvedExpandPath(getProp(node, 'expand'), owner.path);
+    applyToDoc(owner, () => {
+      setProp(node, 'expand', requested || null);
+      // Inner nodes of a local `graph:` this host just left (or joined) read through it, so
+      // `updates:` in this file are stripped against the new through-host set (R40c).
+      FlowDoc.removeUnreadableUpdates(owner.doc);
+    }, { commit: 'now' });
+    const nextPath = resolvedExpandPath(getProp(node, 'expand'), owner.path);
+    contextOps.syncInheritsForExpansionPaths(
+      owner,
+      [previousPath, nextPath].filter((path): path is string => path != null),
+    );
     return getProp(node, 'expand') ?? '';
   }
 
@@ -1253,13 +1279,23 @@ function writeMovesAndMembership(
   // region is one undo step with the move that carried it there (R19). A block always lives in
   // the file its members do, so the node's owner is the document to write.
   const membersByOwner = new Map<DocumentOwner, string[]>();
+  const ownersWithLeaves = new Set<DocumentOwner>();
   for (const change of membershipChanges) {
     const owner = ownerOf(change.node);
     session.trackWithoutBaseline(owner.path, owner.doc);
     paths.add(owner.path);
-    if (change.joins) FlowDoc.addContextMember(change.block, change.node.name);
-    else FlowDoc.removeContextMember(change.block, change.node.name);
+    if (change.joins) {
+      FlowDoc.addContextMember(change.block, change.node.name);
+    } else {
+      FlowDoc.removeContextMember(change.block, change.node.name);
+      ownersWithLeaves.add(owner);
+    }
     membersByOwner.set(owner, [...(membersByOwner.get(owner) ?? []), change.node.name]);
+  }
+  // A node that left a region can no longer read it, and neither can the inner nodes that
+  // read through it as a local-graph host, so the whole file is stripped (R40c).
+  for (const owner of ownersWithLeaves) {
+    FlowDoc.removeUnreadableUpdates(owner.doc);
   }
   if (membershipChanges.length > 0) expansions.invalidateSubModels();
   refresh();
