@@ -1791,8 +1791,13 @@ function wireKeyboard(): void {
     } else if (event.key === 'Escape') {
       contextMenu.close();
       editors.closeAll();
-      view.clearSelection();
+      const helpWasOpen = !elements.helpOverlay.classList.contains('hidden');
       elements.helpOverlay.classList.add('hidden');
+      if (!helpWasOpen && navigation.trail.length > 0) {
+        void navigateBackTo(navigation.trail.length - 1);
+      } else if (!helpWasOpen) {
+        view.clearSelection();
+      }
     } else if (event.key === '?') {
       elements.helpOverlay.classList.toggle('hidden');
     }
