@@ -45,7 +45,7 @@ import {
 } from '../shared/flow-format.js';
 import { DEFAULT_NODE_SIZE } from '../shared/auto-layout.js';
 import * as FlowDoc from './flow-doc.js';
-import type { FlowModel, MembershipChange, ModelEdge } from './flow-doc.js';
+import type { FlowModel, MembershipChange, ModelContext, ModelEdge } from './flow-doc.js';
 import type { Point } from './geometry.js';
 import { CanvasView, type ContextTarget, type EdgeDrop, type Tool, type View } from './canvas/canvas-view.js';
 import { createContextMenu, type MenuItem } from './context-menu.js';
@@ -175,8 +175,15 @@ let contextOps: ContextOrchestration;
 const clipboard = createClipboard({
   openFlow: () => openFlow,
   selection: () => [...view.selection],
-  select: (nodes) => view.setSelection(nodes),
+  selectedRegions: () => view.selectedRegionTargets(),
+  select: (nodes, regions) => {
+    const contexts = (regions ?? [])
+      .map((block) => view.model.contexts.find((context) => context.block === block))
+      .filter((context): context is ModelContext => context != null);
+    view.setSelection(nodes, contexts);
+  },
   ownerOf,
+  ownerOfRegion: (region) => contextOps.ownerOfRegion(region),
   documentAt: (path) => {
     const doc = expansions.documentAt(path);
     return doc ? { doc, path } : null;
@@ -730,26 +737,29 @@ function extractSubgraphIntoFile(node: FlowNode): void {
 }
 
 // One delete, however many documents own the selection and however many others name what it
-// removed — in `{Inner}` refinements or in a `nodes:` list (R42).
+// removed — in `{Inner}` refinements or in a `nodes:` list (R42). The action boundary is the
+// caller's: a mixed selection delete runs this and the region deletion in one step.
 function deleteNodesAction(nodes: FlowNode[]): void {
-  session.runAction(() => {
-    for (const { owner, itemGroups } of FlowDoc.groupNodesByOwner(nodes, ownerOf)) {
-      // Captured before the delete, while the nodes are still resolvable in their document.
-      const clears = expansionIdentitiesOf(owner, itemGroups);
-      const expansionPaths = expansionPathsOf(owner, itemGroups);
-      applyToDoc(owner, () => {
-        for (const { items, nodes: group } of itemGroups) {
-          FlowDoc.deleteNodes(items, group, owner.doc, { path: owner.path });
-        }
-      }, { commit: 'now' });
-      // A deleted host stops reading whatever it read, so the file it expanded must stop
-      // inheriting it — recomputed from the hosts that remain, stale `updates:` stripped (R40c).
-      contextOps.syncInheritsForExpansionPaths(owner, expansionPaths);
-      for (const { identity, name } of clears) {
-        void retargetInnersAcrossWorkspace(identity, name, null, owner.doc);
+  session.runAction(() => writeNodesDeletion(nodes));
+}
+
+function writeNodesDeletion(nodes: FlowNode[]): void {
+  for (const { owner, itemGroups } of FlowDoc.groupNodesByOwner(nodes, ownerOf)) {
+    // Captured before the delete, while the nodes are still resolvable in their document.
+    const clears = expansionIdentitiesOf(owner, itemGroups);
+    const expansionPaths = expansionPathsOf(owner, itemGroups);
+    applyToDoc(owner, () => {
+      for (const { items, nodes: group } of itemGroups) {
+        FlowDoc.deleteNodes(items, group, owner.doc, { path: owner.path });
       }
+    }, { commit: 'now' });
+    // A deleted host stops reading whatever it read, so the file it expanded must stop
+    // inheriting it — recomputed from the hosts that remain, stale `updates:` stripped (R40c).
+    contextOps.syncInheritsForExpansionPaths(owner, expansionPaths);
+    for (const { identity, name } of clears) {
+      void retargetInnersAcrossWorkspace(identity, name, null, owner.doc);
     }
-  });
+  }
 }
 
 function expansionPathsOf(owner: DocumentOwner, itemGroups: FlowDoc.ItemGroup[]): string[] {
@@ -782,15 +792,24 @@ function expansionIdentitiesOf(
 function deleteSelection(): void {
   const nodes = [...view.selection];
   const edge = view.selectedEdge;
-  const region = view.selectedRegionTarget();
-  if (nodes.length > 0) {
+  const regions = view.selectedRegionTargets();
+  if (nodes.length > 0 && regions.length > 0) {
+    editors.closeAll();
+    // One mixed delete is one undo step: the nodes, the blocks, the stripped `updates:` and the
+    // `inherits` rewrites all land together.
+    session.runAction(() => {
+      writeNodesDeletion(nodes);
+      contextOps.writeRegionDeletions(regions);
+    });
+    view.clearSelection();
+  } else if (nodes.length > 0) {
     editors.closeAll();
     deleteNodesAction(nodes);
   } else if (edge) {
     editors.closeAll();
     applyEdit(edge.from, () => FlowDoc.deleteEdge(edge), { commit: 'now' });
-  } else if (region) {
-    contextOps.deleteRegion(region);
+  } else if (regions.length > 0) {
+    contextOps.deleteRegions(regions);
   }
 }
 
@@ -1435,8 +1454,8 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   nodeClicked: (node) => editors.openNodeEditor(node),
   canvasClicked: () => editors.closeAll(),
   moveCommitted: (nodes, membershipChanges) => commitMovesFor(nodes ?? [], membershipChanges ?? []),
-  regionMoved: (region, movedNodes, membershipChanges) =>
-    commitMovesFor(movedNodes, membershipChanges, [contextOps.ownerOfRegion(region)]),
+  regionMoved: (regions, movedNodes, membershipChanges) =>
+    commitMovesFor(movedNodes, membershipChanges, regions.map((region) => contextOps.ownerOfRegion(region))),
   regionResized: (region, membershipChanges) =>
     commitMovesFor([], membershipChanges, [contextOps.ownerOfRegion(region)]),
   deleteRegion: (region) => contextOps.deleteRegion(region),
@@ -1588,15 +1607,16 @@ function openModal(): Modal | null {
 function openCanvasContextMenu(target: ContextTarget, screenPoint: Point): void {
   if (!openFlow) return;
   const items =
-    target.kind === 'node' ? nodeMenuItems(target.node)
+    target.kind === 'node' ? nodeMenuItems(target.node, screenPoint)
     : target.kind === 'edge' ? edgeMenuItems(target.edge)
     : target.kind === 'region' ? contextOps.regionMenuItems(target.region, screenPoint)
     : canvasMenuItems(target.world);
   contextMenu.open(items, screenPoint);
 }
 
-function nodeMenuItems(node: FlowNode): MenuItem[] {
+function nodeMenuItems(node: FlowNode, screenPoint: Point): MenuItem[] {
   const selectionCount = view.selection.size;
+  const regionCount = view.selectedRegions.size;
   const items: MenuItem[] = [];
   if (selectionCount <= 1) items.push({ label: 'Edit', onSelect: () => editors.openNodeEditor(node) });
   items.push({ label: selectionCount > 1 ? `Duplicate ${selectionCount} nodes` : 'Duplicate', onSelect: clipboard.duplicateSelection });
@@ -1635,6 +1655,16 @@ function nodeMenuItems(node: FlowNode): MenuItem[] {
   }
   items.push({ separator: true });
   items.push({ label: selectionCount > 1 ? `Delete ${selectionCount} nodes` : 'Delete', danger: true, onSelect: deleteSelection });
+  if (regionCount > 0) {
+    items.push({
+      label: `Delete ${regionCount} ${regionCount === 1 ? 'region' : 'regions'} (keeps its nodes)`,
+      danger: true,
+      onSelect: () => {
+        const regions = view.selectedRegionTargets();
+        contextOps.confirmRegionDeletions(regions, screenPoint, () => contextOps.deleteRegions(regions));
+      },
+    });
+  }
   return items;
 }
 
@@ -1653,7 +1683,7 @@ function canvasMenuItems(world: Point): MenuItem[] {
       label: 'Add node here',
       onSelect: () => createNodeAndEdit(centeredDefaultRect(creation.point), creation.frameHost),
     },
-    { label: 'Paste', disabled: !clipboard.hasNodes(), onSelect: () => clipboard.paste(world) },
+    { label: 'Paste', disabled: !clipboard.hasContent(), onSelect: () => clipboard.paste(world) },
     { separator: true },
     { label: 'Fit to content', onSelect: () => view.fitToContent() },
     { label: 'Reset zoom', onSelect: () => view.setZoom(1) },
@@ -1758,11 +1788,11 @@ function wireKeyboard(): void {
       event.preventDefault();
       toggleSidebar();
     } else if (ctrl && event.key.toLowerCase() === 'c') {
-      if (view.selection.size === 0) return;
+      if (view.selection.size === 0 && view.selectedRegions.size === 0) return;
       event.preventDefault();
       clipboard.copy();
     } else if (ctrl && event.key.toLowerCase() === 'x') {
-      if (view.selection.size === 0) return;
+      if (view.selection.size === 0 && view.selectedRegions.size === 0) return;
       event.preventDefault();
       clipboard.cut();
     } else if (ctrl && event.key.toLowerCase() === 'v') {

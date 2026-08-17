@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyCombinedMove,
   applyRegionMove,
   applyRegionResize,
+  movingRegionGroupFor,
   regionRectDuringResize,
+  regionRectsWithDrawnMove,
   regionRectsWithDrawnResize,
+  rollbackCombinedMove,
   rollbackRegionMove,
   rollbackRegionResize,
+  type CombinedMoveSnapshot,
   type RegionMoveSnapshot,
   type RegionResizeSnapshot,
 } from '../src/client/canvas/region-gestures.js';
@@ -200,5 +205,140 @@ describe('rollback', () => {
     applyRegionResize(gesture, { x: 10, y: 10 }, identity);
     rollbackRegionResize(gesture);
     expect(context.block.pos).toEqual({ x: 0, y: 0, w: 200, h: 120 });
+  });
+});
+
+const NESTED = `---
+name: Nested
+---
+
+context: Outer
+  pos: 0, 0, 800, 600
+  nodes:
+    - Host
+
+context: Inner
+  pos: 400, 320, 200, 120
+  nodes:
+    - Deep
+
+context: Sibling
+  pos: 900, 0, 400, 300
+  nodes:
+
+Host
+  id: h-1
+  pos: 200, 200, 200, 88
+
+Deep
+  id: d-1
+  pos: 440, 360, 100, 50
+`;
+
+function modelOf(text: string) {
+  return buildModel(parseFlow(text), null);
+}
+
+describe('movingRegionGroupFor', () => {
+  it('adds every region fully contained in a selected region, once', () => {
+    const model = modelOf(NESTED);
+    const outer = model.contexts.find((context) => context.block.name === 'Outer')!;
+    expect(movingRegionGroupFor(model, [outer]).map((context) => context.block.name)).toEqual(['Outer', 'Inner']);
+  });
+
+  it('dedupes a region that is both selected and contained', () => {
+    const model = modelOf(NESTED);
+    const outer = model.contexts.find((context) => context.block.name === 'Outer')!;
+    const inner = model.contexts.find((context) => context.block.name === 'Inner')!;
+    expect(movingRegionGroupFor(model, [outer, inner]).map((context) => context.block.name)).toEqual(['Outer', 'Inner']);
+  });
+
+  it('leaves a merely overlapping region out (R48)', () => {
+    const model = modelOf(NESTED);
+    const outer = model.contexts.find((context) => context.block.name === 'Outer')!;
+    const inner = model.contexts.find((context) => context.block.name === 'Inner')!;
+    expect(movingRegionGroupFor(model, [inner]).map((context) => context.block.name)).toEqual(['Inner']);
+    expect(movingRegionGroupFor(model, [inner])).not.toContain(outer);
+  });
+});
+
+describe('applyCombinedMove', () => {
+  it('translates free nodes, carried members, and authored pos by one delta', () => {
+    const model = modelOf(NESTED);
+    const outer = model.contexts.find((context) => context.block.name === 'Outer')!;
+    const inner = model.contexts.find((context) => context.block.name === 'Inner')!;
+    const host = model.nodes.find((node) => node.name === 'Host')!;
+    const deep = model.nodes.find((node) => node.name === 'Deep')!;
+    const gesture: CombinedMoveSnapshot = {
+      startPositions: new Map([
+        [host, { x: 200, y: 200 }],
+        [deep, { x: 440, y: 360 }],
+      ]),
+      scales: new Map(),
+      movingRegions: [outer, inner],
+      startRects: new Map([
+        [outer.block, { ...outer.block.pos! }],
+        [inner.block, { ...inner.block.pos! }],
+      ]),
+      startWorld: { x: 10, y: 10 },
+      moved: false,
+    };
+    applyCombinedMove(gesture, { x: 42, y: 26 }, identity);
+    expect(gesture.moved).toBe(true);
+    expect(host.pos).toMatchObject({ x: 232, y: 216 });
+    expect(deep.pos).toMatchObject({ x: 472, y: 376 });
+    expect(outer.block.pos).toEqual({ x: 32, y: 16, w: 800, h: 600 });
+    expect(inner.block.pos).toEqual({ x: 432, y: 336, w: 200, h: 120 });
+  });
+
+  it('divides node deltas by the locus scale while regions stay in world space', () => {
+    const model = modelOf(NESTED);
+    const host = model.nodes.find((node) => node.name === 'Host')!;
+    const gesture: CombinedMoveSnapshot = {
+      startPositions: new Map([[host, { x: 200, y: 200 }]]),
+      scales: new Map([[host, 2]]),
+      movingRegions: [],
+      startRects: new Map(),
+      startWorld: { x: 0, y: 0 },
+      moved: false,
+    };
+    applyCombinedMove(gesture, { x: 80, y: 40 }, identity);
+    expect(host.pos).toMatchObject({ x: 240, y: 220 });
+  });
+
+  it('rolls everything back', () => {
+    const model = modelOf(NESTED);
+    const outer = model.contexts.find((context) => context.block.name === 'Outer')!;
+    const host = model.nodes.find((node) => node.name === 'Host')!;
+    const gesture: CombinedMoveSnapshot = {
+      startPositions: new Map([[host, { x: 200, y: 200 }]]),
+      scales: new Map(),
+      movingRegions: [outer],
+      startRects: new Map([[outer.block, { x: 0, y: 0, w: 800, h: 600 }]]),
+      startWorld: { x: 0, y: 0 },
+      moved: true,
+    };
+    applyCombinedMove(gesture, { x: 50, y: 50 }, identity);
+    rollbackCombinedMove(gesture);
+    expect(host.pos).toMatchObject({ x: 200, y: 200 });
+    expect(outer.block.pos).toEqual({ x: 0, y: 0, w: 800, h: 600 });
+  });
+});
+
+describe('regionRectsWithDrawnMove', () => {
+  it('swaps live frames in for the moving regions and keeps the rest frozen', () => {
+    const model = modelOf(NESTED);
+    const outer = model.contexts.find((context) => context.block.name === 'Outer')!;
+    const inner = model.contexts.find((context) => context.block.name === 'Inner')!;
+    const sibling = model.contexts.find((context) => context.block.name === 'Sibling')!;
+    const frozen = new Map([
+      [outer.block, { x: 0, y: 0, w: 800, h: 600 }],
+      [inner.block, { x: 400, y: 320, w: 200, h: 120 }],
+      [sibling.block, { x: 900, y: 0, w: 400, h: 300 }],
+    ]);
+    outer.block.pos = { x: 100, y: 100, w: 800, h: 600 };
+    const painted = regionRectsWithDrawnMove([outer], model, frozen);
+    expect(painted.get(outer.block)).toEqual({ x: 100, y: 100, w: 800, h: 600 });
+    expect(painted.get(sibling.block)).toEqual({ x: 900, y: 0, w: 400, h: 300 });
   });
 });

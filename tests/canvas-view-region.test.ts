@@ -14,7 +14,7 @@ import {
 } from '../src/client/flow-doc.js';
 import type { Point } from '../src/client/geometry.js';
 import { ExpansionLayer } from '../src/client/canvas/expansion.js';
-import type { CanvasActions } from '../src/client/canvas/canvas-view.js';
+import type { CanvasActions, RegionTarget } from '../src/client/canvas/canvas-view.js';
 import { createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
 
 // One region drawn around A alone, wide enough that B can be dragged into it and A out of it.
@@ -758,5 +758,128 @@ describe('double-clicking a region label', () => {
     const { actions, canvas } = openedCanvas(ZONE_FLOW);
     doubleClickOnCanvas(canvas, labelPoint);
     expect(actions.regionClicked).toHaveBeenCalledTimes(1);
+  });
+});
+
+// A region with a member, a second region holding a free node, so a mixed selection drag can
+// move a region and a node at once and the free node can leave a stationary frame (R50).
+const MIXED_FLOW = `---
+name: Mixed
+---
+
+context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+    - Inside
+
+context: Other
+  pos: 900, 0, 400, 300
+  nodes:
+    - Wanderer
+
+Inside
+  id: in-1
+  pos: 200, 200, 200, 88
+
+Wanderer
+  id: w-1
+  pos: 1000, 100, 200, 88
+`;
+
+function shiftPressAt(canvas: HTMLCanvasElement, point: Point): void {
+  listenerFor(canvas, 'pointerdown')({ button: 0, pointerId: 1, clientX: point.x, clientY: point.y, shiftKey: true, detail: 1 });
+  listenerFor(canvas, 'pointerup')({ pointerId: 1, clientX: point.x, clientY: point.y, detail: 1 });
+}
+
+describe('multi-selecting regions with the select tool', () => {
+  it('shift-click adds a region to a node selection (R50)', () => {
+    const { view, canvas, nodeNamed } = openedCanvas(MIXED_FLOW);
+    pressAt(canvas, centerOf(nodeNamed('Wanderer')));
+    shiftPressAt(canvas, { x: 0, y: 300 });
+
+    expect(view.selectedRegion?.block.name).toBe('Zone');
+    expect([...view.selection]).toEqual([nodeNamed('Wanderer')]);
+  });
+
+  it('shift-click on a selected region deselects it, keeping the nodes', () => {
+    const { view, canvas, nodeNamed } = openedCanvas(MIXED_FLOW);
+    pressAt(canvas, centerOf(nodeNamed('Wanderer')));
+    shiftPressAt(canvas, { x: 0, y: 300 });
+    shiftPressAt(canvas, { x: 0, y: 300 });
+
+    expect(view.selectedRegion).toBeNull();
+    expect([...view.selection]).toEqual([nodeNamed('Wanderer')]);
+  });
+
+  it('marquee selects a region only when the marquee encloses its whole frame (R50)', () => {
+    const { view, canvas } = openedCanvas(ZONE_FLOW);
+    dragOnCanvas(canvas, { x: -20, y: -20 }, { x: 820, y: 620 });
+
+    expect(view.selectedRegion?.block.name).toBe('Zone');
+  });
+
+  it('marquee that only intersects a region leaves it unselected', () => {
+    const { view, canvas } = openedCanvas(ZONE_FLOW);
+    dragOnCanvas(canvas, { x: 400, y: 300 }, { x: 1200, y: 900 });
+
+    expect(view.selectedRegion).toBeNull();
+  });
+
+  it('marquee still starts inside a region interior, and selects a fully enclosed inner region', () => {
+    const { view, canvas } = openedCanvas(NESTED_FLOW);
+    dragOnCanvas(canvas, { x: 300, y: 300 }, { x: 700, y: 500 });
+
+    expect(view.selectedRegion?.block.name).toBe('Inner');
+    expect(view.selectedRegions.size).toBe(1);
+  });
+
+  it('pressing an already-selected region keeps the whole selection', () => {
+    const { view, canvas, nodeNamed } = openedCanvas(MIXED_FLOW);
+    pressAt(canvas, centerOf(nodeNamed('Wanderer')));
+    shiftPressAt(canvas, { x: 0, y: 300 });
+    pressAt(canvas, { x: 0, y: 300 });
+
+    expect(view.selectedRegion?.block.name).toBe('Zone');
+    expect([...view.selection]).toEqual([nodeNamed('Wanderer')]);
+  });
+
+  it('closes open editors at press time, even on a shift-toggle', () => {
+    const { actions, canvas } = openedCanvas(MIXED_FLOW);
+    shiftPressAt(canvas, { x: 0, y: 300 });
+    expect(actions.canvasClicked).toHaveBeenCalled();
+  });
+});
+
+describe('moving a mixed selection', () => {
+  it('translates the region, its members, and the selected node together, one report (R50)', () => {
+    const { doc, actions, canvas, nodeNamed } = openedCanvas(MIXED_FLOW);
+    pressAt(canvas, { x: 0, y: 300 });
+    dragOnCanvas(canvas, centerOf(nodeNamed('Wanderer')), { x: 1900, y: 744 }, { shiftKey: true });
+
+    expect(contextBlockNamed(doc, 'Zone')!.pos).toEqual({ x: 800, y: 600, w: 800, h: 600 });
+    expect(nodeNamed('Inside').pos).toEqual({ x: 1000, y: 800, w: 200, h: 88 });
+    expect(nodeNamed('Wanderer').pos).toEqual({ x: 1800, y: 704, w: 200, h: 88 });
+
+    const movedCalls = (actions.regionMoved as unknown as { mock: { calls: [RegionTarget[], FlowNode[]][] } }).mock.calls;
+    expect(movedCalls[0][1].map((node) => node.name)).toEqual(['Wanderer', 'Inside']);
+    expect(movedCalls[0][0].map((region) => region.block.name)).toEqual(['Zone']);
+  });
+
+  it('lets a free selected node leave a stationary region it travelled out of (R13)', () => {
+    const { actions, canvas, nodeNamed } = openedCanvas(MIXED_FLOW);
+    pressAt(canvas, { x: 0, y: 300 });
+    dragOnCanvas(canvas, centerOf(nodeNamed('Wanderer')), { x: 1800, y: 700 }, { shiftKey: true });
+
+    expect(asNames(regionChangesFrom(actions, 'regionMoved'))).toEqual([['Other', 'Wanderer', 'leaves']]);
+  });
+
+  it('never offers resize handles to a mixed selection — the corner is just more border', () => {
+    const { actions, canvas, nodeNamed } = openedCanvas(MIXED_FLOW);
+    pressAt(canvas, { x: 0, y: 300 });
+    shiftPressAt(canvas, centerOf(nodeNamed('Wanderer')));
+    dragOnCanvas(canvas, { x: 800, y: 600 }, { x: 880, y: 600 });
+
+    expect(actions.regionResized).not.toHaveBeenCalled();
+    expect(actions.regionMoved).toHaveBeenCalledTimes(1);
   });
 });

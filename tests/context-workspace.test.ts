@@ -13,11 +13,16 @@ import {
 import * as FlowDoc from '../src/client/flow-doc.js';
 import type { DocumentOwner } from '../src/client/canvas/expansion.js';
 import type { ActionContinuation } from '../src/client/edit-session.js';
+import type { MenuItem } from '../src/client/context-menu.js';
+import type { Point } from '../src/client/geometry.js';
+import type { RegionTarget } from '../src/client/canvas/canvas-view.js';
 import {
+  createContextOrchestration,
   readableContextsForChildPath,
   renameContextAcrossWorkspace,
   syncInheritsForMember,
   syncInheritsForPath,
+  type ContextOrchestrationOptions,
   type InheritsSyncDeps,
   type WorkspaceRenameDeps,
 } from '../src/client/context/index.js';
@@ -485,5 +490,107 @@ graph: Steps
     expand: [Login](auth/login.flow)
 `);
     expect(readableContextsForChildPath(parent, 'auth/login.flow')).toEqual(['Auth']);
+  });
+});
+
+const DELETION_FLOW = `---
+name: Main
+---
+
+context: Auth
+  nodes:
+    - Login
+
+context: Cart
+  nodes:
+    - Checkout
+
+Login
+  id: l-1
+  updates: Auth
+
+Checkout
+  id: c-1
+`;
+
+function deletionHarness() {
+  const doc = parseFlow(DELETION_FLOW);
+  const confirmMenus: MenuItem[][] = [];
+  const inherits: InheritsSyncDeps = {
+    suspendAction: liveContinuation,
+    expandTargetDoc: () => null,
+    ensureDocument: async () => null,
+    applyToDoc: (_entry, mutation) => { mutation(); },
+  };
+  const options: ContextOrchestrationOptions = {
+    openFlowDoc: () => ({ doc, path: 'main.flow' }),
+    ownerOf: () => ({ doc, path: 'main.flow' }),
+    creationTargetFor: () => null,
+    extractionTargetForSelection: () => null,
+    applyToDoc: (_entry, mutation) => { mutation(); },
+    runAction: (body) => body(),
+    suspendAction: liveContinuation,
+    selectRegion: () => {},
+    clearSelection: () => {},
+    openRegionNameEditor: () => {},
+    openRegionEditor: () => {},
+    openConfirmMenu: (items) => { confirmMenus.push(items); },
+    inherits,
+    workspaceRename: {
+      suspendAction: liveContinuation,
+      loadEveryWorkspaceDocument: async () => {},
+      knownDocuments: () => [],
+      applyToDoc: (_entry, mutation) => { mutation(); },
+    },
+  };
+  const ops = createContextOrchestration(options);
+  const targetOf = (name: string): RegionTarget => ({
+    block: FlowDoc.contextBlockNamed(doc, name)!,
+    doc,
+    path: 'main.flow',
+  });
+  return { doc, ops, targetOf, confirmMenus };
+}
+
+describe('multi-region deletion', () => {
+  it('removes every block, strips unreadable updates, and keeps the members (R32)', () => {
+    const { doc, ops, targetOf } = deletionHarness();
+    ops.deleteRegions([targetOf('Auth'), targetOf('Cart')]);
+
+    expect(FlowDoc.contextBlocksIn(doc.items)).toHaveLength(0);
+    const login = FlowDoc.nodesIn(doc.items).find((node) => node.name === 'Login')!;
+    expect(parseListValue(getProp(login, 'updates'))).toEqual([]);
+    expect(FlowDoc.nodesIn(doc.items).map((node) => node.name)).toEqual(['Login', 'Checkout']);
+  });
+
+  it('writeRegionDeletions runs inside a caller-owned action', () => {
+    const { doc, ops, targetOf } = deletionHarness();
+    let calls = 0;
+    const runAction = (body: () => void) => { calls += 1; body(); };
+    // A mixed selection delete composes this inside its own runAction; here we just prove the
+    // writer performs the deletions without opening an action of its own.
+    runAction(() => ops.writeRegionDeletions([targetOf('Auth'), targetOf('Cart')]));
+    expect(calls).toBe(1);
+    expect(FlowDoc.contextBlocksIn(doc.items)).toHaveLength(0);
+  });
+
+  it('confirmRegionDeletions warns once for every writer, then proceeds', () => {
+    const { ops, targetOf, confirmMenus } = deletionHarness();
+    let proceeded = false;
+    ops.confirmRegionDeletions([targetOf('Auth')], { x: 0, y: 0 } satisfies Point, () => { proceeded = true; });
+
+    expect(proceeded).toBe(false);
+    expect(confirmMenus).toHaveLength(1);
+    const [proceedItem, cancelItem] = confirmMenus[0] as unknown as [{ onSelect: () => void }, { label: string }];
+    expect(cancelItem.label).toBe('Cancel');
+    proceedItem.onSelect();
+    expect(proceeded).toBe(true);
+  });
+
+  it('confirmRegionDeletions proceeds directly when nobody updates the providers', () => {
+    const { ops, targetOf } = deletionHarness();
+    let proceeded = false;
+    ops.confirmRegionDeletions([targetOf('Cart')], { x: 0, y: 0 } satisfies Point, () => { proceeded = true; });
+    expect(proceeded).toBe(true);
   });
 });

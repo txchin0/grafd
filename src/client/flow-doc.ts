@@ -294,6 +294,53 @@ export function membershipChangesForRegionMove(
   return changes;
 }
 
+// What a mixed selection move did to membership — the union of the two existing contracts.
+// Each moved node plays one role: it is carried when a moving region lists it (its frame
+// travelled with it, so it can never have been shut out), or free when only the selection
+// moved it. Moved regions sweep non-members they come to rest over (R29, add-only, live frame);
+// a carried node joins any stationary region it lands in (existing region-move rule, live
+// frame, join-only); a free node gets the full R13 test against the frozen frame each region
+// had when the drag began — a pos-free region's live frame would follow it, so no member could
+// ever leave it (R18).
+export function membershipChangesForCombinedMove(
+  model: FlowModel,
+  movingRegions: readonly ModelContext[],
+  selectedNodes: readonly FlowNode[],
+  frozenRegionRects: ReadonlyMap<ContextBlock, Rect>,
+): MembershipChange[] {
+  const movingBlocks = new Set(movingRegions.map((entry) => entry.block));
+  const carriedNodes = [...new Set(movingRegions.flatMap((entry) => entry.members))].filter((node) =>
+    model.nodes.includes(node),
+  );
+  const freeNodes = selectedNodes.filter(
+    (node) => model.nodes.includes(node) && !carriedNodes.includes(node),
+  );
+  const changes: MembershipChange[] = [];
+  for (const context of model.contexts) {
+    if (movingBlocks.has(context.block)) {
+      const frame = regionRectOf(model, context);
+      if (frame) changes.push(...membershipChangesForRegion(model, context, frame, { canRemove: false }));
+      continue;
+    }
+    const frozenFrame = frozenRegionRects.get(context.block);
+    for (const node of freeNodes) {
+      if (!frozenFrame) continue;
+      const inside = rectContainsRect(frozenFrame, displayRectOf(model, node));
+      const isMember = context.members.includes(node);
+      if (inside !== isMember) changes.push({ block: context.block, node, joins: inside });
+    }
+    const frame = regionRectOf(model, context);
+    if (!frame) continue;
+    for (const node of carriedNodes) {
+      if (context.members.includes(node)) continue;
+      if (rectContainsRect(frame, displayRectOf(model, node))) {
+        changes.push({ block: context.block, node, joins: true });
+      }
+    }
+  }
+  return changes;
+}
+
 // Regions a freshly created top-level node joins when its rectangle is fully inside their
 // frame — the inverse of drawing a region over existing nodes (R9a). Each overlapping region is
 // evaluated independently (R15). Subgraph nodes are excluded because they are absent from a
@@ -697,6 +744,33 @@ export function duplicateNodes(items: FlowItem[], sources: FlowNode[], offset: P
 
   for (const copy of copies) items.push({ kind: 'node', node: copy });
   return copies;
+}
+
+// Inserts independent copies of region blocks into `items`, each with a name made unique
+// against the existing blocks AND the providers the file inherits — a pasted block must never
+// silently redeclare a provider (R6, R11). `renamedMembers` carries original member names to
+// the new names of the nodes pasted alongside; a member that was not copied is dropped, since
+// listing it would claim nodes the paste did not create. A block with a `pos` keeps its
+// rectangle shifted by `offset`; one without stays pos-free (R3).
+export function duplicateContextBlocks(
+  items: FlowItem[],
+  sources: readonly ContextBlock[],
+  offset: Point,
+  renamedMembers: ReadonlyMap<string, string>,
+  inheritedNames: readonly string[],
+): ContextBlock[] {
+  const takenNames = new Set([...contextBlocksIn(items).map((block) => block.name), ...inheritedNames]);
+  return sources.map((source) => {
+    const block = structuredClone(source);
+    block.name = uniqueName(takenNames, source.name);
+    takenNames.add(block.name);
+    if (block.pos) block.pos = { ...block.pos, x: block.pos.x + offset.x, y: block.pos.y + offset.y };
+    setContextMembers(block, source.members
+      .map((member) => renamedMembers.get(member))
+      .filter((member): member is string => member != null));
+    items.push({ kind: 'context', block });
+    return block;
+  });
 }
 
 export function boundsOfNodes(nodes: FlowNode[]): Rect {

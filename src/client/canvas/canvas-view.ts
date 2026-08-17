@@ -16,12 +16,10 @@ import rough from 'roughjs';
 import type { ContextBlock, FlowDocument, FlowNode, Rect } from '../../shared/flow-format.js';
 import { DEFAULT_ROUGHNESS } from '../../shared/manifest.js';
 import {
-  contextsContainedIn,
   displayRectOf,
   displayRects,
-  membershipChangesForMove,
+  membershipChangesForCombinedMove,
   membershipChangesForRegion,
-  membershipChangesForRegionMove,
   regionRectOf,
   type FlowModel,
   type GhostNode,
@@ -57,13 +55,15 @@ import {
   type NodeTextLayout,
 } from './node-metrics.js';
 import {
-  applyRegionMove,
+  applyCombinedMove,
   applyRegionResize,
+  movingRegionGroupFor,
   regionRectDuringResize,
+  regionRectsWithDrawnMove,
   regionRectsWithDrawnResize,
-  rollbackRegionMove,
+  rollbackCombinedMove,
   rollbackRegionResize,
-  type RegionMoveSnapshot,
+  type CombinedMoveSnapshot,
 } from './region-gestures.js';
 import { hitRegionAt, hitRegionHandleAt } from './region-hit-test.js';
 import {
@@ -111,26 +111,24 @@ export type Tool = 'select' | 'node' | 'context';
 
 
 
+type MoveGesture = CombinedMoveSnapshot & {
+  type: 'move';
+  pressed: { kind: 'node'; node: FlowNode } | { kind: 'region'; context: ModelContext };
+  pressedBadge: BadgeHit | null;
+  // The explicitly selected nodes — what membership measures as "free" nodes — as distinct
+  // from the members a moving region carries along.
+  selectedNodes: FlowNode[];
+  regionRects: Map<ContextBlock, Rect>;
+  startWorld: Point;
+  startScreen: Point;
+  moved: boolean;
+};
+
 type Gesture =
   | { type: 'pan'; startView: View; startScreen: Point }
   | { type: 'edge'; from: FlowNode; toWorld: Point; hoverTarget: FlowNode | null }
   | { type: 'resize'; node: FlowNode; corner: ResizeCorner; startRect: Rect; startWorld: Point; scale: number }
-  | {
-      type: 'move';
-      nodes: FlowNode[];
-      startPositions: Map<FlowNode, Point>;
-      // Every visible region's frame as it stood when the drag began. It is both what the painter
-      // draws while the gesture runs and what membership is measured against on release, so the
-      // frame the user drops into is the one they aimed at (R13, R18).
-      regionRects: Map<ContextBlock, Rect>;
-      scales: Map<FlowNode, number>;
-      startWorld: Point;
-      startScreen: Point;
-      moved: boolean;
-      pressedNode: FlowNode;
-      pressedBadge: BadgeHit | null;
-    }
-  | { type: 'region-move' } & RegionMoveSnapshot
+  | MoveGesture
   | {
       type: 'region-resize';
       context: ModelContext;
@@ -213,9 +211,10 @@ export interface CanvasActions {
   // Membership changes travel with the move so the whole drag lands as one undo step (R19). A
   // resize reports none: it changes a node's size, never which region it was dropped into.
   moveCommitted(nodes: FlowNode[], membershipChanges?: MembershipChange[]): void;
-  // A region gesture writes the block's own rectangle in place, the positions of the members it
-  // carried, and whatever membership it swept up — one action, so one undo step.
-  regionMoved(region: RegionTarget, movedNodes: FlowNode[], membershipChanges: MembershipChange[]): void;
+  // A region gesture writes the blocks' own rectangles in place, the positions of the members
+  // they carried, and whatever membership they swept up — one action, so one undo step. A mixed
+  // selection move reports every moved region, not only the one that was pressed.
+  regionMoved(regions: RegionTarget[], movedNodes: FlowNode[], membershipChanges: MembershipChange[]): void;
   regionResized(region: RegionTarget, membershipChanges: MembershipChange[]): void;
   deleteRegion(region: RegionTarget): void;
   createRegion(rect: Rect, frameHost: FlowNode | null, memberNames: string[]): void;
@@ -354,9 +353,10 @@ export class CanvasView {
   model: FlowModel;
   selection = new Set<FlowNode>();
   selectedEdge: ModelEdge | null = null;
-  // Regions are selected one at a time and never alongside nodes: the two answer different
-  // gestures, and a region's frame encloses nodes it does not own.
-  selectedRegion: ModelContext | null = null;
+  // Regions share the selection with nodes — a mixed selection moves, deletes and copies as one
+  // gesture — but the single-region accessor below stays for the callers that address one
+  // region as an edit target.
+  selectedRegions = new Set<ModelContext>();
   readonly expansionLayer: ExpansionLayer;
   gridIsVisible = true;
   doubleClickOpensSubgraph = true;
@@ -472,10 +472,10 @@ export class CanvasView {
       ?? (this.selectedEdge && this.expansionLayer.isEmbedded(this.selectedEdge.from) ? this.selectedEdge : null);
     // By name, not by identity: a region has no id, and rebuilding the model makes a fresh
     // ModelContext for the same block.
-    const selectedRegionName = this.selectedRegion?.block.name ?? null;
-    this.selectedRegion = selectedRegionName == null
-      ? null
-      : model.contexts.find((context) => context.block.name === selectedRegionName) ?? null;
+    const selectedRegionNames = [...this.selectedRegions].map((context) => context.block.name);
+    this.selectedRegions = new Set(selectedRegionNames
+      .map((name) => model.contexts.find((context) => context.block.name === name))
+      .filter((context): context is ModelContext => context != null));
     if (this.hoverNode) {
       const previousHoverId = this.hoverNode.id;
       this.hoverNode = model.nodes.find((node) => node.id === previousHoverId)
@@ -538,21 +538,21 @@ export class CanvasView {
   select(node: FlowNode): void {
     this.selection = new Set([node]);
     this.selectedEdge = null;
-    this.selectedRegion = null;
+    this.selectedRegions.clear();
     this.requestRender();
   }
 
-  setSelection(nodes: FlowNode[]): void {
+  setSelection(nodes: FlowNode[], regions: ModelContext[] = []): void {
     this.selection = new Set(nodes);
+    this.selectedRegions = new Set(regions);
     this.selectedEdge = null;
-    this.selectedRegion = null;
     this.requestRender();
   }
 
   clearSelection(): void {
     this.selection.clear();
     this.selectedEdge = null;
-    this.selectedRegion = null;
+    this.selectedRegions.clear();
     this.requestRender();
   }
 
@@ -560,8 +560,14 @@ export class CanvasView {
   selectRegion(name: string): void {
     this.selection.clear();
     this.selectedEdge = null;
-    this.selectedRegion = this.model.contexts.find((context) => context.block.name === name) ?? null;
+    const context = this.model.contexts.find((candidate) => candidate.block.name === name);
+    this.selectedRegions = context ? new Set([context]) : new Set();
     this.requestRender();
+  }
+
+  /** The single selected region, or null when none or several are selected. */
+  get selectedRegion(): ModelContext | null {
+    return this.selectedRegions.size === 1 ? [...this.selectedRegions][0] : null;
   }
 
   regionRectOfBlock(block: ContextBlock): Rect | null {
@@ -569,9 +575,9 @@ export class CanvasView {
     return context ? this.regionRectOfContext(context) : null;
   }
 
-  /** The selected region as the document address a mutation needs, or null when none is selected. */
-  selectedRegionTarget(): RegionTarget | null {
-    return this.selectedRegion ? this.regionTargetOf(this.selectedRegion) : null;
+  /** The selected regions as the document addresses a mutation needs. */
+  selectedRegionTargets(): RegionTarget[] {
+    return [...this.selectedRegions].map((context) => this.regionTargetOf(context));
   }
 
   private regionTargetOf(context: ModelContext): RegionTarget {
@@ -918,25 +924,14 @@ export class CanvasView {
         return;
       }
       if (!this.selection.has(node)) {
-        if (!event.shiftKey) this.selection.clear();
+        if (!event.shiftKey) {
+          this.selection.clear();
+          this.selectedRegions.clear();
+        }
         this.selection.add(node);
         this.selectedEdge = null;
       }
-      this.selectedRegion = null;
-      this.gesture = {
-        type: 'move',
-        nodes: [...this.selection],
-        startPositions: new Map([...this.selection].map((n) => [n, { x: n.pos!.x, y: n.pos!.y }])),
-        regionRects: this.freezeRegionRects(),
-        // World-space drag deltas are divided by each node's locus scale so nodes inside
-        // scaled-down frames track the cursor instead of racing ahead of it.
-        scales: new Map([...this.selection].map((n) => [n, this.expansionLayer.scaleOf(n)])),
-        startWorld: world,
-        startScreen: screen,
-        moved: false,
-        pressedNode: node,
-        pressedBadge: this.hitBadge(world),
-      };
+      this.gesture = this.beginMoveGesture(world, screen, { kind: 'node', node }, this.hitBadge(world));
       this.requestRender();
       return;
     }
@@ -951,7 +946,7 @@ export class CanvasView {
     if (edge) {
       this.selectedEdge = edge;
       this.selection.clear();
-      this.selectedRegion = null;
+      this.selectedRegions.clear();
       this.actions.canvasClicked();
       this.requestRender();
       return;
@@ -959,34 +954,23 @@ export class CanvasView {
 
     const region = this.hitRegion(world);
     if (region) {
-      this.selection.clear();
-      this.selectedEdge = null;
-      this.selectedRegion = region;
+      // A press on a region closes open editors at press time, whether or not it becomes a drag
+      // — the same contract a node press has.
       this.actions.canvasClicked();
-      // A region whose frame lay inside the dragged one at gesture start is carried with it: its
-      // own frame translates and its members travel too, whether or not the outer region lists
-      // them, so nothing inside the carried region is left behind by the frame that used to hold
-      // it (R28a). The dragged region is just the group's first element — one snapshot pass
-      // covers both, and only a block that already had a drawn area keeps one (R3). The group is
-      // frozen here; a region the dragged frame merely comes to rest over later is not part of it.
-      const carriedContexts = contextsContainedIn(this.model, region);
-      const startPositions = new Map<FlowNode, Point>();
-      const startRects = new Map<ContextBlock, Rect>();
-      for (const entry of [region, ...carriedContexts]) {
-        if (entry.block.pos) startRects.set(entry.block, { ...entry.block.pos });
-        for (const member of entry.members) {
-          if (!startPositions.has(member)) startPositions.set(member, { x: member.pos!.x, y: member.pos!.y });
-        }
+      if (event.shiftKey && this.selectedRegions.has(region)) {
+        this.selectedRegions.delete(region);
+        this.requestRender();
+        return;
       }
-      this.gesture = {
-        type: 'region-move',
-        context: region,
-        carriedContexts,
-        startPositions,
-        startRects,
-        startWorld: world,
-        moved: false,
-      };
+      if (!this.selectedRegions.has(region)) {
+        if (!event.shiftKey) {
+          this.selection.clear();
+          this.selectedRegions.clear();
+        }
+        this.selectedRegions.add(region);
+        this.selectedEdge = null;
+      }
+      this.gesture = this.beginMoveGesture(world, screen, { kind: 'region', context: region }, null);
       this.requestRender();
       return;
     }
@@ -994,13 +978,51 @@ export class CanvasView {
     if (!event.shiftKey) {
       this.selection.clear();
       this.selectedEdge = null;
-      this.selectedRegion = null;
+      this.selectedRegions.clear();
       this.actions.canvasClicked();
     }
     this.gesture = wantsCreate
       ? { type: 'create', tool: this.tool, startWorld: world, startScreen: screen, rect: null }
       : { type: 'marquee', startWorld: world, rect: null };
     this.requestRender();
+  }
+
+  // The one snapshot a move in either domain takes. Moving regions are the selected ones plus
+  // the R28a group: every region whose whole frame lay inside a selected frame at gesture start
+  // is carried with it, its members travelling too. Moving nodes are the selection plus every
+  // member a moving region carries, deduped — a node both selected and carried moves once.
+  // Region rects freeze at gesture start so the frame the user drops into is the one they
+  // aimed at (R13, R18).
+  private beginMoveGesture(
+    world: Point,
+    screen: Point,
+    pressed: { kind: 'node'; node: FlowNode } | { kind: 'region'; context: ModelContext },
+    pressedBadge: BadgeHit | null,
+  ): MoveGesture {
+    const movingRegions = movingRegionGroupFor(this.model, [...this.selectedRegions]);
+    const selectedNodes = [...this.selection];
+    const carriedNodes = [...new Set(movingRegions.flatMap((context) => context.members))];
+    const nodes = [...new Set([...selectedNodes, ...carriedNodes])];
+    const startRects = new Map<ContextBlock, Rect>();
+    for (const context of movingRegions) {
+      if (context.block.pos) startRects.set(context.block, { ...context.block.pos });
+    }
+    return {
+      type: 'move',
+      pressed,
+      pressedBadge,
+      selectedNodes,
+      startPositions: new Map(nodes.map((entry) => [entry, { x: entry.pos!.x, y: entry.pos!.y }])),
+      // World-space drag deltas are divided by each node's locus scale so nodes inside
+      // scaled-down frames track the cursor instead of racing ahead of it.
+      scales: new Map(nodes.map((entry) => [entry, this.expansionLayer.scaleOf(entry)])),
+      movingRegions,
+      startRects,
+      regionRects: this.freezeRegionRects(),
+      startWorld: world,
+      startScreen: screen,
+      moved: false,
+    };
   }
 
   // A second pointer replaces the single-pointer gesture with a pinch. Nothing the abandoned
@@ -1052,16 +1074,24 @@ export class CanvasView {
 
   private regionRectsForPainting(): ReadonlyMap<ContextBlock, Rect> | undefined {
     const gesture = this.gesture;
-    if (gesture?.type === 'move') return gesture.regionRects;
+    if (gesture?.type === 'move') {
+      // A pure node drag paints every frame frozen, as it has always done (R13, R18). A pure
+      // region drag paints everything live, so a pos-free region follows the members it carries.
+      if (gesture.movingRegions.length === 0) return gesture.regionRects;
+      if (gesture.selectedNodes.length === 0) return undefined;
+      // A mixed drag freezes the stationary frames the free nodes are measured against, while
+      // the moving frames paint live so their outlines track the drag.
+      return regionRectsWithDrawnMove(gesture.movingRegions, this.model, gesture.regionRects);
+    }
     if (gesture?.type === 'region-resize' && gesture.context.block.pos) {
       return regionRectsWithDrawnResize(gesture.context, gesture.frozenRegionRects);
     }
     return undefined;
   }
 
-  private membershipChangesFor(gesture: Extract<Gesture, { type: 'move' }>): MembershipChange[] {
+  private membershipChangesFor(gesture: MoveGesture): MembershipChange[] {
     return modelsOnScreen(this.model).flatMap((model) =>
-      membershipChangesForMove(model, gesture.nodes, gesture.regionRects),
+      membershipChangesForCombinedMove(model, gesture.movingRegions, gesture.selectedNodes, gesture.regionRects),
     );
   }
 
@@ -1069,14 +1099,9 @@ export class CanvasView {
     const gesture = this.gesture;
     this.gesture = null;
     if (gesture?.type === 'move') {
-      for (const node of gesture.nodes) {
-        const start = gesture.startPositions.get(node);
-        if (start && node.pos) Object.assign(node.pos, start);
-      }
+      rollbackCombinedMove(gesture);
     } else if (gesture?.type === 'resize') {
       Object.assign(gesture.node.pos!, gesture.startRect);
-    } else if (gesture?.type === 'region-move') {
-      rollbackRegionMove(gesture);
     } else if (gesture?.type === 'region-resize') {
       rollbackRegionResize(gesture);
     }
@@ -1121,25 +1146,13 @@ export class CanvasView {
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'move') {
-      const dx = world.x - gesture.startWorld.x;
-      const dy = world.y - gesture.startWorld.y;
       const screenDistance = Math.hypot(screen.x - gesture.startScreen.x, screen.y - gesture.startScreen.y);
       if (!gesture.moved && screenDistance < DRAG_THRESHOLD_PX) return;
-      gesture.moved = true;
-      for (const node of gesture.nodes) {
-        const start = gesture.startPositions.get(node)!;
-        const scale = gesture.scales.get(node) ?? 1;
-        node.pos!.x = snap(start.x + dx / scale);
-        node.pos!.y = snap(start.y + dy / scale);
-      }
+      applyCombinedMove(gesture, world, snap);
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'resize') {
       this.applyResize(gesture, world);
-      this.requestRender();
-      this.actions.viewChanged?.();
-    } else if (gesture.type === 'region-move') {
-      applyRegionMove(gesture, world, snap);
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'region-resize') {
@@ -1202,14 +1215,21 @@ export class CanvasView {
 
     if (gesture.type === 'move') {
       if (gesture.moved) {
-        this.actions.moveCommitted(gesture.nodes, this.membershipChangesFor(gesture));
+        const movedNodes = [...gesture.startPositions.keys()];
+        if (gesture.movingRegions.length > 0) {
+          this.actions.regionMoved(
+            gesture.movingRegions.map((context) => this.regionTargetOf(context)),
+            movedNodes,
+            this.membershipChangesFor(gesture),
+          );
+        } else {
+          this.actions.moveCommitted(movedNodes, this.membershipChangesFor(gesture));
+        }
       } else {
-        this.dispatchNodePress(gesture, world, event.detail);
+        this.dispatchPress(gesture, world, event.detail);
       }
     } else if (gesture.type === 'resize') {
       this.actions.moveCommitted([gesture.node]);
-    } else if (gesture.type === 'region-move') {
-      this.commitRegionMove(gesture, event.detail);
     } else if (gesture.type === 'region-resize') {
       this.commitRegionResize(gesture);
     } else if (gesture.type === 'edge') {
@@ -1217,26 +1237,26 @@ export class CanvasView {
     } else if (gesture.type === 'create') {
       this.completeCreateGesture(gesture, world);
     } else if (gesture.type === 'marquee' && gesture.rect) {
-      this.selectNodesInMarquee(gesture.rect);
+      this.selectInMarquee(gesture.rect);
     }
     this.requestRender();
   }
 
-  // A press that selected a region without dragging it has nothing to write; it was a click, and
-  // a click on a region opens its editor the way a click on a node opens that node's.
-  private commitRegionMove(
-    gesture: Extract<Gesture, { type: 'region-move' }>,
-    clickCount: number,
-  ): void {
-    if (!gesture.moved) {
-      if (clickCount < 2) this.actions.regionClicked(this.regionTargetOf(gesture.context));
+  // A press that selected something without dragging it has nothing to write; it was a click,
+  // and a click opens the editor of whatever it landed on.
+  private dispatchPress(gesture: MoveGesture, world: Point, clickCount: number): void {
+    if (gesture.pressed.kind === 'region') {
+      if (clickCount < 2) this.actions.regionClicked(this.regionTargetOf(gesture.pressed.context));
       return;
     }
-    // The group sweeps the non-members its frames came to rest over (R28a, R29), and the members
-    // it carried join any stationary region whose frame fully contains them where they landed.
-    const movedNodes = [...gesture.startPositions.keys()];
-    const changes = membershipChangesForRegionMove(this.model, [gesture.context, ...gesture.carriedContexts]);
-    this.actions.regionMoved(this.regionTargetOf(gesture.context), movedNodes, changes);
+    const badge = this.hitBadge(world);
+    const pressedBadge = gesture.pressedBadge;
+    if (badge && pressedBadge && badge.node === pressedBadge.node && badge.kind === pressedBadge.kind) {
+      if (badge.kind === 'open') this.actions.openExpand(badge.node);
+      else this.actions.toggleExpand(badge.node);
+      return;
+    }
+    if (clickCount < 2) this.actions.nodeClicked(gesture.pressed.node);
   }
 
   private commitRegionResize(gesture: Extract<Gesture, { type: 'region-resize' }>): void {
@@ -1337,14 +1357,20 @@ export class CanvasView {
   }
 
   // Marquee reaches into unfolded frames, but a node is skipped when one of its host
-  // frames is also caught — dragging a frame already carries its contents.
-  private selectNodesInMarquee(rect: Rect): void {
+  // frames is also caught — dragging a frame already carries its contents. Regions join only
+  // when the marquee encloses their whole frame: a region is a large mostly-empty area, and a
+  // grazing drag must not claim it (R50).
+  private selectInMarquee(rect: Rect): void {
     const candidates = this.expansionLayer.locus ? [...this.expansionLayer.locus.keys()] : this.model.nodes;
     for (const node of candidates) {
       if (rectsIntersect(rect, this.rect(node))) this.selection.add(node);
     }
     for (const node of [...this.selection]) {
       if (this.hasSelectedAncestorFrame(node)) this.selection.delete(node);
+    }
+    for (const context of this.model.contexts) {
+      const frame = regionRectOf(this.model, context);
+      if (frame && rectContainsRect(rect, frame)) this.selectedRegions.add(context);
     }
   }
 
@@ -1355,19 +1381,6 @@ export class CanvasView {
       host = this.expansionLayer.hostOf(host);
     }
     return false;
-  }
-
-  // The second press of a double-click must not reopen the node editor panel that the
-  // inline title editor is about to replace.
-  private dispatchNodePress(gesture: Extract<Gesture, { type: 'move' }>, world: Point, clickCount: number): void {
-    const badge = this.hitBadge(world);
-    const pressedBadge = gesture.pressedBadge;
-    if (badge && pressedBadge && badge.node === pressedBadge.node && badge.kind === pressedBadge.kind) {
-      if (badge.kind === 'open') this.actions.openExpand(badge.node);
-      else this.actions.toggleExpand(badge.node);
-      return;
-    }
-    if (clickCount < 2) this.actions.nodeClicked(gesture.pressedNode);
   }
 
   private snapCreateRect(rect: Rect): Rect {
@@ -1438,10 +1451,12 @@ export class CanvasView {
     }
     const region = this.hitRegion(world);
     if (region) {
-      this.selection.clear();
-      this.selectedEdge = null;
-      this.selectedRegion = region;
-      this.requestRender();
+      if (!this.selectedRegions.has(region)) {
+        this.selection.clear();
+        this.selectedEdge = null;
+        this.selectedRegions = new Set([region]);
+        this.requestRender();
+      }
       this.actions.contextMenu({ kind: 'region', region: this.regionTargetOf(region) }, screenPoint);
       return;
     }
@@ -1541,7 +1556,7 @@ export class CanvasView {
   }
 
   private hitResizeHandle(world: Point): { node: FlowNode; corner: ResizeCorner } | null {
-    if (this.selection.size !== 1) return null;
+    if (this.selection.size !== 1 || this.selectedRegions.size > 0) return null;
     const [node] = this.selection;
     const corner = hitResizeCorner(this.rect(node), world, HANDLE_HIT_RADIUS_PX / this.view.scale);
     return corner ? { node, corner } : null;
@@ -1553,18 +1568,18 @@ export class CanvasView {
     return regionRectOf(this.model, context);
   }
 
-  private selectedRegionDisplayRect(): Rect | null {
-    if (!this.selectedRegion) return null;
+  private selectedRegionDisplayRectOf(context: ModelContext): Rect | null {
     const resizing = this.gesture?.type === 'region-resize' ? this.gesture : null;
     return (
-      regionRectDuringResize(this.selectedRegion, resizing)
-      ?? this.regionRectOfContext(this.selectedRegion)
+      regionRectDuringResize(context, resizing)
+      ?? this.regionRectOfContext(context)
     );
   }
 
   private hitRegionHandle(world: Point): { context: ModelContext; corner: ResizeCorner } | null {
-    if (!this.selectedRegion) return null;
-    return hitRegionHandleAt(this.selectedRegion, this.model, world, this.view.scale);
+    if (this.selectedRegions.size !== 1 || this.selection.size > 0) return null;
+    const [context] = this.selectedRegions;
+    return hitRegionHandleAt(context, this.model, world, this.view.scale);
   }
 
   // The frame and the name label, never the interior: a region encloses nodes it does not own, so
@@ -1851,7 +1866,7 @@ export class CanvasView {
     }
     ctx.restore();
 
-    if (this.selection.size === 1) {
+    if (this.selection.size === 1 && this.selectedRegions.size === 0) {
       const [node] = this.selection;
       if (!this.isNodeVisible(node)) return;
       const handleSize = 8 / this.view.scale;
@@ -1862,20 +1877,27 @@ export class CanvasView {
     }
   }
 
-  // The selected region gets the same dashed outline and corner handles a node does, drawn on its
-  // frame rather than inside it, so the thing under the pointer is the thing that will move.
+  // Every selected region gets the same dashed outline a node does, drawn on its frame rather
+  // than inside it, so the thing under the pointer is the thing that will move. Corner handles
+  // appear only when the region is the sole selection — a mixed selection is not resizable, and
+  // drawing handles it would not answer would lie about what a press can do.
   private drawSelectedRegionDecorations(): void {
-    if (!this.selectedRegion) return;
-    const rect = this.selectedRegionDisplayRect();
-    if (!rect) return;
     const { ctx } = this;
-    ctx.save();
-    ctx.strokeStyle = canvasPalette.select;
-    ctx.lineWidth = 1.4 / this.view.scale;
-    ctx.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
-    ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
-    ctx.restore();
+    for (const context of this.selectedRegions) {
+      const rect = this.selectedRegionDisplayRectOf(context);
+      if (!rect) continue;
+      ctx.save();
+      ctx.strokeStyle = canvasPalette.select;
+      ctx.lineWidth = 1.4 / this.view.scale;
+      ctx.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
+      ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.restore();
+    }
 
+    if (this.selectedRegions.size !== 1 || this.selection.size > 0) return;
+    const [context] = this.selectedRegions;
+    const rect = this.selectedRegionDisplayRectOf(context);
+    if (!rect) return;
     const handleSize = 8 / this.view.scale;
     ctx.fillStyle = canvasPalette.select;
     for (const origin of selectionHandleOrigins(rect, handleSize)) {

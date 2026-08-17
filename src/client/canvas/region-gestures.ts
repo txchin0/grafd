@@ -2,7 +2,7 @@
 // place that owns the grid step; membership diffs stay in flow-doc and are computed at commit.
 
 import type { ContextBlock, FlowNode, Rect } from '../../shared/flow-format.js';
-import type { ModelContext } from '../flow-doc.js';
+import { contextsContainedIn, regionRectOf, type FlowModel, type ModelContext } from '../flow-doc.js';
 import { normalizedRect, type Point } from '../geometry.js';
 import type { ResizeCorner } from './resize-handles.js';
 
@@ -33,24 +33,67 @@ export interface RegionResizeSnapshot {
 
 export type SnapCoord = (value: number) => number;
 
-// The members travel with the frame, so the picture the user grabbed moves as one piece. Only
-// a block that already had a drawn area keeps one: moving a region derived purely from its
-// members must not invent a `pos` the file would then carry forever (R3).
-export function applyRegionMove(gesture: RegionMoveSnapshot, world: Point, snap: SnapCoord): void {
+// The regions a move translates: the selected ones plus, per R28a, every region whose whole
+// frame lay inside a selected region's frame at gesture start. Deduped — a region both selected
+// and contained, or contained by two selected regions, is carried once. The set is frozen here;
+// a region a moving frame merely comes to rest over later is neither carried nor swept.
+export function movingRegionGroupFor(model: FlowModel, selected: readonly ModelContext[]): ModelContext[] {
+  const group = new Set(selected);
+  for (const context of selected) {
+    for (const contained of contextsContainedIn(model, context)) group.add(contained);
+  }
+  return [...group];
+}
+
+// Everything a mixed selection move translates, in one snapshot: the selected nodes and the
+// members the moving regions carry, deduped, with each node's starting position and locus scale
+// (frame members are top-level, so their scale is 1 and a plain region drag divides by nothing),
+// plus the authored `pos` each moving region had — a member-derived region has no entry and
+// must not gain one (R3).
+export interface CombinedMoveSnapshot {
+  startPositions: ReadonlyMap<FlowNode, Point>;
+  scales: ReadonlyMap<FlowNode, number>;
+  movingRegions: readonly ModelContext[];
+  startRects: ReadonlyMap<ContextBlock, Rect>;
+  startWorld: Point;
+  moved: boolean;
+}
+
+export function applyCombinedMove(gesture: CombinedMoveSnapshot, world: Point, snap: SnapCoord): void {
   gesture.moved = true;
   const dx = world.x - gesture.startWorld.x;
   const dy = world.y - gesture.startWorld.y;
-  for (const [member, start] of gesture.startPositions) {
-    member.pos!.x = snap(start.x + dx);
-    member.pos!.y = snap(start.y + dy);
+  for (const [node, start] of gesture.startPositions) {
+    const scale = gesture.scales.get(node) ?? 1;
+    node.pos!.x = snap(start.x + dx / scale);
+    node.pos!.y = snap(start.y + dy / scale);
   }
-  // The frames travel with the members they enclose: the dragged one and every carried one are
-  // translated by the same delta, or a carried region's members would slide out from under it
-  // (R28a).
+  // Only blocks that already had a drawn area keep one (R3); carried pos-free regions follow
+  // their members, which travel above.
   for (const [block, start] of gesture.startRects) {
     block.pos!.x = snap(start.x + dx);
     block.pos!.y = snap(start.y + dy);
   }
+}
+
+export function rollbackCombinedMove(gesture: CombinedMoveSnapshot): void {
+  for (const [node, start] of gesture.startPositions) Object.assign(node.pos!, start);
+  for (const [block, start] of gesture.startRects) Object.assign(block.pos!, start);
+}
+
+// The members travel with the frame, so the picture the user grabbed moves as one piece. Only
+// a block that already had a drawn area keeps one: moving a region derived purely from its
+// members must not invent a `pos` the file would then carry forever (R3).
+export function applyRegionMove(gesture: RegionMoveSnapshot, world: Point, snap: SnapCoord): void {
+  applyCombinedMove({
+    startPositions: gesture.startPositions,
+    scales: new Map([...gesture.startPositions.keys()].map((node) => [node, 1])),
+    movingRegions: [gesture.context, ...gesture.carriedContexts],
+    startRects: gesture.startRects,
+    startWorld: gesture.startWorld,
+    moved: gesture.moved,
+  }, world, snap);
+  gesture.moved = true;
 }
 
 // No minimum size: a region is an area the user reserved, and nothing about it needs to stay
@@ -72,8 +115,14 @@ export function applyRegionResize(gesture: RegionResizeSnapshot, world: Point, s
 }
 
 export function rollbackRegionMove(gesture: RegionMoveSnapshot): void {
-  for (const [member, start] of gesture.startPositions) Object.assign(member.pos!, start);
-  for (const [block, start] of gesture.startRects) Object.assign(block.pos!, start);
+  rollbackCombinedMove({
+    startPositions: gesture.startPositions,
+    scales: new Map(),
+    movingRegions: [gesture.context, ...gesture.carriedContexts],
+    startRects: gesture.startRects,
+    startWorld: gesture.startWorld,
+    moved: gesture.moved,
+  });
 }
 
 export function rollbackRegionResize(gesture: RegionResizeSnapshot): void {
@@ -97,6 +146,21 @@ export function regionRectsWithDrawnResize(
   const drawn = resizing.block.pos;
   if (!drawn) return frozenRects;
   return new Map([...frozenRects, [resizing.block, { ...drawn }]]);
+}
+
+// Paint a mixed move: stationary regions keep the frozen frame the user aimed at (R13, R18),
+// while every moving region draws its live frame so the outline tracks the drag.
+export function regionRectsWithDrawnMove(
+  moving: readonly ModelContext[],
+  model: FlowModel,
+  frozenRects: ReadonlyMap<ContextBlock, Rect>,
+): ReadonlyMap<ContextBlock, Rect> {
+  const painted = new Map(frozenRects);
+  for (const context of moving) {
+    const rect = regionRectOf(model, context);
+    if (rect) painted.set(context.block, rect);
+  }
+  return painted;
 }
 
 /** Nodes whose display rect is fully enclosed by `rect` — membership for a freshly drawn region. */

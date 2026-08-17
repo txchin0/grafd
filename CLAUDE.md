@@ -102,7 +102,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   - `canvas-view.ts` — the interactive surface: camera, tool modes, hit-testing, pointer
     gestures (drag-create, move, resize, port-drag edge creation, marquee), subgraph camera
     animations, and the editing chrome (selection outlines, ports, marquee, in-flight edge).
-    Owns the edge-geometry map that hit-testing reads.
+    Owns the edge-geometry map that hit-testing reads. Nodes and regions share one selection:
+    shift-click and marquee multi-select both kinds, a mixed selection moves as one gesture,
+    and resize handles appear only for a lone node or lone region.
   - `scene-painter.ts` — draws a `FlowModel` in that model's own coordinates. Knows nothing
     about the camera, viewport, selection rectangle or gestures. Built fresh per render pass
     from explicit inputs, which is how an export renders the same scene with different
@@ -116,8 +118,10 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   - `node-badges.ts` — where the expand/collapse affordances sit and what they show. The
     contract between painting and hit-testing, so neither owns it.
   - `region-hit-test.ts` / `region-gestures.ts` / `resize-handles.ts` — what a press lands on in
-    a context region (border band and name label only — the interior belongs to the marquee) and
-    the move/resize math once it has. Pure, so the view stays the only thing holding a gesture.
+    a context region (border band and name label only — the interior belongs to the marquee), the
+    move/resize math once it has (including the combined node+region move a mixed selection
+    drags), and the corner handles both kinds of selection resize by. Pure, so the view stays the
+    only thing holding a gesture.
   - `wheel-intent.ts` — whether a wheel event means zoom or pan. A touchpad two-finger swipe
     and a mouse-wheel notch arrive as the same event, so the device is inferred from the delta
     shape and latched for the rest of a streak; ctrl+wheel (what a touchpad pinch sends) is

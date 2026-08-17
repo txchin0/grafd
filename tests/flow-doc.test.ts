@@ -32,6 +32,7 @@ import {
   deleteContextBlock,
   deleteEdge,
   deleteNodes,
+  duplicateContextBlocks,
   duplicateNodes,
   edgeSupportsData,
   ensureScopeItems,
@@ -42,6 +43,7 @@ import {
   findNodeById,
   graphBlockNames,
   hostsOfExpansion,
+  membershipChangesForCombinedMove,
   membershipChangesForNewNode,
   membershipChangesForRegionMove,
   nodesIn,
@@ -2135,5 +2137,164 @@ graph: Inner
 
   it('returns nothing for an empty selection', () => {
     expect(groupNodesByOwner([], ownerOf)).toEqual([]);
+  });
+});
+
+const COMBINED_MOVE = `---
+name: Combined
+---
+
+context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+    - Inside
+
+context: Other
+  pos: 900, 0, 400, 300
+  nodes:
+    - Wanderer
+
+Inside
+  id: in-1
+  pos: 200, 200, 200, 88
+
+Wanderer
+  id: w-1
+  pos: 1000, 100, 200, 88
+
+Loose
+  id: l-1
+  pos: 1500, 400, 200, 88
+`;
+
+function combinedModel() {
+  const doc = docFrom(COMBINED_MOVE);
+  return { doc, model: buildModel(doc, null) };
+}
+
+function frozenRectsOf(model: ReturnType<typeof buildModel>) {
+  return new Map(model.contexts.map((context) => [context.block, regionRectOf(model, context)!]));
+}
+
+describe('membershipChangesForCombinedMove', () => {
+  it('sweeps non-members a moved region comes to rest over (R29)', () => {
+    const { model } = combinedModel();
+    const zone = model.contexts.find((context) => context.block.name === 'Zone')!;
+    const loose = model.nodes.find((node) => node.name === 'Loose')!;
+    const frozen = frozenRectsOf(model);
+    // Move Zone over Loose without moving it.
+    zone.block.pos = { x: 900, y: 300, w: 800, h: 600 };
+    const changes = membershipChangesForCombinedMove(model, [zone], [], frozen);
+    expect(changes).toContainEqual({ block: zone.block, node: loose, joins: true });
+  });
+
+  it('gives a free selected node the full frozen-frame R13 test, including removal', () => {
+    const { model } = combinedModel();
+    const other = model.contexts.find((context) => context.block.name === 'Other')!;
+    const wanderer = model.nodes.find((node) => node.name === 'Wanderer')!;
+    const frozen = frozenRectsOf(model);
+    // The node travelled out of the stationary frame.
+    wanderer.pos = { x: 1800, y: 700, w: 200, h: 88 };
+    const changes = membershipChangesForCombinedMove(model, [], [wanderer], frozen);
+    expect(changes).toEqual([{ block: other.block, node: wanderer, joins: false }]);
+  });
+
+  it('treats a selected member of a moved region as carried, never removable from a stationary region', () => {
+    const doc = docFrom(`---
+name: Combined
+---
+
+context: Zone
+  pos: 0, 0, 800, 600
+  nodes:
+    - Inside
+    - Wanderer
+
+context: Other
+  pos: 900, 0, 400, 300
+  nodes:
+    - Wanderer
+
+Inside
+  id: in-1
+  pos: 200, 200, 200, 88
+
+Wanderer
+  id: w-1
+  pos: 1000, 100, 200, 88
+`);
+    const model = buildModel(doc, null);
+    const zone = model.contexts.find((context) => context.block.name === 'Zone')!;
+    const other = model.contexts.find((context) => context.block.name === 'Other')!;
+    const wanderer = model.nodes.find((node) => node.name === 'Wanderer')!;
+    // Wanderer is selected AND a member of the moving Zone, so the move carries it: it keeps its
+    // stationary membership in Other even though the selection also moved it.
+    const frozen = frozenRectsOf(model);
+    zone.block.pos = { x: 400, y: 400, w: 800, h: 600 };
+    wanderer.pos = { x: 1400, y: 500, w: 200, h: 88 };
+    const changes = membershipChangesForCombinedMove(model, [zone], [wanderer], frozen);
+    expect(changes.filter((change) => change.block === other.block && change.joins === false)).toEqual([]);
+  });
+});
+
+describe('duplicateContextBlocks', () => {
+  const BASE = `---
+name: Base
+---
+
+context: Auth
+  pos: 0, 0, 200, 120
+  nodes:
+    - Login
+
+context: Cart
+  nodes:
+    - Login
+
+Login
+  id: l-1
+  pos: 40, 40, 120, 64
+`;
+
+  it('renames the copy uniquely and remaps members that were duplicated alongside', () => {
+    const doc = docFrom(BASE);
+    const renamed = new Map([['Login', 'Login 2']]);
+    const copies = duplicateContextBlocks(doc.items, [contextBlockNamed(doc, 'Auth')!], { x: 24, y: 24 }, renamed, []);
+    expect(copies).toHaveLength(1);
+    expect(copies[0].name).toBe('Auth 2');
+    expect(copies[0].pos).toEqual({ x: 24, y: 24, w: 200, h: 120 });
+    expect(copies[0].members).toEqual(['Login 2']);
+    expect(contextBlockNamed(doc, 'Auth 2')).toBe(copies[0]);
+  });
+
+  it('drops members that were not duplicated', () => {
+    const doc = docFrom(BASE);
+    const copies = duplicateContextBlocks(doc.items, [contextBlockNamed(doc, 'Cart')!], { x: 0, y: 0 }, new Map(), []);
+    expect(copies[0].members).toEqual([]);
+    expect(copies[0].pos).toBeNull();
+  });
+
+  it('avoids a name the file already inherits (R11)', () => {
+    const sourceDoc = docFrom(`---
+name: Other
+---
+
+context: Session
+  nodes:
+`);
+    const source = contextBlockNamed(sourceDoc, 'Session')!;
+    const target = docFrom(`---
+name: Base
+inherits: [Session]
+---
+`);
+    const copies = duplicateContextBlocks(
+      target.items,
+      [source],
+      { x: 0, y: 0 },
+      new Map(),
+      inheritedContextNames(target),
+    );
+    expect(copies[0].name).toBe('Session 2');
   });
 });

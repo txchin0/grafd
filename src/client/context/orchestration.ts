@@ -65,6 +65,13 @@ export interface ContextOrchestration {
   groupSelectionIntoContext(): void;
   renameRegion(region: RegionTarget, requestedName: string): { rejected: string } | null;
   deleteRegion(region: RegionTarget): void;
+  // The multi-region half of a mixed selection delete: `deleteRegions` owns its action, and
+  // `writeRegionDeletions` runs inside an action the caller opened, so deleting nodes and
+  // regions together lands as one undo step. Neither asks for confirmation — that is
+  // `confirmRegionDeletions`, which menu paths call first.
+  deleteRegions(regions: RegionTarget[]): void;
+  writeRegionDeletions(regions: RegionTarget[]): void;
+  confirmRegionDeletions(regions: RegionTarget[], at: Point, proceed: () => void): void;
   readableContexts(node: FlowNode): { name: string; inherited: boolean }[];
   regionMenuItems(region: RegionTarget, at: Point): MenuItem[];
   syncInheritsForMembers(owner: DocumentOwner, memberNames: Iterable<string>): void;
@@ -171,16 +178,43 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
   // happened to be listed by it (R32). The `updates:` claims that named it go with it, since a
   // provider nobody declares can be read by nobody (R33, R40c).
   function deleteRegion(region: RegionTarget): void {
-    const owner = ownerOfRegion(region);
-    const orphanedMembers = [...region.block.members];
+    deleteRegions([region]);
+  }
+
+  function deleteRegions(regions: RegionTarget[]): void {
     options.clearSelection();
-    options.runAction(() => {
+    options.runAction(() => writeRegionDeletions(regions));
+  }
+
+  function writeRegionDeletions(regions: RegionTarget[]): void {
+    for (const region of regions) {
+      const owner = ownerOfRegion(region);
+      const orphanedMembers = [...region.block.members];
       options.applyToDoc(owner, () => {
         FlowDoc.deleteContextBlock(owner.doc.items, region.block);
         FlowDoc.removeUnreadableUpdates(owner.doc);
       }, { commit: 'now' });
       syncMembers(owner, orphanedMembers);
-    });
+    }
+  }
+
+  // Every member declaring `updates:` on one of these providers is about to lose that claim — the
+  // deletion strips it — so the user is told what the delete will remove before it happens (R33).
+  function confirmRegionDeletions(regions: RegionTarget[], at: Point, proceed: () => void): void {
+    const writers = regions.flatMap((region) => membersUpdatingRegion(region));
+    if (writers.length === 0) {
+      proceed();
+      return;
+    }
+    const names = regions.map((region) => region.block.name);
+    options.openConfirmMenu([
+      {
+        label: `${writers.join(', ')} updates ${names.join(', ')} — deleting removes those updates.`,
+        danger: true,
+        onSelect: proceed,
+      },
+      { label: 'Cancel', onSelect: () => {} },
+    ], at);
   }
 
   // What the node editor shows and what its `updates` field accepts: the regions listing this
@@ -203,21 +237,10 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
   }
 
   function deleteRegionMenuItems(region: RegionTarget, at: Point): MenuItem[] {
-    const writers = membersUpdatingRegion(region);
-    if (writers.length === 0) {
-      return [{ label: 'Delete region (keeps its nodes)', danger: true, onSelect: () => deleteRegion(region) }];
-    }
     return [{
       label: 'Delete region (keeps its nodes)',
       danger: true,
-      onSelect: () => options.openConfirmMenu([
-        {
-          label: `${writers.join(', ')} updates ${region.block.name} — deleting removes those updates.`,
-          danger: true,
-          onSelect: () => deleteRegion(region),
-        },
-        { label: 'Cancel', onSelect: () => {} },
-      ], at),
+      onSelect: () => confirmRegionDeletions([region], at, () => deleteRegion(region)),
     }];
   }
 
@@ -228,6 +251,9 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     groupSelectionIntoContext,
     renameRegion,
     deleteRegion,
+    deleteRegions,
+    writeRegionDeletions,
+    confirmRegionDeletions,
     readableContexts,
     regionMenuItems,
     syncInheritsForMembers: syncMembers,
