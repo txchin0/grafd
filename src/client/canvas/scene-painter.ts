@@ -47,7 +47,7 @@ type RoughCanvas = ReturnType<typeof rough.canvas>;
 // the whole canvas without flattening the differences between them.
 const NODE_ROUGHNESS = 1.4;
 const FRAME_ROUGHNESS = 1.1;
-const EDGE_ROUGHNESS = 1.1;
+const EDGE_ROUGHNESS = 0.6;
 const BADGE_ROUGHNESS = 0.9;
 const REGION_ROUGHNESS = 0.7;
 
