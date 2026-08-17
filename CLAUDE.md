@@ -152,8 +152,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   member's expansion (`inherits.ts`), and the workspace-wide rename a provider's name forces
   (`workspace-rename.ts`). Regions are specified in `docs/context-ui.md`.
 - `src/client/editors.ts` — floating DOM overlays for node, edge and region editing.
-- `src/client/reference-rows.ts` / `reference-link.ts` — the editable `references:` list shared by
-  the node editor and the graph panel, plus target classification (URL vs project-root-relative
+- `src/client/reference-rows.ts` / `reference-link.ts` — the `references:` list shared by the
+  node editor, region editor and graph panel (one field: view as a labelled link, edit as the
+  markdown/target the file stores), plus target classification (URL vs project-root-relative
   path with an optional line range) and the editor deep link it opens.
 - `src/client/modal.ts` — the scrim/panel shell shared by the full-screen dialogs
   (`screenshot.ts`, `preferences-dialog.ts`).
