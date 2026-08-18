@@ -9,6 +9,7 @@ import {
   parseEdgeExpression,
   parseListValue,
   serializeFlow,
+  type FlowDocument,
   type FlowNode,
   type GraphItem,
 } from '../src/shared/flow-format.js';
@@ -361,10 +362,46 @@ graph: Sub
     expect(buildModel(doc, null).contexts[0].members.map((node) => node.name)).toEqual(['A']);
   });
 
-  // A `graph:` block has no body of its own, so it declares no regions (spec §8.2).
-  it('carries no regions in a model scoped to a graph block', () => {
+  // A `graph:` block without its own `context:` items has no regions, even when the file body does.
+  it('carries no regions in a model scoped to a graph block that declares none', () => {
     const doc = docFrom(MEMBERSHIP);
     expect(buildModel(doc, 'Sub').contexts).toEqual([]);
+  });
+
+  it('carries nested context blocks in a model scoped to a graph block', () => {
+    const doc = docFrom(`Host
+  expand: Sub
+
+graph: Sub
+  context: Dialog
+    nodes:
+      - Inner
+
+  Inner
+`);
+    const model = buildModel(doc, 'Sub');
+    expect(model.contexts).toHaveLength(1);
+    expect(model.contexts[0].block.name).toBe('Dialog');
+    expect(model.contexts[0].members.map((node) => node.name)).toEqual(['Inner']);
+    expect(model.traits.get(model.nodes[0])).toMatchObject({ contexts: ['Dialog'] });
+  });
+
+  it('inserts a nested context before the graph\'s nodes', () => {
+    const doc = docFrom('graph: Sub\n  A\n');
+    const graph = doc.items[0] as GraphItem;
+    addContextBlock(graph.items, 'Auth', null, ['A'], [], 'before-nodes');
+    expect(graph.items[0].kind).toBe('context');
+    expect((graph.items[1] as { kind: string }).kind).toBe('node');
+  });
+
+  it('makes a new block name unique against nested blocks in the file', () => {
+    const doc = docFrom(`graph: Sub
+  context: Auth
+    nodes:
+
+  A
+`);
+    expect(addContextBlock(doc.items, 'Auth', null, [], ['Auth']).name).toBe('Auth 2');
   });
 
   it('deletes a block without touching its members', () => {
@@ -386,8 +423,8 @@ graph: Sub
     expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['A']);
   });
 
-  // Only nodes at column 0 can be members, so a same-named node inside a `graph:` block is not
-  // the member the list refers to.
+  // Only nodes at column 0 can be members of a file-body block, so a same-named node inside a
+  // `graph:` block is not the member the list refers to.
   it('ignores renames and deletions inside a graph block', () => {
     const doc = docFrom(MEMBERSHIP);
     const block = doc.items.find((item): item is GraphItem => item.kind === 'graph')!;
@@ -395,6 +432,19 @@ graph: Sub
     expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['A', 'B']);
     deleteNodes(block.items, nodesIn(block.items), doc);
     expect(contextBlockNamed(doc, 'Auth')!.members).toEqual(['A', 'B']);
+  });
+
+  it('follows a renamed member of a nested context', () => {
+    const doc = docFrom(`graph: Sub
+  context: Dialog
+    nodes:
+      - Inner
+
+  Inner
+`);
+    const graph = doc.items[0] as GraphItem;
+    renameNode(graph.items, nodesIn(graph.items)[0], 'Start', doc);
+    expect(contextBlockNamed(doc, 'Dialog')!.members).toEqual(['Start']);
   });
 });
 
@@ -489,16 +539,24 @@ A
 B
 `;
 
+  const nodeOf = (doc: FlowDocument, name: string, scope: string | null = null): FlowNode => {
+    const items = scope == null ? doc.items : scopeItems(doc, scope);
+    return nodesIn(items).find((node) => node.name === name)!;
+  };
+
   it('unions the blocks listing the node with what the file inherits', () => {
     const doc = docFrom(DOC);
-    expect(contextNamesReadableBy(doc, 'A')).toEqual(['Billing', 'Session']);
-    expect(contextNamesReadableBy(doc, 'B')).toEqual(['Billing', 'Cart']);
+    expect(contextNamesReadableBy(doc, nodeOf(doc, 'A'))).toEqual(['Billing', 'Session']);
+    expect(contextNamesReadableBy(doc, nodeOf(doc, 'B'))).toEqual(['Billing', 'Cart']);
   });
 
   // An inherited provider is graph-wide, so a node in no block still reads it.
   it('gives a node in no block whatever the file inherits', () => {
-    expect(contextNamesReadableBy(docFrom(DOC), 'Nobody')).toEqual(['Billing']);
-    expect(contextNamesReadableBy(docFrom('context: Session\n  nodes:\n\nA\n'), 'A')).toEqual([]);
+    // A node that is not in the document at all (a detached object, or a dangling member name)
+    // still falls back to the inherited providers.
+    expect(contextNamesReadableBy(docFrom(DOC), emptyNode('Nobody'))).toEqual(['Billing']);
+    const doc = docFrom('context: Session\n  nodes:\n\nA\n');
+    expect(contextNamesReadableBy(doc, nodeOf(doc, 'A'))).toEqual([]);
   });
 
   it('gives a node inside a graph block what its host can read', () => {
@@ -512,7 +570,60 @@ Host
 graph: Steps
   Worker
 `);
-    expect(contextNamesReadableBy(doc, 'Worker')).toEqual(['Auth']);
+    expect(contextNamesReadableBy(doc, nodeOf(doc, 'Worker', 'Steps'))).toEqual(['Auth']);
+  });
+
+  it('gives a nested node the contexts its graph block declares', () => {
+    const doc = docFrom(`Host
+  expand: Steps
+
+graph: Steps
+  context: Dialog
+    nodes:
+      - Worker
+
+  Worker
+`);
+    expect(contextNamesReadableBy(doc, nodeOf(doc, 'Worker', 'Steps'))).toEqual(['Dialog']);
+  });
+
+  it('unions host-inherited providers with nested membership', () => {
+    const doc = docFrom(`context: Auth
+  nodes:
+    - Host
+
+Host
+  expand: Steps
+
+graph: Steps
+  context: Dialog
+    nodes:
+      - Worker
+
+  Worker
+`);
+    expect(contextNamesReadableBy(doc, nodeOf(doc, 'Worker', 'Steps'))).toEqual(['Auth', 'Dialog']);
+  });
+
+  // Names are unique only within a scope, so a same-named node elsewhere in the file must not
+  // borrow or steal this node's readable set (R4-style identity, matching the linter's map).
+  it('keeps a file-body node and a same-named graph node reading their own scopes', () => {
+    const doc = docFrom(`context: Auth
+  nodes:
+    - Worker
+
+Worker
+  expand: Steps
+
+graph: Steps
+  context: Dialog
+    nodes:
+      - Worker
+
+  Worker
+`);
+    expect(contextNamesReadableBy(doc, nodeOf(doc, 'Worker'))).toEqual(['Auth']);
+    expect(contextNamesReadableBy(doc, nodeOf(doc, 'Worker', 'Steps'))).toEqual(['Auth', 'Dialog']);
   });
 
   it('does not grant a nested node a region its host is not a member of', () => {
@@ -526,7 +637,7 @@ Host
 graph: Steps
   Worker
 `);
-    expect(contextNamesReadableBy(doc, 'Worker')).toEqual([]);
+    expect(contextNamesReadableBy(doc, nodeOf(doc, 'Worker', 'Steps'))).toEqual([]);
   });
 
   it('reads the preamble list the editor generates', () => {
@@ -1872,6 +1983,24 @@ graph: Payment Steps
     expect(graphBlockNames(doc)).toEqual([]);
     const host = allNodes(doc).find((node) => node.name === 'Host')!;
     expect(getProp(host, 'expand')).toBe('[Payment Steps](payment-steps.flow)');
+  });
+
+  it('carries nested context blocks into the new document as body-level items', () => {
+    const doc = docFrom(`Host
+  ${PLACED(0, 0)}
+  expand: Payment Steps
+
+graph: Payment Steps
+  context: Payment Session
+    nodes:
+      - Charge Card
+
+  Charge Card
+    ${PLACED(0, 0)}
+`);
+    const extracted = extractGraphBlockToDocument(doc, 'Payment Steps', 'payment-steps.flow');
+    expect(contextBlockNamed(extracted, 'Payment Session')?.members).toEqual(['Charge Card']);
+    expect(extracted.items[0].kind).toBe('context');
   });
 
   it('relinks every node that referenced the block', () => {

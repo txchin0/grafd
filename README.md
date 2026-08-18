@@ -164,7 +164,7 @@ directory, so it is safe to run while a dev server is live.
 
 ## The `.flow` format
 
-- [FLOW-SPEC.md](FLOW-SPEC.md) — the format specification (currently `flow/1.5`, draft).
+- [FLOW-SPEC.md](FLOW-SPEC.md) — the format specification (currently `flow/1.6`, draft).
 - [SAVE-GUIDE.md](SAVE-GUIDE.md) — the guide embedded in every exported workspace that
 tells AI agents how to parse, interpret, and edit `.flow` files.
 - `grafd.manifest.json` — editor-owned workspace state: the entrypoint flow, the format

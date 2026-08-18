@@ -12,7 +12,7 @@
 
 // The version of the .flow format this code implements (FLOW-SPEC.md revision history). A
 // workspace declares which version applies to it in grafd.manifest.json's `flowVersion`.
-export const FLOW_FORMAT_VERSION = 'flow/1.5';
+export const FLOW_FORMAT_VERSION = 'flow/1.6';
 
 export interface Rect {
   x: number;
@@ -216,7 +216,7 @@ function parseItems(lines: string[], start: number, baseIndent: number): { items
         index = graphBody.next;
         continue;
       }
-      const contextMatch = baseIndent === 0 ? line.match(CONTEXT_HEADER) : null;
+      const contextMatch = line.match(CONTEXT_HEADER);
       currentOwner = contextMatch
         ? { kind: 'context', block: emptyContextBlock(contextMatch[1].trim()) }
         : { kind: 'node', node: emptyNode(trimmed) };

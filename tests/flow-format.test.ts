@@ -318,9 +318,26 @@ describe('context blocks', () => {
     expect(serializeFlow(doc)).toBe('context: Auth\n  nodes:\n    - Show Login\n');
   });
 
-  it('leaves a nested context header as an ordinary node, as the parser sees it', () => {
-    const doc = parseFlow('graph: Details\n  context: Auth\n');
-    expect(((doc.items[0] as GraphItem).items[0] as NodeItem).node.name).toBe('context: Auth');
+  it('parses a context block nested in a graph block', () => {
+    const doc = parseFlow(`graph: Details
+  context: Auth
+    nodes:
+      - Inner
+
+  Inner
+`);
+    const graph = doc.items[0] as GraphItem;
+    const block = (graph.items[0] as ContextItem).block;
+    expect(block.name).toBe('Auth');
+    expect(block.members).toEqual(['Inner']);
+    expect((graph.items[1] as NodeItem).node.name).toBe('Inner');
+    expect(serializeFlow(doc)).toBe(`graph: Details
+  context: Auth
+    nodes:
+      - Inner
+
+  Inner
+`);
   });
 });
 

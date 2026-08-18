@@ -4,10 +4,8 @@
 // `graph:` scope they came from, so paste can route back into the .flow file that owns them —
 // which for nodes selected inside an inline-expanded frame is not the open file. Cloning at
 // copy time means later edits to (or deletion of) the originals never disturb a later paste.
-//
-// Regions ride the same groups but live only at the top level: a region belongs to the body of
-// the document that declares it, so a paste whose target resolves to a `graph:` scope drops the
-// regions rather than writing a block the format forbids (R5/R45).
+// Regions ride the same groups: a region belongs to the graph scope that declares it, so a
+// paste whose target is a `graph:` block writes the block into that scope.
 
 import type { ContextBlock, FlowNode, Rect } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
@@ -73,7 +71,8 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
     }
     for (const region of selectedRegions) {
       const owner = options.ownerOfRegion(region);
-      groupFor(byScope, owner.path, null).regions.push(structuredClone(region.block));
+      const scope = FlowDoc.containingGraphBlockNameForContext(owner.doc, region.block);
+      groupFor(byScope, owner.path, scope).regions.push(structuredClone(region.block));
     }
     groups = [...byScope.values()].map((group) => ({
       path: group.path,
@@ -124,12 +123,16 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
     for (const region of regions) {
       const owner = options.ownerOfRegion(region);
       options.applyToDoc(owner, () => {
+        const items = FlowDoc.containingItemsForContext(owner.doc, region.block);
+        const nested = items !== owner.doc.items;
         regionCopies.push(...FlowDoc.duplicateContextBlocks(
-          owner.doc.items,
+          items,
           [region.block],
           offset,
           renamedByPath.get(owner.path) ?? new Map(),
           FlowDoc.inheritedContextNames(owner.doc),
+          FlowDoc.allContextBlocks(owner.doc).map((block) => block.name),
+          nested ? 'before-nodes' : 'end',
         ));
       });
     }
@@ -171,16 +174,16 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
       options.applyToDoc(owner, () => {
         const copies = FlowDoc.duplicateNodes(items, group.nodes, offset);
         pastedNodes.push(...copies);
-        // Regions are body-level blocks: they paste only when the container is the document
-        // body, so a fallback into an open `graph:` scope never gains one.
-        if (items !== owner.doc.items) return;
         const renamedMembers = new Map(group.nodes.map((source, index) => [source.name, copies[index].name]));
+        const nested = items !== owner.doc.items;
         pastedRegions.push(...FlowDoc.duplicateContextBlocks(
           items,
           group.regions,
           offset,
           renamedMembers,
           FlowDoc.inheritedContextNames(owner.doc),
+          FlowDoc.allContextBlocks(owner.doc).map((block) => block.name),
+          nested ? 'before-nodes' : 'end',
         ));
       });
     }

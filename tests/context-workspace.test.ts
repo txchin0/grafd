@@ -9,6 +9,8 @@ import {
   parseFlow,
   parseListValue,
   type FlowDocument,
+  type FlowNode,
+  type GraphItem,
 } from '../src/shared/flow-format.js';
 import * as FlowDoc from '../src/client/flow-doc.js';
 import type { DocumentOwner } from '../src/client/canvas/expansion.js';
@@ -18,6 +20,7 @@ import type { Point } from '../src/client/geometry.js';
 import type { RegionTarget } from '../src/client/canvas/canvas-view.js';
 import {
   createContextOrchestration,
+  membersUpdatingRegion,
   readableContextsForChildPath,
   renameContextAcrossWorkspace,
   syncInheritsForMember,
@@ -49,6 +52,10 @@ function inheritsOf(doc: FlowDocument): string[] {
 function updatesOf(doc: FlowDocument, nodeName: string): string[] {
   const node = FlowDoc.nodesIn(doc.items).find((candidate) => candidate.name === nodeName)!;
   return parseListValue(getProp(node, 'updates'));
+}
+
+function nodeNamed(doc: FlowDocument, name: string): FlowNode {
+  return FlowDoc.allNodes(doc).find((node) => node.name === name)!;
 }
 
 describe('renameContextAcrossWorkspace', () => {
@@ -193,7 +200,7 @@ Validate
       applyToDoc: (_entry, mutation) => { mutation(); },
     };
 
-    await syncInheritsForMember(deps, parent, 'Login Host');
+    await syncInheritsForMember(deps, parent, nodeNamed(parent.doc, 'Login Host'));
     expect(inheritsOf(child.doc).sort()).toEqual(['Auth', 'Cart']);
   });
 
@@ -226,7 +233,7 @@ Validate
       applyToDoc: vi.fn((_entry, mutation) => { mutation(); }),
     };
 
-    await syncInheritsForMember(deps, parent, 'Login Host');
+    await syncInheritsForMember(deps, parent, nodeNamed(parent.doc, 'Login Host'));
     expect(deps.applyToDoc).not.toHaveBeenCalled();
     expect(getPreambleField(child.doc, 'inherits')).toBeNull();
   });
@@ -253,7 +260,7 @@ Validate
       applyToDoc: (_entry, mutation) => { mutation(); },
     };
 
-    await syncInheritsForMember(deps, parent, 'Login Host');
+    await syncInheritsForMember(deps, parent, nodeNamed(parent.doc, 'Login Host'));
     expect(getPreambleField(child.doc, 'inherits')).toBeNull();
   });
 
@@ -287,7 +294,7 @@ Checkout
       applyToDoc: (_entry, mutation) => { mutation(); },
     };
 
-    await syncInheritsForMember(deps, parent, 'Login Host');
+    await syncInheritsForMember(deps, parent, nodeNamed(parent.doc, 'Login Host'));
     expect(inheritsOf(child.doc)).toEqual(['Cart']);
     expect(updatesOf(child.doc, 'Validate')).toEqual(['Cart']);
     expect(updatesOf(child.doc, 'Checkout')).toEqual([]);
@@ -332,7 +339,7 @@ Leaf Worker
       applyToDoc: (_entry, mutation) => { mutation(); },
     };
 
-    await syncInheritsForMember(deps, root, 'Child Host');
+    await syncInheritsForMember(deps, root, nodeNamed(root.doc, 'Child Host'));
     expect(getPreambleField(child.doc, 'inherits')).toBeNull();
     expect(updatesOf(child.doc, 'Child Worker')).toEqual([]);
     expect(getPreambleField(grandchild.doc, 'inherits')).toBeNull();
@@ -379,10 +386,117 @@ Leaf Worker
       applyToDoc: (_entry, mutation) => { mutation(); },
     };
 
-    await syncInheritsForMember(deps, root, 'Child Host');
+    await syncInheritsForMember(deps, root, nodeNamed(root.doc, 'Child Host'));
     expect(getPreambleField(child.doc, 'inherits')).toBeNull();
     expect(getPreambleField(grandchild.doc, 'inherits')).toBeNull();
     expect(updatesOf(grandchild.doc, 'Leaf Worker')).toEqual([]);
+  });
+
+  it('writes a nested region provider into its member\'s external expansion', async () => {
+    const parent = owner('main.flow', `---
+name: Main
+---
+
+Host
+  expand: Steps
+
+graph: Steps
+  context: Dialog
+    nodes:
+      - Worker
+
+  Worker
+    expand: [Child](child.flow)
+`);
+    const child = owner('child.flow', `---
+name: Child
+---
+
+Validate
+`);
+    const docs = new Map<string, FlowDocument>([
+      [parent.path, parent.doc],
+      [child.path, child.doc],
+    ]);
+    const deps: InheritsSyncDeps = {
+      suspendAction: liveContinuation,
+      expandTargetDoc: (path) => docs.get(path) ?? null,
+      ensureDocument: async (path) => docs.get(path) ?? null,
+      applyToDoc: (_entry, mutation) => { mutation(); },
+    };
+    const graph = parent.doc.items.find((item): item is GraphItem => item.kind === 'graph')!;
+    const worker = FlowDoc.nodesIn(graph.items).find((node) => node.name === 'Worker')!;
+
+    await syncInheritsForMember(deps, parent, worker);
+    expect(inheritsOf(child.doc)).toEqual(['Dialog']);
+  });
+
+  it('resolves nested members before deleting a region so their expansions lose the provider', async () => {
+    const parent = owner('main.flow', `---
+name: Main
+---
+
+Host
+  expand: Steps
+
+graph: Steps
+  context: Dialog
+    nodes:
+      - Worker
+
+  Worker
+    expand: [Child](child.flow)
+`);
+    const child = owner('child.flow', `---
+name: Child
+inherits: [Dialog]
+---
+
+Validate
+  updates: Dialog
+`);
+    const docs = new Map<string, FlowDocument>([
+      [parent.path, parent.doc],
+      [child.path, child.doc],
+    ]);
+    const inherits: InheritsSyncDeps = {
+      suspendAction: liveContinuation,
+      expandTargetDoc: (path) => docs.get(path) ?? null,
+      ensureDocument: async (path) => docs.get(path) ?? null,
+      applyToDoc: (_entry, mutation) => { mutation(); },
+    };
+    const options: ContextOrchestrationOptions = {
+      openFlowDoc: () => ({ doc: parent.doc, path: parent.path }),
+      ownerOf: () => parent,
+      creationTargetFor: () => null,
+      extractionTargetForSelection: () => null,
+      applyToDoc: (_entry, mutation) => { mutation(); },
+      runAction: (body) => body(),
+      suspendAction: liveContinuation,
+      selectRegion: () => {},
+      clearSelection: () => {},
+      openRegionNameEditor: () => {},
+      openRegionEditor: () => {},
+      openConfirmMenu: () => {},
+      inherits,
+      workspaceRename: {
+        suspendAction: liveContinuation,
+        loadEveryWorkspaceDocument: async () => {},
+        knownDocuments: () => [],
+        applyToDoc: (_entry, mutation) => { mutation(); },
+      },
+    };
+    const ops = createContextOrchestration(options);
+    const region: RegionTarget = {
+      block: FlowDoc.contextBlockNamed(parent.doc, 'Dialog')!,
+      doc: parent.doc,
+      path: parent.path,
+    };
+
+    ops.deleteRegions([region]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(getPreambleField(child.doc, 'inherits')).toBeNull();
+    expect(updatesOf(child.doc, 'Validate')).toEqual([]);
   });
 
   it('terminates when expansions form a cycle', async () => {
@@ -416,7 +530,7 @@ B Host
       applyToDoc: (_entry, mutation) => { mutation(); },
     };
 
-    await syncInheritsForMember(deps, root, 'A Host');
+    await syncInheritsForMember(deps, root, nodeNamed(root.doc, 'A Host'));
     expect(inheritsOf(child.doc)).toEqual(['Cart']);
     expect(getPreambleField(root.doc, 'inherits')).toBeNull();
   });
@@ -561,6 +675,29 @@ describe('multi-region deletion', () => {
     const login = FlowDoc.nodesIn(doc.items).find((node) => node.name === 'Login')!;
     expect(parseListValue(getProp(login, 'updates'))).toEqual([]);
     expect(FlowDoc.nodesIn(doc.items).map((node) => node.name)).toEqual(['Login', 'Checkout']);
+  });
+
+  it('attributes updates claims to the member in the block\'s own scope', () => {
+    const doc = owner('main.flow', `context: Auth
+  nodes:
+    - Worker
+
+Worker
+
+graph: Steps
+  context: Dialog
+    nodes:
+      - Worker
+
+  Worker
+    updates: [Dialog]
+`).doc;
+    const region: RegionTarget = {
+      block: FlowDoc.contextBlockNamed(doc, 'Dialog')!,
+      doc,
+      path: 'main.flow',
+    };
+    expect(membersUpdatingRegion(region)).toEqual(['Worker']);
   });
 
   it('writeRegionDeletions runs inside a caller-owned action', () => {

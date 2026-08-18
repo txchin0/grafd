@@ -17,7 +17,7 @@ import {
 } from '../shared/flow-format.js';
 import type { WorkspaceManifest } from '../shared/manifest.js';
 import { parseReferenceTarget } from '../shared/reference-target.js';
-import { allNodes, contextBlocksIn } from './flow-doc.js';
+import { allNodes, allContextBlocks } from './flow-doc.js';
 import { folderOf, normalizeFlowPath, relativizePath } from './flow-paths.js';
 
 // The path a same-folder rename resolves to: the normalized requested name rejoined to the
@@ -76,7 +76,7 @@ export function rewriteFileReferences(
     node.references.forEach(rewriteReference);
   }
   doc.preamble?.references.forEach(rewriteReference);
-  contextBlocksIn(doc.items).forEach((block) => block.references.forEach(rewriteReference));
+  allContextBlocks(doc).forEach((block) => block.references.forEach(rewriteReference));
   return changed;
 }
 

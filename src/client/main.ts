@@ -604,18 +604,22 @@ function focusNodeTitleAfterLayout(node: FlowNode): void {
   setTimeout(() => editors.openTitleEditor(liveNode(node)), TOGGLE_DURATION_MS);
 }
 
-function commitCreatedNodeMembership(owner: DocumentOwner, node: FlowNode): void {
-  const changes = FlowDoc.membershipChangesForNewNode(FlowDoc.buildModel(owner.doc, null), node);
+function commitCreatedNodeMembership(owner: DocumentOwner, node: FlowNode, scope: string | null): void {
+  const changes = FlowDoc.membershipChangesForNewNode(FlowDoc.buildModel(owner.doc, scope), node);
   if (changes.length > 0) writeMovesAndMembership([], changes, []);
 }
 
-function runNodeCreationAction(owner: DocumentOwner, create: () => FlowNode | null): FlowNode | null {
+function runNodeCreationAction(
+  owner: DocumentOwner,
+  create: () => FlowNode | null,
+  scope: string | null = null,
+): FlowNode | null {
   let node: FlowNode | null = null;
   session.runAction(() => {
     applyToDoc(owner, () => {
       node = create();
     }, { commit: 'now' });
-    if (node) commitCreatedNodeMembership(owner, node);
+    if (node) commitCreatedNodeMembership(owner, node, scope);
   });
   return node;
 }
@@ -624,7 +628,7 @@ function createNodeAndEdit(rect: Rect, frameHost: FlowNode | null = null, reques
   const target = creationTargetFor(frameHost);
   if (!target) return null;
   const items = creationItems(target);
-  const node = runNodeCreationAction(target.owner, () => FlowDoc.addNode(items, rect, requestedName));
+  const node = runNodeCreationAction(target.owner, () => FlowDoc.addNode(items, rect, requestedName), target.scope);
   if (node) focusNewNode(node);
   return node;
 }
@@ -1297,7 +1301,7 @@ function writeMovesAndMembership(
   // Membership joins the same batch rather than committing on its own, so dropping a node into a
   // region is one undo step with the move that carried it there (R19). A block always lives in
   // the file its members do, so the node's owner is the document to write.
-  const membersByOwner = new Map<DocumentOwner, string[]>();
+  const membersByOwner = new Map<DocumentOwner, FlowNode[]>();
   const ownersWithLeaves = new Set<DocumentOwner>();
   for (const change of membershipChanges) {
     const owner = ownerOf(change.node);
@@ -1309,7 +1313,7 @@ function writeMovesAndMembership(
       FlowDoc.removeContextMember(change.block, change.node.name);
       ownersWithLeaves.add(owner);
     }
-    membersByOwner.set(owner, [...(membersByOwner.get(owner) ?? []), change.node.name]);
+    membersByOwner.set(owner, [...(membersByOwner.get(owner) ?? []), change.node]);
   }
   // A node that left a region can no longer read it, and neither can the inner nodes that
   // read through it as a local-graph host, so the whole file is stripped (R40c).
@@ -1319,8 +1323,8 @@ function writeMovesAndMembership(
   if (membershipChanges.length > 0) expansions.invalidateSubModels();
   refresh();
   for (const path of paths) session.commit(path);
-  for (const [owner, memberNames] of membersByOwner) {
-    contextOps.syncInheritsForMembers(owner, memberNames);
+  for (const [owner, members] of membersByOwner) {
+    contextOps.syncInheritsForMembers(owner, members);
   }
 }
 
@@ -1343,7 +1347,7 @@ function createNodeForEmptyDrop(
       const node = FlowDoc.addNode(items, rect);
       FlowDoc.addEdge(source, node.name);
       return node;
-    });
+    }, target.scope);
   } else {
     const owner = ownerOf(host);
     const items = FlowDoc.containingItems(owner.doc, host);
@@ -1351,7 +1355,7 @@ function createNodeForEmptyDrop(
       const node = FlowDoc.addNode(items, rect);
       FlowDoc.addEdge(host, node.name, null, null, drop.innerName);
       return node;
-    });
+    }, FlowDoc.containingGraphBlockName(owner.doc, host));
   }
   if (created) focusNewNode(created);
 }
@@ -1384,7 +1388,7 @@ function addEdgeToNewNode(fromNode: FlowNode, rect: Rect, ghostName: string | nu
     const node = FlowDoc.addNode(items, rect, ghostName ?? undefined);
     createdSpec = FlowDoc.addEdge(fromNode, node.name, null, null);
     return node;
-  });
+  }, flow.scope);
 
   if (!ghostName && createdNode) {
     focusNewNode(createdNode);

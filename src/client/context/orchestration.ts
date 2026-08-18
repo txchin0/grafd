@@ -74,7 +74,7 @@ export interface ContextOrchestration {
   confirmRegionDeletions(regions: RegionTarget[], at: Point, proceed: () => void): void;
   readableContexts(node: FlowNode): { name: string; inherited: boolean }[];
   regionMenuItems(region: RegionTarget, at: Point): MenuItem[];
-  syncInheritsForMembers(owner: DocumentOwner, memberNames: Iterable<string>): void;
+  syncInheritsForMembers(owner: DocumentOwner, members: Iterable<FlowNode>): void;
   syncInheritsForExpansionPaths(owner: DocumentOwner, paths: Iterable<string>): void;
 }
 
@@ -91,8 +91,15 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     options.openRegionNameEditor(region, rename);
   }
 
-  function syncMembers(owner: DocumentOwner, memberNames: Iterable<string>): void {
-    syncInheritsForMembers(options.inherits, owner, memberNames);
+  function syncMembers(owner: DocumentOwner, members: Iterable<FlowNode>): void {
+    syncInheritsForMembers(options.inherits, owner, members);
+  }
+
+  // A block lists nodes of its own scope by name; names are unique within that scope, so the
+  // nodes the list refers to are exactly the scope's nodes carrying those names.
+  function membersNamed(items: FlowItem[], names: Iterable<string>): FlowNode[] {
+    const wanted = new Set(names);
+    return FlowDoc.nodesIn(items).filter((node) => wanted.has(node.name));
   }
 
   // For edits that remove the host a path was reached through: the file keeps its `inherits`
@@ -101,44 +108,51 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     for (const path of new Set(paths)) void syncInheritsForPath(options.inherits, owner, path, new Set());
   }
 
-  // A region is written into the body of the document the drawing landed in — a `graph:` block
-  // has no body of its own, so nothing is created while the canvas is scoped to one or inside a
-  // local frame (R45/R5). Drawn inside an unfolded external frame, it belongs to that file.
+  // A region is written into the graph scope the drawing landed in — the file body, a local
+  // `graph:` block the canvas is narrowed to, or the subgraph an unfolded frame is showing.
   function createRegionAndName(rect: Rect, frameHost: FlowNode | null, memberNames: string[]): void {
     const target = options.creationTargetFor(frameHost);
-    if (!target || target.scope != null) return;
-    createContextBlockAndPromptName(target.owner, rect, memberNames);
+    if (!target) return;
+    const items = FlowDoc.ensureScopeItems(target.owner.doc, target.scope);
+    createContextBlockAndPromptName(target.owner, items, rect, memberNames, target.scope != null);
   }
 
-  // Only a selection that is entirely top-level in one document can become a block: membership
-  // lists name nodes declared at column 0 in the file the block lives in (spec §8.2 rule 6).
   function canGroupSelectionIntoContext(): boolean {
-    const target = options.extractionTargetForSelection();
-    return target != null && target.items === target.owner.doc.items;
+    return options.extractionTargetForSelection() != null;
   }
 
   // The user expressed membership, not an area, so the block gets no `pos`: its region is the
   // bounding box of the nodes they picked, and stays so as they move (R3, R10).
   function groupSelectionIntoContext(): void {
     const target = options.extractionTargetForSelection();
-    if (!target || target.items !== target.owner.doc.items) return;
-    createContextBlockAndPromptName(target.owner, null, target.nodes.map((node) => node.name));
+    if (!target) return;
+    const nested = target.items !== target.owner.doc.items;
+    createContextBlockAndPromptName(target.owner, target.items, null, target.nodes.map((node) => node.name), nested);
   }
 
   // Naming is the second half of the creation gesture rather than an edit of what it produced,
   // so the action stays open across the name box and the two land in one undo step (R12).
   function createContextBlockAndPromptName(
     owner: DocumentOwner,
+    items: FlowItem[],
     rect: Rect | null,
     memberNames: string[],
+    nested: boolean,
   ): void {
     let block: ContextBlock | null = null;
     const naming = options.runAction(() => {
       options.applyToDoc(owner, () => {
-        block = FlowDoc.addContextBlock(owner.doc.items, NEW_REGION_NAME, rect, memberNames);
+        block = FlowDoc.addContextBlock(
+          items,
+          NEW_REGION_NAME,
+          rect,
+          memberNames,
+          FlowDoc.allContextBlocks(owner.doc).map((existing) => existing.name),
+          nested ? 'before-nodes' : 'end',
+        );
       }, { commit: 'now' });
       if (!block) return null;
-      syncMembers(owner, memberNames);
+      syncMembers(owner, membersNamed(items, memberNames));
       return options.suspendAction();
     });
     if (!block || !naming) return;
@@ -155,7 +169,7 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     const name = sanitizeName(requestedName);
     if (!name) return { rejected: 'A region needs a name.' };
     if (name === region.block.name) return null;
-    if (FlowDoc.contextBlocksIn(region.doc.items).some((other) => other !== region.block && other.name === name)) {
+    if (FlowDoc.allContextBlocks(region.doc).some((other) => other !== region.block && other.name === name)) {
       return { rejected: `This file already declares a region called "${name}".` };
     }
     if (parseListValue(getPreambleField(region.doc, 'inherits')).includes(name)) {
@@ -168,7 +182,8 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
     options.runAction(() => {
       options.applyToDoc(owner, () => FlowDoc.renameContextBlock(owner.doc, region.block, name), { commit: 'now' });
       void renameContextAcrossWorkspace(options.workspaceRename, owner, oldName, name);
-      syncMembers(owner, region.block.members);
+      const items = FlowDoc.containingItemsForContext(owner.doc, region.block);
+      syncMembers(owner, membersNamed(items, region.block.members));
     });
     options.selectRegion(name);
     return null;
@@ -189,9 +204,13 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
   function writeRegionDeletions(regions: RegionTarget[]): void {
     for (const region of regions) {
       const owner = ownerOfRegion(region);
-      const orphanedMembers = [...region.block.members];
+      // Resolve the members to their nodes before the block leaves the document: once it is
+      // deleted, containingItemsForContext falls back to the file body, which would look for a
+      // nested region's members in the wrong scope.
+      const items = FlowDoc.containingItemsForContext(owner.doc, region.block);
+      const orphanedMembers = membersNamed(items, region.block.members);
       options.applyToDoc(owner, () => {
-        FlowDoc.deleteContextBlock(owner.doc.items, region.block);
+        FlowDoc.deleteContextBlock(items, region.block);
         FlowDoc.removeUnreadableUpdates(owner.doc);
       }, { commit: 'now' });
       syncMembers(owner, orphanedMembers);
@@ -222,7 +241,7 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
   function readableContexts(node: FlowNode): { name: string; inherited: boolean }[] {
     const owner = options.ownerOf(node);
     const inherited = new Set(FlowDoc.inheritedContextNames(owner.doc));
-    return FlowDoc.contextNamesReadableBy(owner.doc, node.name)
+    return FlowDoc.contextNamesReadableBy(owner.doc, node)
       .map((name) => ({ name, inherited: inherited.has(name) }));
   }
 
@@ -262,7 +281,10 @@ export function createContextOrchestration(options: ContextOrchestrationOptions)
 }
 
 export function membersUpdatingRegion(region: RegionTarget): string[] {
-  const byName = new Map(FlowDoc.allNodes(region.doc).map((node) => [node.name, node]));
+  // Members resolve in the block's own scope, not file-wide: a same-named node in another
+  // scope is a different node and must not be credited with (or blamed for) its updates.
+  const items = FlowDoc.containingItemsForContext(region.doc, region.block);
+  const byName = new Map(FlowDoc.nodesIn(items).map((node) => [node.name, node]));
   return region.block.members.filter((name) => {
     const node = byName.get(name);
     return node != null && parseListValue(getProp(node, 'updates')).includes(region.block.name);

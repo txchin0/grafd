@@ -1,9 +1,9 @@
 // Region-aware clipboard: copy, cut, paste and duplicate for nodes and context blocks, with
-// member remapping, name uniquification, and the scoped-paste guard.
+// member remapping, name uniquification, and paste into a `graph:` scope.
 
 import { describe, expect, it, vi } from 'vitest';
 import { parseFlow, serializeFlow, type ContextBlock, type FlowDocument, type FlowNode } from '../src/shared/flow-format.js';
-import { assignMissingIds, contextBlockNamed, nodesIn, allNodes } from '../src/client/flow-doc.js';
+import { assignMissingIds, allContextBlocks, contextBlockNamed, nodesIn, allNodes } from '../src/client/flow-doc.js';
 import type { DocumentOwner } from '../src/client/canvas/expansion.js';
 import type { RegionTarget } from '../src/client/canvas/canvas-view.js';
 import type { OpenFlow } from '../src/client/open-flow.js';
@@ -98,7 +98,7 @@ function harnessFor(text: string, flowOverride?: Partial<OpenFlow>, documentReso
     options,
     nodeNamed: (name) => allNodes(doc).find((node) => node.name === name)!,
     regionNamed: (name) => contextBlockNamed(doc, name)!,
-    blocksIn: () => doc.items.filter((item): item is { kind: 'context'; block: ContextBlock } => item.kind === 'context').map((item) => item.block),
+    blocksIn: () => allContextBlocks(doc),
     setSelection,
   };
 }
@@ -138,17 +138,18 @@ describe('clipboard with regions', () => {
     expect(pasted.members).toEqual([]);
   });
 
-  it('does not paste regions into an open graph scope', () => {
-    // The region's document is no longer loaded, so paste falls back to the open flow — which
-    // is scoped to a graph block. The nodes land in the scope; the region is dropped rather
-    // than written into graph items (R5/R45).
+  it('pastes regions into an open graph scope', () => {
     const harness = harnessFor(SCOPED, { scope: 'Steps' }, false);
     harness.setSelection([], [harness.regionNamed('Auth')]);
     harness.clipboard.copy();
     harness.clipboard.paste();
 
-    expect(harness.blocksIn()).toHaveLength(1);
-    expect(harness.blocksIn().map((block) => block.name)).toEqual(['Auth']);
+    expect(harness.blocksIn().map((block) => block.name)).toEqual(['Auth', 'Auth 2']);
+    const graph = harness.doc.items.find((item) => item.kind === 'graph');
+    expect(graph && graph.kind === 'graph' ? graph.items[0] : null).toMatchObject({
+      kind: 'context',
+      block: expect.objectContaining({ name: 'Auth 2' }),
+    });
   });
 
   it('duplicates a mixed selection as one cluster with remapped membership', () => {

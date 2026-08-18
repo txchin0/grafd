@@ -137,8 +137,10 @@ Start
     expect(rulesOf('---\nname: T\n---\n\nA\n  description: "one"\n  description: "two"\n')).toContain('duplicate-property');
   });
 
-  it('reports a nested context block, whose membership list the parser discards', () => {
-    expect(rulesOf('---\nname: T\n---\n\ngraph: Outer\n  context: Auth\n    nodes:\n')).toContain('nested-context-block');
+  it('accepts a context block nested in a graph block', () => {
+    const text = '---\nname: T\n---\n\nOuter\n  expand: Outer\n\ngraph: Outer\n  context: Auth\n    nodes:\n      - Inner\n\n  Inner\n';
+    expect(rulesOf(text)).not.toContain('nested-context-block');
+    expect(rulesOf(text)).toEqual([]);
   });
 
   it('reports the lines a context block discards but a node would have kept', () => {
@@ -149,6 +151,10 @@ Start
   it('reports context blocks that are duplicated, misnamed, or missing their membership list', () => {
     const duplicated = '---\nname: T\n---\n\ncontext: Auth\n  nodes:\n    - A\n\ncontext: Auth\n  nodes:\n    - A\n\nA\n';
     expect(severityOf(duplicated, 'duplicate-context-block')).toBe('error');
+    expect(rulesOf(duplicated)).toContain('duplicate-context-block');
+    const nestedDup =
+      '---\nname: T\n---\n\ncontext: Auth\n  nodes:\n\ngraph: Sub\n  context: Auth\n    nodes:\n';
+    expect(rulesOf(nestedDup)).toContain('duplicate-context-block');
     expect(rulesOf('---\nname: T\n---\n\ncontext: Auth\n  description: "no members"\n\nA\n')).toContain(
       'context-block-missing-nodes',
     );
@@ -248,6 +254,15 @@ describe('semantic rules', () => {
 
     const nested = '---\nname: T\n---\n\ncontext: Cart\n  nodes:\n    - Inner\n\nA\n  expand: Sub\n\ngraph: Sub\n  Inner\n';
     expect(rulesOf(nested)).toContain('context-member-in-graph-block');
+
+    const nestedOk =
+      '---\nname: T\n---\n\nA\n  expand: Sub\n\ngraph: Sub\n  context: Cart\n    nodes:\n      - Inner\n\n  Inner\n    updates: [Cart]\n';
+    expect(rulesOf(nestedOk)).not.toContain('updates-undeclared-context');
+    expect(rulesOf(nestedOk)).not.toContain('context-member-in-graph-block');
+
+    const nestedMissing =
+      '---\nname: T\n---\n\ngraph: Sub\n  context: Cart\n    nodes:\n      - Nowhere\n\n  Inner\n';
+    expect(rulesOf(nestedMissing)).toContain('context-member-not-found');
   });
 
   it('reports a block that redeclares an inherited provider it cannot narrow', () => {

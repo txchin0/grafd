@@ -1,4 +1,4 @@
-# .flow Format Guide (flow/1.5)
+# .flow Format Guide (flow/1.6)
 
 You are reading a `.flow` workspace. This guide defines how to parse, interpret, and edit `.flow` files. Read once, then apply to every `.flow` file in the workspace.
 
@@ -204,8 +204,17 @@ Node Name
 
 ### Local `graph:` Blocks
 
+A `graph:` block is a graph scope. Its items are indented one level under the header: nodes and
+`context:` blocks (not another `graph:`). Write a nested `context:` immediately under the header,
+then the nodes — the same order a file body typically uses.
+
 ```
 graph: Graph Name
+  context: Local State
+    nodes:
+      - Child Node A
+      - Child Node B
+
   Child Node A
     -> Child Node B
   Child Node B
@@ -240,7 +249,10 @@ on_error: [Handler](path.flow)
 
 Shared state available to nodes (auth, session, config, etc.).
 
-A provider is declared in exactly one place: a `context:` block in the body of the file that owns it. There is no preamble `context:` field. The only preamble field that names a provider is `inherits:`, which is auto-generated and lists what came from the parent graph:
+A provider is declared in exactly one place: a `context:` block that is an item of a graph scope
+(the file body, or a local `graph:` block). There is no preamble `context:` field. The only
+preamble field that names a provider is `inherits:`, which is auto-generated and lists what came
+from the parent graph:
 
 ```
 ---
@@ -252,7 +264,8 @@ Charge Card
   updates: [Auth]          # this node mutates Auth
 ```
 
-**Declaring one** — a `context:` block at column 0:
+**Declaring one** — a `context:` block at the item indent of its scope. In the file body that is
+column 0; inside a `graph:` block it sits immediately under the header:
 
 ```
 context: Auth
@@ -266,10 +279,18 @@ context: Auth
 
 That is the complete shape of a block you write. Do not add anything else to it.
 
-- Entries under `nodes:` are names of nodes declared at column 0 elsewhere in the file. The block references them; it never contains them.
-- **`nodes:` is required.** A block scopes its provider to exactly the nodes it lists and to no others — there is no wildcard. An empty list is valid and grants access to nobody; keep the bare key.
-- A node may be a member of several blocks.
-- A block must not name a provider the file already inherits. An inherited provider is graph-wide here and cannot be narrowed — that decision belongs to the graph that declared it.
+- Entries under `nodes:` are names of nodes declared in the **same graph scope**. The block
+  references them; it never contains them. A file-body block cannot list a node inside a
+  `graph:` block; a nested block cannot list a file-body node.
+- **`nodes:` is required.** A block scopes its provider to exactly the nodes it lists and to no
+  others — there is no wildcard. An empty list is valid and grants access to nobody; keep the
+  bare key.
+- A node may be a member of several blocks in its own scope.
+- Provider names are unique in the file, including nested blocks.
+- A block must not name a provider the file already inherits. An inherited provider is
+  graph-wide here and cannot be narrowed — that decision belongs to the graph that declared it.
+- Nodes inside a `graph:` block reach an outer provider through the host node that expands the
+  block. They reach a nested provider by being listed on that nested block.
 
 ### `pos` on a `context:` Block
 
@@ -287,7 +308,9 @@ This differs from a node's `pos`, which the editor eventually assigns to everyth
 
 Keep an existing `pos` exactly as written, and ignore its numbers. **Membership comes from `nodes:` alone** — never from which nodes look like they sit inside the box.
 
-**Read access is implicit.** A node reads two things: the providers whose blocks list it, and everything the file inherits. There is no `uses` annotation.
+**Read access is implicit.** A node reads the providers whose blocks in its own graph scope list
+it, everything the file inherits, and — inside a `graph:` block — everything the host can read.
+There is no `uses` annotation.
 
 **Write access is explicit.** A node that mutates a provider declares `updates: [Name]`, and may only update what it can read. If `updates` names something the node cannot read, the membership list is what needs fixing.
 
@@ -358,7 +381,8 @@ inner_target := name
 target_node := name
 data_block  := "data:" NL (indent key ": " type NL)+
 
-graph_block := "graph: " name NL (node)*
+graph_block := "graph: " name NL (graph_item)*
+graph_item  := node | context_block | comment | blank
 
 context_block := "context: " name NL (indent (key ": " value | reference_block))* indent member_block
 member_block  := "nodes:" NL (indent "- " name NL)*
@@ -377,6 +401,7 @@ When you create or edit `.flow` files, follow the editor's canonical style so fi
 
 - 2-space indentation, never tabs.
 - One blank line between top-level items (nodes, `graph:` blocks, the preamble).
+- Inside a `graph:` block, write `context:` items immediately under the header, then the nodes.
 - Per-node line order: `id`, `pos`, other single-line properties, the `references:` block, then edges. Block-valued properties come last so the single-line ones stay in one column.
 - An empty `references:` block is omitted entirely — write the key only when it has entries.
 - A `context:` block you write is `description`, then the `references:` block, then `nodes:` — never a `pos`. If you are editing a block that already has one, it stays first, above `description`. Unlike `references:`, `nodes:` is required and always written, as the bare key when the list is empty.
@@ -388,8 +413,10 @@ When you create or edit `.flow` files, follow the editor's canonical style so fi
 For each `.flow` file:
 
 1. Parse preamble between `---` fences as the graph's node definition.
-2. Parse body nodes top to bottom. Each bare-name line at column 0 begins a new node (or a `graph:` / `context:` block).
-3. Properties and edges are indented 2 spaces under their owning node.
+2. Parse body items top to bottom. Each line at the item indent of the current scope begins a
+   new node, or a `graph:` / `context:` block (`graph:` only at column 0).
+3. Properties and edges are indented 2 spaces under their owning node. Items of a `graph:`
+   block are indented 2 spaces under the header.
 4. Resolve `expand` references by reading the target file or local `graph:` block.
 5. Build the node-and-edge model. Apply inference rules to determine node roles.
 6. For each leaf node, implement based on title, description, and surrounding context.

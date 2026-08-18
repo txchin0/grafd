@@ -153,8 +153,6 @@ function reportExpansionCycles(scans: Map<string, ScannedFile>, report: Report):
 interface ExpansionHost {
   path: string;
   node: ScannedNode;
-  /** Whether it is declared at column 0, the only place a context block can name it. */
-  topLevel: boolean;
 }
 
 // `inherits` is auto-generated from membership in the parent (spec §8.4): a provider reaches only
@@ -217,25 +215,19 @@ function reportMissingInheritance(scans: Map<string, ScannedFile>, report: Repor
 
 function hostReadsContext(scans: Map<string, ScannedFile>, host: ExpansionHost, name: string): boolean {
   const parent = scans.get(host.path);
-  // A host inside a `graph:` block reads through the node expanding that block, which this walk
-  // does not follow; treat it as answered rather than guess.
-  if (!parent || !host.topLevel) return true;
-  const listedInBlock = parent.contexts.some(
-    (block) => block.name === name && block.members.some((member) => member.name === host.node.name),
-  );
-  return listedInBlock || inheritedContextNames(parent).includes(name);
+  if (!parent) return true;
+  return readableContextsByNode(parent).get(host.node)?.has(name) ?? false;
 }
 
 function expansionHostsByTargetPath(scans: Map<string, ScannedFile>): Map<string, ExpansionHost[]> {
   const hostsByTargetPath = new Map<string, ExpansionHost[]>();
   for (const [path, scan] of scans) {
-    const topLevelNodes = new Set(rootScope(scan)?.nodes ?? []);
     for (const node of allScannedNodes(scan)) {
       const link = parseExpandLink(findProperty(node, 'expand')?.value);
       if (!link) continue;
       const targetPath = resolveLinkPath(path, link.path);
       const hosts = hostsByTargetPath.get(targetPath) ?? [];
-      hosts.push({ path, node, topLevel: topLevelNodes.has(node) });
+      hosts.push({ path, node });
       hostsByTargetPath.set(targetPath, hosts);
     }
   }

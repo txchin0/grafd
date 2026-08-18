@@ -79,7 +79,7 @@ export interface ScannedMember {
   line: number;
 }
 
-/** A body-level `context:` block. `nodesLine` is null when the required `nodes:` key is absent. */
+/** A `context:` block in a graph scope. `nodesLine` is null when the required `nodes:` key is absent. */
 export interface ScannedContext {
   name: string;
   line: number;
@@ -99,6 +99,7 @@ export interface ScannedScope {
   name: string | null;
   line: number | null;
   nodes: ScannedNode[];
+  contexts: ScannedContext[];
 }
 
 export interface ScannedPreamble {
@@ -113,8 +114,8 @@ export interface ScannedFile {
   lines: string[];
   preamble: ScannedPreamble | null;
   scopes: ScannedScope[];
-  // Flat, like `scopes`: a `context:` block is only legal at column 0, so it belongs to the file
-  // rather than to any one scope.
+  // Flat in document order: file-body blocks and the blocks nested in each `graph:` as that
+  // graph is walked. Duplicate-name checks read this; membership is resolved per scope.
   contexts: ScannedContext[];
   droppedLines: DroppedLine[];
 }
@@ -142,7 +143,7 @@ export function scanFlow(text: string): ScannedFile {
   // An unclosed preamble swallows the rest of the file; there is no body left to scan.
   if (file.preamble && file.preamble.closeLine == null) return file;
 
-  const rootScope: ScannedScope = { name: null, line: null, nodes: [] };
+  const rootScope: ScannedScope = { name: null, line: null, nodes: [], contexts: [] };
   file.scopes.push(rootScope);
   scanItems(lines, index, 0, rootScope, file);
   return file;
@@ -158,6 +159,10 @@ export function scopeByName(file: ScannedFile, name: string): ScannedScope | nul
 
 export function rootScope(file: ScannedFile): ScannedScope | null {
   return file.scopes.find((scope) => scope.name == null) ?? null;
+}
+
+export function scopeOfContext(file: ScannedFile, block: ScannedContext): ScannedScope | null {
+  return file.scopes.find((scope) => scope.contexts.includes(block)) ?? null;
 }
 
 export function findProperty(holder: { properties: ScannedProperty[] }, key: string): ScannedProperty | null {
@@ -252,16 +257,17 @@ function scanItems(
     if (indent === 0) {
       const graphMatch = baseIndent === 0 ? line.match(GRAPH_HEADER) : null;
       if (graphMatch) {
-        const block: ScannedScope = { name: graphMatch[1].trim(), line: lineNumber, nodes: [] };
+        const block: ScannedScope = { name: graphMatch[1].trim(), line: lineNumber, nodes: [], contexts: [] };
         file.scopes.push(block);
         index = scanItems(lines, index + 1, baseIndent + 2, block, file);
         currentOwner = null;
         openBlock = null;
         continue;
       }
-      const contextMatch = baseIndent === 0 ? line.match(CONTEXT_HEADER) : null;
+      const contextMatch = line.match(CONTEXT_HEADER);
       if (contextMatch) {
         const block = emptyScannedContext(contextMatch[1].trim(), lineNumber);
+        scope.contexts.push(block);
         file.contexts.push(block);
         currentOwner = { kind: 'context', block };
       } else {

@@ -27,20 +27,20 @@ export interface InheritsSyncDeps {
 export function syncInheritsForMembers(
   deps: InheritsSyncDeps,
   owner: DocumentOwner,
-  memberNames: Iterable<string>,
+  members: Iterable<FlowNode>,
 ): void {
-  for (const memberName of new Set(memberNames)) void syncInheritsForMember(deps, owner, memberName);
+  for (const member of new Set(members)) void syncInheritsForMember(deps, owner, member);
 }
 
 export async function syncInheritsForMember(
   deps: InheritsSyncDeps,
   owner: DocumentOwner,
-  memberName: string,
+  member: FlowNode,
 ): Promise<void> {
-  const node = FlowDoc.nodesIn(owner.doc.items).find((candidate) => candidate.name === memberName);
-  if (!node) return;
-  // A local `graph:` block has no preamble to carry `inherits`; its nodes read through this host.
-  const path = resolvedExpandPath(getProp(node, 'expand'), owner.path);
+  // A member inside a `graph:` block expands the same way a body-level one does: its external
+  // target inherits what this node can read (its scope's blocks plus its host chain). A local
+  // `graph:` target has no preamble to carry `inherits`, so there is nothing to write.
+  const path = resolvedExpandPath(getProp(member, 'expand'), owner.path);
   if (!path) return;
   await syncInheritsForPath(deps, owner, path, new Set());
 }
@@ -103,7 +103,7 @@ export function readableContextsForChildPath(owner: DocumentOwner, childPath: st
   const hosts = hostsExpandingTo(owner, childPath);
   const names = new Set<string>();
   for (const host of hosts) {
-    for (const name of FlowDoc.contextNamesReadableBy(owner.doc, host.name)) names.add(name);
+    for (const name of FlowDoc.contextNamesReadableBy(owner.doc, host)) names.add(name);
   }
   return [...names];
 }

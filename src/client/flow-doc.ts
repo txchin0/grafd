@@ -85,7 +85,8 @@ export interface FlowModel {
   nodes: FlowNode[];
   edges: ModelEdge[];
   ghosts: GhostNode[];
-  // Empty for a `graph:` block: a block has no body of its own, so it declares no regions.
+  // Regions declared in this model's graph scope — the file body, or the `graph:` block it was
+  // built from.
   contexts: ModelContext[];
   nodesByName: Map<string, FlowNode>;
   traits: Map<FlowNode, NodeTraits>;
@@ -133,30 +134,37 @@ export function contextsContainedIn(model: FlowModel, context: ModelContext): Mo
   });
 }
 
-// Which providers a node may read (spec §8.5). A top-level node reads the blocks listing it plus
-// everything the file inherits. A node inside a `graph:` block is a member of nothing (§8.2
-// rule 6) and reads what the node expanding that block reads (§8.4). The linter answers the
-// same question over its own scan (`readableContextsByNode`); the two must agree, since this
-// is what generates the `inherits` the linter then checks and what `removeUnreadableUpdates`
-// uses to strip claims.
-export function contextNamesReadableBy(doc: FlowDocument, nodeName: string): string[] {
+// Which providers a node may read (spec §8.5). A node reads the blocks in its own graph scope
+// that list it, plus everything the file inherits. A node inside a `graph:` block also reads
+// what the node expanding that block reads (§8.4). The linter answers the same question over
+// its own scan (`readableContextsByNode`); the two must agree, since this is what generates
+// the `inherits` the linter then checks and what `removeUnreadableUpdates` uses to strip claims.
+// Read access is per node, not per name: a file-body node and a node inside a `graph:` block
+// may share a name (names are unique only within a scope), and a name-keyed map would let one
+// scope's membership leak onto the other. Keyed by identity here, exactly as the linter keys
+// its scan (`readableContextsByNode`), so the two stay comparable.
+export function contextNamesReadableBy(doc: FlowDocument, node: FlowNode): string[] {
   const inherited = inheritedContextNames(doc);
-  return [...(readableContextNamesByNode(doc).get(nodeName) ?? new Set(inherited))];
+  return [...(readableContextsByNode(doc).get(node) ?? new Set(inherited))];
 }
 
 export function inheritedContextNames(doc: FlowDocument): string[] {
   return parseListValue(getPreambleField(doc, 'inherits'));
 }
 
-function readableContextNamesByNode(doc: FlowDocument): Map<string, Set<string>> {
+function readableContextsByNode(doc: FlowDocument): Map<FlowNode, Set<string>> {
   const inherited = inheritedContextNames(doc);
-  const readable = new Map<string, Set<string>>();
-  for (const node of nodesIn(doc.items)) {
-    const fromBlocks = contextBlocksIn(doc.items)
-      .filter((block) => block.members.includes(node.name))
-      .map((block) => block.name);
-    readable.set(node.name, new Set([...inherited, ...fromBlocks]));
+  const readable = new Map<FlowNode, Set<string>>();
+
+  function grant(items: FlowItem[], extra: Iterable<string>): void {
+    const local = contextBlocksIn(items);
+    for (const node of nodesIn(items)) {
+      const fromBlocks = local.filter((block) => block.members.includes(node.name)).map((block) => block.name);
+      readable.set(node, new Set([...extra, ...fromBlocks]));
+    }
   }
+
+  grant(doc.items, inherited);
   const hostsByBlockName = localExpansionHostsByBlockName(doc);
   const graphs = doc.items.filter((item): item is GraphItem => item.kind === 'graph');
   let changed = true;
@@ -164,12 +172,14 @@ function readableContextNamesByNode(doc: FlowDocument): Map<string, Set<string>>
     changed = false;
     for (const graph of graphs) {
       const hosts = hostsByBlockName.get(graph.name) ?? [];
-      const throughHosts = hosts.flatMap((host) => [...(readable.get(host.name) ?? inherited)]);
-      const scopeWide = new Set([...inherited, ...throughHosts]);
+      const throughHosts = hosts.flatMap((host) => [...(readable.get(host) ?? inherited)]);
+      const scopeWide = [...inherited, ...throughHosts];
+      const previous = new Map(nodesIn(graph.items).map((node) => [node, readable.get(node)]));
+      grant(graph.items, scopeWide);
       for (const inner of nodesIn(graph.items)) {
-        const current = readable.get(inner.name);
-        if (current && sameStringSet(current, scopeWide)) continue;
-        readable.set(inner.name, scopeWide);
+        const next = readable.get(inner);
+        const before = previous.get(inner);
+        if (!next || (before && sameStringSet(before, next))) continue;
         changed = true;
       }
     }
@@ -198,11 +208,11 @@ function sameStringSet(left: Set<string>, right: Set<string>): boolean {
 // so no editor gesture leaves behind a claim the file cannot back (spec §8.6). A state that
 // arrived through the file is repaired the moment the editor touches the document it lives in.
 export function removeUnreadableUpdates(doc: FlowDocument, nodes: FlowNode[] = allNodes(doc)): FlowNode[] {
-  const readableByName = readableContextNamesByNode(doc);
+  const readableByNode = readableContextsByNode(doc);
   const inherited = inheritedContextNames(doc);
   const changed: FlowNode[] = [];
   for (const node of nodes) {
-    const readable = [...(readableByName.get(node.name) ?? new Set(inherited))];
+    const readable = [...(readableByNode.get(node) ?? new Set(inherited))];
     const kept = parseListValue(getProp(node, 'updates')).filter((name) => readable.includes(name));
     const current = parseListValue(getProp(node, 'updates'));
     if (kept.length === current.length && kept.every((name, index) => name === current[index])) continue;
@@ -341,10 +351,9 @@ export function membershipChangesForCombinedMove(
   return changes;
 }
 
-// Regions a freshly created top-level node joins when its rectangle is fully inside their
-// frame — the inverse of drawing a region over existing nodes (R9a). Each overlapping region is
-// evaluated independently (R15). Subgraph nodes are excluded because they are absent from a
-// root-scoped model (R5).
+// Regions a freshly created node joins when its rectangle is fully inside their frame — the
+// inverse of drawing a region over existing nodes (R9a). Each overlapping region is evaluated
+// independently (R15). Callers pass a model of the scope the node was created in.
 export function membershipChangesForNewNode(model: FlowModel, node: FlowNode): MembershipChange[] {
   const regionRects = new Map<ContextBlock, Rect>();
   for (const context of model.contexts) {
@@ -412,8 +421,22 @@ export function contextBlocksIn(items: FlowItem[]): ContextBlock[] {
   return items.filter((item): item is ContextItem => item.kind === 'context').map((item) => item.block);
 }
 
+// Provider names are unique in the file, including blocks nested in `graph:` scopes.
+export function allContextBlocks(doc: FlowDocument): ContextBlock[] {
+  const blocks: ContextBlock[] = [];
+  for (const item of doc.items) {
+    if (item.kind === 'context') blocks.push(item.block);
+    if (item.kind === 'graph') {
+      for (const inner of item.items) {
+        if (inner.kind === 'context') blocks.push(inner.block);
+      }
+    }
+  }
+  return blocks;
+}
+
 export function contextBlockNamed(doc: FlowDocument, name: string): ContextBlock | null {
-  return contextBlocksIn(doc.items).find((block) => block.name === name) ?? null;
+  return allContextBlocks(doc).find((block) => block.name === name) ?? null;
 }
 
 export function findNodeById(doc: FlowDocument, nodeId: string | null): FlowNode | null {
@@ -428,6 +451,25 @@ export function containingItems(doc: FlowDocument, node: FlowNode): FlowItem[] {
     }
   }
   return doc.items;
+}
+
+export function containingItemsForContext(doc: FlowDocument, block: ContextBlock): FlowItem[] {
+  if (doc.items.some((item) => item.kind === 'context' && item.block === block)) return doc.items;
+  for (const item of doc.items) {
+    if (item.kind === 'graph' && item.items.some((inner) => inner.kind === 'context' && inner.block === block)) {
+      return item.items;
+    }
+  }
+  return doc.items;
+}
+
+export function containingGraphBlockNameForContext(doc: FlowDocument, block: ContextBlock): string | null {
+  for (const item of doc.items) {
+    if (item.kind === 'graph' && item.items.some((inner) => inner.kind === 'context' && inner.block === block)) {
+      return item.name;
+    }
+  }
+  return null;
 }
 
 export interface ItemGroup {
@@ -499,8 +541,7 @@ export function buildModel(doc: FlowDocument, scopeName: string | null): FlowMod
   autoLayout(nodes, edges);
 
   const ghosts = resolveEdgeTargets(edges, nodesByName);
-  // Regions live in the document body (spec §8.2), so a model scoped to a `graph:` block has none.
-  const contexts = scopeName == null ? modelContextsOf(doc, nodesByName) : [];
+  const contexts = modelContextsOf(scopeItems(doc, scopeName), nodesByName);
   const traits = inferTraits(doc, nodes, edges, contexts);
   return {
     nodes,
@@ -517,8 +558,8 @@ export function buildModel(doc: FlowDocument, scopeName: string | null): FlowMod
 
 // A member naming a node that is not here is simply absent from the model: the file is
 // authoritative about membership, and no render pass repairs it (spec §8.3). The linter reports it.
-function modelContextsOf(doc: FlowDocument, nodesByName: Map<string, FlowNode>): ModelContext[] {
-  return contextBlocksIn(doc.items).map((block) => ({
+function modelContextsOf(items: FlowItem[], nodesByName: Map<string, FlowNode>): ModelContext[] {
+  return contextBlocksIn(items).map((block) => ({
     block,
     members: block.members
       .map((memberName) => nodesByName.get(memberName))
@@ -620,15 +661,28 @@ export function addContextBlock(
   requestedName: string,
   pos: Rect | null,
   memberNames: string[],
+  takenNames: Iterable<string> = contextBlocksIn(items).map((block) => block.name),
+  insert: 'end' | 'before-nodes' = 'end',
 ): ContextBlock {
-  const takenNames = new Set(contextBlocksIn(items).map((block) => block.name));
-  const block = emptyContextBlock(uniqueName(takenNames, sanitizeName(requestedName) || 'Region'));
+  const taken = new Set(takenNames);
+  const block = emptyContextBlock(uniqueName(taken, sanitizeName(requestedName) || 'Region'));
   if (pos) {
     block.pos = { x: Math.round(pos.x), y: Math.round(pos.y), w: Math.round(pos.w), h: Math.round(pos.h) };
   }
   setContextMembers(block, memberNames);
-  items.push({ kind: 'context', block });
+  insertContextItem(items, block, insert);
   return block;
+}
+
+function insertContextItem(items: FlowItem[], block: ContextBlock, insert: 'end' | 'before-nodes'): void {
+  const item: ContextItem = { kind: 'context', block };
+  if (insert === 'end') {
+    items.push(item);
+    return;
+  }
+  const firstNode = items.findIndex((candidate) => candidate.kind === 'node' || candidate.kind === 'graph');
+  if (firstNode < 0) items.push(item);
+  else items.splice(firstNode, 0, item);
 }
 
 export function deleteContextBlock(items: FlowItem[], block: ContextBlock): void {
@@ -693,14 +747,14 @@ function renamedListValue(value: string | null, oldName: string, newName: string
   return formatListValue([...new Set(names.map((name) => (name === oldName ? newName : name)))]);
 }
 
-export function renameMemberInContextBlocks(doc: FlowDocument, oldName: string, newName: string): void {
-  for (const block of contextBlocksIn(doc.items)) {
+export function renameMemberInContextBlocks(items: FlowItem[], oldName: string, newName: string): void {
+  for (const block of contextBlocksIn(items)) {
     setContextMembers(block, block.members.map((member) => (member === oldName ? newName : member)));
   }
 }
 
-export function removeMemberFromContextBlocks(doc: FlowDocument, memberName: string): void {
-  for (const block of contextBlocksIn(doc.items)) removeContextMember(block, memberName);
+export function removeMemberFromContextBlocks(items: FlowItem[], memberName: string): void {
+  for (const block of contextBlocksIn(items)) removeContextMember(block, memberName);
 }
 
 // Detached deep copies for the clipboard: they keep their original names and positions and
@@ -758,17 +812,19 @@ export function duplicateContextBlocks(
   offset: Point,
   renamedMembers: ReadonlyMap<string, string>,
   inheritedNames: readonly string[],
+  takenNames: Iterable<string> = contextBlocksIn(items).map((block) => block.name),
+  insert: 'end' | 'before-nodes' = 'end',
 ): ContextBlock[] {
-  const takenNames = new Set([...contextBlocksIn(items).map((block) => block.name), ...inheritedNames]);
+  const taken = new Set([...takenNames, ...inheritedNames]);
   return sources.map((source) => {
     const block = structuredClone(source);
-    block.name = uniqueName(takenNames, source.name);
-    takenNames.add(block.name);
+    block.name = uniqueName(taken, source.name);
+    taken.add(block.name);
     if (block.pos) block.pos = { ...block.pos, x: block.pos.x + offset.x, y: block.pos.y + offset.y };
     setContextMembers(block, source.members
       .map((member) => renamedMembers.get(member))
       .filter((member): member is string => member != null));
-    items.push({ kind: 'context', block });
+    insertContextItem(items, block, insert);
     return block;
   });
 }
@@ -807,12 +863,11 @@ export function extractSubgraph(
   redirectEdgesIntoHost(items, host, extractedSet, extractedNames);
   liftEscapingEdgesOntoHost(nodesToExtract, host, extractedNames);
   copyEntrypointToHost(nodesToExtract, host);
-  if (isTopLevel(items, doc)) {
-    transferRegionMembershipToHost(doc, nodesToExtract, host);
-    // Inner nodes read through the host (§8.2 rule 6): a region the host still belongs to
-    // stays readable, and `updates:` naming one it does not are stripped (R40c).
-    removeUnreadableUpdates(doc, nodesToExtract);
-  }
+  transferRegionMembershipToHost(items, nodesToExtract, host);
+  // Inner nodes read through the host for providers that stayed in this scope, plus any
+  // nested block that still lists them; `updates:` naming one they can no longer read are
+  // stripped (R40c).
+  removeUnreadableUpdates(doc, nodesToExtract);
 
   return { host, blockName, innerNodes: nodesToExtract };
 }
@@ -821,9 +876,9 @@ export function extractSubgraph(
 // body for the new `graph:` block would otherwise stay listed and grant nothing; a region that
 // held the whole selection hands its members to the host that now stands in for them, while one
 // that held only part keeps the host out — it stands in for the whole subgraph, not the region.
-function transferRegionMembershipToHost(doc: FlowDocument, extractedNodes: FlowNode[], host: FlowNode): void {
+function transferRegionMembershipToHost(items: FlowItem[], extractedNodes: FlowNode[], host: FlowNode): void {
   const extractedNames = new Set(extractedNodes.map((node) => node.name));
-  for (const block of contextBlocksIn(doc.items)) {
+  for (const block of contextBlocksIn(items)) {
     const namedHere = block.members.filter((name) => extractedNames.has(name));
     if (namedHere.length === 0) continue;
     const remaining = block.members.filter((name) => !extractedNames.has(name));
@@ -973,7 +1028,7 @@ export function extractGraphBlockToDocument(
 function unionOfHostReadableContexts(doc: FlowDocument, blockName: string): string[] {
   const names = new Set<string>();
   for (const host of allNodes(doc).filter((node) => getProp(node, 'expand') === blockName)) {
-    for (const name of contextNamesReadableBy(doc, host.name)) names.add(name);
+    for (const name of contextNamesReadableBy(doc, host)) names.add(name);
   }
   return [...names];
 }
@@ -1064,9 +1119,7 @@ export function deleteNodes(
     if (item.kind === 'node' && deletedSet.has(item.node)) items.splice(index, 1);
   }
 
-  if (isTopLevel(items, doc)) {
-    for (const name of deletedNames) removeMemberFromContextBlocks(doc, name);
-  }
+  for (const name of deletedNames) removeMemberFromContextBlocks(items, name);
 
   for (const node of nodesIn(items)) {
     node.edges = node.edges.filter((edge) => !deletedNames.has(edge.target));
@@ -1139,19 +1192,13 @@ function applyNodeRename(
     }
   }
 
-  if (isTopLevel(items, doc)) renameMemberInContextBlocks(doc, oldName, node.name);
+  renameMemberInContextBlocks(items, oldName, node.name);
 
   const identity = expandIdentityForNode(doc, options?.path ?? null, node);
   if (identity) {
     retargetInnerRefs(docsForRetarget(doc, options), identity, oldName, node.name);
   }
   return node.name;
-}
-
-// Only nodes declared at column 0 can be context members (spec §8.2 rule 6), so a mutation inside
-// a `graph:` block's item list never touches a membership list.
-function isTopLevel(items: FlowItem[], doc: FlowDocument): boolean {
-  return items === doc.items;
 }
 
 function applyGraphBlockRename(doc: FlowDocument, graphItem: GraphItem, requestedName: string): string {

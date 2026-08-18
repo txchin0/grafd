@@ -1,6 +1,6 @@
 # .flow Format Specification
 
-**Version:** flow/1.5
+**Version:** flow/1.6
 **Status:** Draft
 
 ## Revision History
@@ -13,6 +13,7 @@
 | flow/1.3 | Nodes and preambles may carry a `references` block linking to related source files, documents, and URLs. Indented blocks are generalized: a block belongs to the line directly above it. |
 | flow/1.4 | Context providers are declared only as a body-level `context:` block that defines the provider and scopes it to a listed set of nodes; the preamble `context:` field is removed, and `inherits` becomes the sole preamble carrier of context. Providers reach only their members' expansions. `.flow.meta` sidecar files are removed; canvas layout lives on the node as the editor-owned `id` and `pos` properties. |
 | flow/1.5 | The root `SPEC.flow` file is removed from the format. The workspace manifest (`grafd.manifest.json`) declares the format version in its `flowVersion` field, which agents read alongside the `entrypoint`; the manifest is the single source of truth for which version applies to the whole workspace. |
+| flow/1.6 | A `context:` block may be an item of a local `graph:` block, indented one level under the `graph:` header, so an inline subgraph can declare its own regions. Membership is per graph scope; provider names stay unique in the file. Nested `graph:` blocks remain illegal. |
 
 ---
 
@@ -121,7 +122,8 @@ The `expand` property does not appear in the preamble — the file itself *is* t
 ### 3.2 Syntax Rules
 
 - **Indentation:** 2-space indentation. Tabs are forbidden.
-- **Indented blocks:** A property may take a block of lines indented one level deeper than itself. The block belongs to the line directly above it — `data:` under an edge ([Section 5.5](#55-edge-data)), `references:` under a node or in a preamble ([Section 4.5](#45-references)), `nodes:` under a body-level `context:` block ([Section 8.2](#82-declaration--the-context-block)).
+- **Indented blocks:** A property may take a block of lines indented one level deeper than itself. The block belongs to the line directly above it — `data:` under an edge ([Section 5.5](#55-edge-data)), `references:` under a node or in a preamble ([Section 4.5](#45-references)), `nodes:` under a `context:` block ([Section 8.2](#82-declaration--the-context-block)).
+- **Graph-body items:** Items of a `graph:` block are indented one level under the `graph:` header. Those items are nodes and `context:` blocks — the same kinds the file body holds, except another `graph:`. A `context:` line at that indent belongs to the `graph:` header, not to the node above it. Write the `context:` block immediately under the header, then the nodes, the same order a file body typically uses.
 - **Encoding:** UTF-8.
 - **Comments:** Lines starting with `#` are comments. The LLM ignores them.
 - **Node names:** Cannot contain `:`  (colon followed by space). Enforced by the frontend. Node names must also not contain `{` or `}` — braces appear only on edges: a trailing `{Inner Node}` on an edge target names a node inside the target subgraph (see [Section 5.7](#57-targeting-a-node-inside-a-subgraph)), and a leading `{Inner Source}` prefix names a node inside the owning subgraph that the edge leaves from (see [Section 5.8](#58-originating-an-edge-from-a-node-inside-a-subgraph)).
@@ -162,7 +164,7 @@ All properties are optional. A node can have any combination:
 | `references`  | Block of links to the material this node corresponds to — source files, documents, URLs. See [Section 4.5: References](#45-references)                      |
 
 
-A node and a graph preamble share this property set. A preamble uses `name:` instead of a bare name at column 0, does not use `expand` (the file *is* the expansion), and additionally carries the auto-generated `inherits` field. `context` is not a node or preamble property at all — it appears only as a body-level block ([Section 8.2](#82-declaration--the-context-block)).
+A node and a graph preamble share this property set. A preamble uses `name:` instead of a bare name at column 0, does not use `expand` (the file *is* the expansion), and additionally carries the auto-generated `inherits` field. `context` is not a node or preamble property at all — it appears only as a graph-scope item ([Section 8.2](#82-declaration--the-context-block)).
 
 Nodes additionally carry the editor-owned properties `id` and `pos`, which describe canvas layout rather than meaning. See [Section 11](#11-editor-owned-properties).
 
@@ -460,7 +462,9 @@ Process Payment
 
 ### 6.3 Local Graph Blocks
 
-A `graph:` block defines a reusable graph within the same file. It is the target of a local `expand` reference:
+A `graph:` block defines a reusable graph within the same file. It is the target of a local `expand` reference. The block is a **graph scope**: its items are indented one level under the header, and they are nodes and `context:` blocks — the same kinds the file body holds, except another `graph:` (nested `graph:` blocks are illegal).
+
+Write a `context:` block immediately under the header when the subgraph has its own regions, then the nodes — the same order a file body typically uses:
 
 ```
 Validate Cart
@@ -470,6 +474,12 @@ Process Payment
   expand: Payment Steps
 
 graph: Payment Steps
+  context: Payment Session
+    description: "Card intent and receipt for this charge"
+    nodes:
+      - Charge Card
+      - Send Receipt
+
   Charge Card
     -> Send Receipt
   Send Receipt
@@ -595,11 +605,13 @@ A provider has three parts:
 | **Scope**      | Which nodes may read it                                                     |
 
 
-A provider is **declared in exactly one place**: a `context:` block in the body of the file that owns it ([Section 8.2](#82-declaration--the-context-block)). There is no second declaration form. Everywhere else a provider name appears — `inherits`, `updates` — it refers back to that block.
+A provider is **declared in exactly one place**: a `context:` block that is an item of a **graph scope** — the file body, or a local `graph:` block ([Section 6.3](#63-local-graph-blocks)). There is no second declaration form. Everywhere else a provider name appears — `inherits`, `updates` — it refers back to that block.
+
+A **graph scope** is either the file body or one local `graph:` block. Nodes and `context:` blocks are items of a scope. `graph:` blocks themselves are items of the file body only.
 
 ### 8.2 Declaration — the `context` Block
 
-A `context:` block at root indentation (column 0) declares a provider, defines it, and scopes it to a named set of nodes:
+A `context:` block declares a provider, defines it, and scopes it to a named set of nodes in the same graph scope. In the file body it sits at column 0; inside a `graph:` block it is indented one level under the header, immediately below it, before that graph's nodes:
 
 ```
 context: Auth
@@ -609,6 +621,22 @@ context: Auth
   nodes:
     - Show Login
     - Submit Credentials
+```
+
+```
+graph: Logout Confirmation
+  context: Dialog State
+    description: "Which button the user pressed"
+    nodes:
+      - Show Confirmation Dialog
+      - Confirm Logout
+      - Dismiss
+
+  Show Confirmation Dialog
+    -> Confirm Logout : "user confirms"
+    -> Dismiss : "user cancels"
+  Confirm Logout
+  Dismiss
 ```
 
 The block **is** the provider's definition, in the same way a preamble is a graph's node definition. It takes:
@@ -623,14 +651,17 @@ The block **is** the provider's definition, in the same way a preamble is a grap
 
 **Membership rules:**
 
-1. Entries under `nodes:` are the **names of nodes declared elsewhere in this file at column 0**. The block references nodes; it does not contain them. Node declarations stay flat, and a name is resolved in the graph's top-level scope exactly like an edge target.
+1. Entries under `nodes:` are the **names of nodes declared in the same graph scope**. The block references nodes; it does not contain them. Node declarations stay flat in that scope, and a name is resolved there exactly like an edge target. A file-body block cannot list a node that lives inside a `graph:` block; a nested block cannot list a file-body node.
 2. `nodes:` is **required**. A block scopes its provider to exactly the nodes it lists and to no others. There is no wildcard and no implicit membership — a block that omits `nodes:` is malformed.
 3. An **empty** `nodes:` list is valid: a region that has been declared but not yet populated. It grants access to nobody.
-4. A node may appear in several blocks. Overlapping scopes are how one node reads more than one provider.
+4. A node may appear in several blocks in its own scope. Overlapping scopes are how one node reads more than one locally declared provider.
 5. A block must not name a provider the file already inherits ([Section 8.4](#84-inheritance)). An inherited provider is graph-wide in this file and cannot be narrowed here; the scoping decision belongs to the graph that declared it.
-6. Only top-level nodes may be members. Nodes inside a `graph:` block reach a provider through their host node's membership ([Section 8.4](#84-inheritance)), not by being listed here.
+6. Provider names are unique in the file. A nested `context: Auth` and a file-body `context: Auth` are two definitions of one name; only one may exist.
+7. Nodes inside a `graph:` block reach a provider declared in an *outer* scope through their host node's membership ([Section 8.4](#84-inheritance)), not by being listed on that outer block. They reach a provider declared *in their own* `graph:` block by being listed there.
 
 Since `nodes:` is required, it is always written — an empty list appears as the bare key. This is the one block-valued property that is not omitted when empty.
+
+Promoting a `graph:` block to its own file ([Section 6.4](#64-external-graph-files)) takes the block's items with it: nested `context:` blocks become body-level blocks in the new file. Host-readable providers still become preamble `inherits`.
 
 ### 8.3 Region Geometry
 
@@ -645,7 +676,7 @@ The explicit area is stored as a `pos` property on the block, the same editor-ow
 
 ### 8.4 Inheritance
 
-When a member node has `expand`, its expansion inherits the provider. The child graph's preamble carries an `inherits` field naming what is available from above:
+When a member node has `expand`, its expansion inherits the provider. For an external file, the child graph's preamble carries an `inherits` field naming what is available from above:
 
 ```
 ---
@@ -654,9 +685,13 @@ inherits: [Auth, Cart]
 ---
 ```
 
+A local `graph:` block has no preamble, so it does not write `inherits`. Inner nodes still inherit every provider their host can read, as if the block were that file.
+
 Membership is what propagates. A provider reaches only the expansions of the nodes listed in its block — a subgraph with no business touching `Auth` does not inherit it merely for sharing a file with something that does. This is the practical reason to scope.
 
-**An inherited provider is graph-wide in the file that receives it.** Every node in that file may read it, and the file cannot re-scope it (rule 5 of [Section 8.2](#82-declaration--the-context-block)). The decision about who reads it was made in the parent, by putting the host node in the region; making it again in the child would mean two places to look.
+**An inherited provider is graph-wide in the scope that receives it.** Every node in an external file that inherits `Auth` may read it, and the file cannot re-scope it (rule 5 of [Section 8.2](#82-declaration--the-context-block)). The same is true inside a local `graph:` block: providers that arrived through the host are readable by every inner node. The decision about who reads them was made in the parent, by putting the host node in the region; making it again in the child would mean two places to look.
+
+A `context:` block declared *inside* that `graph:` block is not inherited — it is local to the subgraph, the way a body-level block is local to an external file.
 
 `inherits` is **auto-generated** — the user does not maintain it, and it is the only place a provider name appears in a preamble. The editor walks the expansion tree and computes what is available at each level. It exists so the LLM always sees the available context at the top of a graph file, even when reading that file in isolation.
 
@@ -664,9 +699,9 @@ A preamble carrying `inherits` therefore tells a reader something structural: th
 
 ### 8.5 Reading Context
 
-Read access is implicit. A node reads two things: the providers whose blocks list it, and everything the file inherits. There is no `uses` annotation and none is needed.
+Read access is implicit. A node reads three things: the providers whose blocks in **its own graph scope** list it, everything the file inherits, and — if the node lives inside a `graph:` block — everything the node expanding that block can read. There is no `uses` annotation and none is needed.
 
-A node that is not a member of a locally declared provider cannot read it. If a node needs access, add it to that block's `nodes:` list — do not declare the provider a second time.
+A node that is not a member of a locally declared provider cannot read it (unless it inherited that provider from above). If a node needs access, add it to that block's `nodes:` list — do not declare the provider a second time.
 
 ### 8.6 Writing Context
 
@@ -912,6 +947,13 @@ Handle Logout Button
   expand: Logout Confirmation
 
 graph: Logout Confirmation
+  context: Dialog State
+    description: "Which button the user pressed"
+    nodes:
+      - Show Confirmation Dialog
+      - Confirm Logout
+      - Dismiss
+
   Show Confirmation Dialog
     -> Confirm Logout : "user confirms"
     -> Dismiss : "user cancels"
@@ -966,7 +1008,7 @@ list          := "[" name ("," name)* "]"
 body          := (node | graph_block | context_block | comment | blank_line)*
 
 node          := name newline (property | edge)*
-name          := <text at column 0, no ": " allowed>
+name          := <text at the item indent of its scope, no ": " allowed>
 
 property      := indent key ": " value newline | reference_block
 reference_block := indent "references:" newline (indent indent "- " reference newline)+
@@ -979,7 +1021,8 @@ inner_target  := name
 target_node   := name
 edge_data     := indent indent "data:" newline (indent indent indent key ": " type newline)+
 
-graph_block   := "graph: " name newline (node)*
+graph_block   := "graph: " name newline (graph_item)*
+graph_item    := node | context_block | comment | blank_line
 
 context_block := "context: " name newline (context_property)* member_block
 context_property := indent key ": " value newline | reference_block
@@ -1009,12 +1052,12 @@ The format has a minimal set of reserved keywords:
 | `expand`      | Node                   | References an expanded graph (not used in preambles)           |
 | `updates`     | Preamble, Node         | Lists contexts this node modifies                              |
 | `entrypoint`  | Preamble, Node         | Marks node as explicit entry point                             |
-| `context`     | Body                   | Declares one context provider, defines it, and scopes it to listed nodes |
+| `context`     | Graph scope            | Declares one context provider, defines it, and scopes it to listed nodes in that scope |
 | `inherits`    | Preamble               | Auto-generated context inheritance from parent graphs          |
 | `references`  | Preamble, Node, `context` block | Block of links to related source files, documents, and URLs |
 | `nodes`       | `context` block        | Required. Lists the nodes a scoped context provider is available to |
 | `data`        | Edge                   | Schema of data passed on this edge                             |
-| `graph`       | Body                   | Defines a local reusable graph block                           |
+| `graph`       | File body              | Defines a local reusable graph block                           |
 | `id`          | Node                   | Editor-owned. Stable node identity across renames              |
 | `pos`         | Node, `context` block  | Editor-owned. Canvas rectangle, `x, y, w, h`                   |
 
@@ -1033,10 +1076,10 @@ The format has a minimal set of reserved keywords:
 | Execution order   | Unspecified fan-out = LLM decides                                                 | Consistent implicit philosophy                   |
 | Subgraph nesting  | Flat with references                                                              | LLMs parse flat structures better                |
 | File splitting    | Heuristic on export, user overrides                                               | Smart default, user control                      |
-| Context providers | One declaration form — a body `context:` block — plus auto-generated `inherits` and explicit `updates` | Structured and parseable, avoids spaghetti edges. A single declaration form means one place to look to answer whether a node can read a provider |
-| Context inheritance | Inherited providers are graph-wide in the receiving file and cannot be re-scoped there | The scoping decision was made in the parent by placing the host node in a region; repeating it downstream would put the answer in two files |
-| Context definition | A body-level `context:` block carrying `description` and `references`             | A bare name in a bracketed list tells an agent nothing about what the provider holds; the block gives a provider the same definition surface a node already has |
-| Context scoping   | Membership listed by name under a required `nodes:`, declarations stay flat at column 0 | A node can belong to several contexts, so membership cannot be containment; keeps the flat structure the rest of the format relies on. Requiring `nodes:` means a block always says exactly who reads it — one rule, no implicit-membership case to reason about |
+| Context providers | One declaration form — a `context:` block that is an item of a graph scope — plus auto-generated `inherits` and explicit `updates` | Structured and parseable, avoids spaghetti edges. A single declaration form means one place to look to answer whether a node can read a provider |
+| Context inheritance | Inherited providers are graph-wide in the receiving scope and cannot be re-scoped there | The scoping decision was made in the parent by placing the host node in a region; repeating it downstream would put the answer in two places |
+| Context definition | A `context:` block carrying `description` and `references`             | A bare name in a bracketed list tells an agent nothing about what the provider holds; the block gives a provider the same definition surface a node already has |
+| Context scoping   | Membership listed by name under a required `nodes:`, declarations stay flat in their graph scope | A node can belong to several contexts, so membership cannot be containment; keeps the flat structure the rest of the format relies on. Requiring `nodes:` means a block always says exactly who reads it — one rule, no implicit-membership case to reason about. A nested block lists nodes of its `graph:` block; a file-body block lists column-0 nodes |
 | Context regions   | Geometry derived from membership; an explicit area is a floor, not a fence         | Membership inferred from geometry would make semantics layout-dependent — agents write no coordinates, and dragging a node would silently change what it reads |
 | Context identity  | Named, no `id`                                                                     | `updates` and `inherits` address providers by name across files, so an id cannot stabilize a rename the way it does for nodes |
 | Error handling    | on_error at graph and node level, bubbles up                                      | Reuses existing concepts                         |

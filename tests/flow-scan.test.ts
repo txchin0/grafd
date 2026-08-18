@@ -9,7 +9,7 @@ import {
   type GraphItem,
 } from '../src/shared/flow-format.js';
 import { scanFlow, type ScannedContext, type ScannedFile, type ScannedNode } from '../src/shared/flow-scan.js';
-import { contextBlocksIn, nodesIn } from '../src/client/flow-doc.js';
+import { allContextBlocks, nodesIn } from '../src/client/flow-doc.js';
 
 // The linter trusts the scanner to see a file exactly as parseFlow does — everything it
 // accepts, and nothing it silently drops. These projections put the two side by side.
@@ -62,7 +62,7 @@ function parseShape(doc: FlowDocument) {
       { name: null as string | null, nodes: nodesIn(doc.items).map(parsedNodeShape) },
       ...blocks.map((block) => ({ name: block.name, nodes: nodesIn(block.items).map(parsedNodeShape) })),
     ],
-    contexts: contextBlocksIn(doc.items).map((block) => ({
+    contexts: allContextBlocks(doc).map((block) => ({
       name: block.name,
       pos: block.pos,
       props: block.props,
@@ -141,6 +141,10 @@ Host
   expand: Inner
 
 graph: Inner
+  context: Step
+    nodes:
+      - Child
+
   Child
     -> Sibling
 

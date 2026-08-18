@@ -21,7 +21,7 @@ import type {
   ScannedReference,
   ScannedScope,
 } from './flow-scan.js';
-import { allScannedNodes, findProperty, rootScope, scopeByName } from './flow-scan.js';
+import { allScannedNodes, findProperty, rootScope, scopeByName, scopeOfContext } from './flow-scan.js';
 
 export type ExpansionResult =
   | { kind: 'resolved'; entryNames: string[] }
@@ -81,35 +81,53 @@ export function inheritedContextNames(file: ScannedFile): string[] {
     .flatMap((field) => parseListValue(field.value));
 }
 
-// Read access, resolved once for the whole file (spec §8.5). A top-level node reads what the blocks
-// listing it provide, plus everything the file inherits. A node inside a `graph:` block is a member
-// of nothing (§8.2 rule 6) and reads what the node expanding that block reads (§8.4).
+// Read access, resolved once for the whole file (spec §8.5). A node reads the blocks in its
+// own graph scope that list it, plus everything the file inherits. A node inside a `graph:`
+// block also reads what the node expanding that block reads (§8.4).
 //
 // Shared with the workspace pass, which asks the same question of a node with an `expand` link to
 // decide what its expansion must inherit — so both answer it the same way or the two disagree.
 export function readableContextsByNode(file: ScannedFile): Map<ScannedNode, Set<string>> {
   const inherited = inheritedContextNames(file);
-  const providersByMemberName = providersByMember(file);
   const readable = new Map<ScannedNode, Set<string>>();
+  const providersByMemberName = providersByMemberIn(rootScope(file)?.contexts ?? []);
 
   for (const node of rootScope(file)?.nodes ?? []) {
     readable.set(node, new Set([...inherited, ...(providersByMemberName.get(node.name) ?? [])]));
   }
 
   const hostsByBlockName = localExpansionHostsByBlockName(file);
-  for (const scope of file.scopes) {
-    if (scope.name == null) continue;
-    const hosts = hostsByBlockName.get(scope.name) ?? [];
-    const throughHosts = hosts.flatMap((host) => [...(readable.get(host) ?? [])]);
-    const scopeWide = new Set([...inherited, ...throughHosts]);
-    for (const node of scope.nodes) readable.set(node, scopeWide);
+  // A host can itself live inside a `graph:` block whose readable set is not known until a
+  // later scope is resolved, so this is a fixpoint just like the editor's resolver — one pass
+  // would under-report providers for a graph whose host is declared after it in the file.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const scope of file.scopes) {
+      if (scope.name == null) continue;
+      const hosts = hostsByBlockName.get(scope.name) ?? [];
+      const throughHosts = hosts.flatMap((host) => [...(readable.get(host) ?? [])]);
+      const nestedProviders = providersByMemberIn(scope.contexts);
+      const scopeWide = new Set([...inherited, ...throughHosts]);
+      for (const node of scope.nodes) {
+        const next = new Set([...scopeWide, ...(nestedProviders.get(node.name) ?? [])]);
+        const before = readable.get(node);
+        if (before && sameStringSet(before, next)) continue;
+        readable.set(node, next);
+        changed = true;
+      }
+    }
   }
   return readable;
 }
 
-function providersByMember(file: ScannedFile): Map<string, Set<string>> {
+function sameStringSet(left: Set<string>, right: Set<string>): boolean {
+  return left.size === right.size && [...left].every((name) => right.has(name));
+}
+
+function providersByMemberIn(blocks: ScannedContext[]): Map<string, Set<string>> {
   const providersByMemberName = new Map<string, Set<string>>();
-  for (const block of file.contexts) {
+  for (const block of blocks) {
     for (const member of block.members) {
       const providers = providersByMemberName.get(member.name) ?? new Set<string>();
       providers.add(block.name);
@@ -206,12 +224,10 @@ function reportUpdatedContexts(
 }
 
 function reportContextBlocks(file: ScannedFile, diagnostics: Diagnostic[]): void {
-  const topLevelNames = new Set((rootScope(file)?.nodes ?? []).map((node) => node.name));
   const nestedNames = new Set(
     file.scopes.filter((scope) => scope.name != null).flatMap((scope) => scope.nodes.map((node) => node.name)),
   );
   const inherited = new Set(inheritedContextNames(file));
-  const placedRects = file.contexts.length > 0 ? placedTopLevelRects(file) : new Map<ScannedNode, Rect>();
 
   for (const block of file.contexts) {
     if (inherited.has(block.name)) {
@@ -223,35 +239,43 @@ function reportContextBlocks(file: ScannedFile, diagnostics: Diagnostic[]): void
         ),
       );
     }
-    reportContextMembers(block, topLevelNames, nestedNames, diagnostics);
+    const scope = scopeOfContext(file, block);
+    const siblingNames = new Set((scope?.nodes ?? []).map((node) => node.name));
+    reportContextMembers(block, siblingNames, nestedNames, scope?.name ?? null, diagnostics);
     reportContextGeometry(block, diagnostics);
     // A redeclared inherited context is inert — the declaring graph owns its membership — so a
     // region drawn on the redeclaration cannot recruit nodes; flagging them would contradict the
     // redeclaration warning above.
-    if (!inherited.has(block.name)) reportUnassignedRegionMembers(block, placedRects, diagnostics);
+    if (!inherited.has(block.name) && scope) {
+      reportUnassignedRegionMembers(block, placedRectsForScope(scope), diagnostics);
+    }
     reportReferences(block.references, diagnostics);
   }
 }
 
 function reportContextMembers(
   block: ScannedContext,
-  topLevelNames: Set<string>,
+  siblingNames: Set<string>,
   nestedNames: Set<string>,
+  scopeName: string | null,
   diagnostics: Diagnostic[],
 ): void {
   for (const member of block.members) {
-    if (topLevelNames.has(member.name)) continue;
+    if (siblingNames.has(member.name)) continue;
+    const listedFromOtherGraph = scopeName == null && nestedNames.has(member.name);
     diagnostics.push(
-      nestedNames.has(member.name)
+      listedFromOtherGraph
         ? warning(
             'context-member-in-graph-block',
             member.line,
-            `"${member.name}" is declared inside a \`graph:\` block, so it cannot be a member; a node there reaches a provider through the node that expands the block.`,
+            `"${member.name}" is declared inside a \`graph:\` block, so it cannot be a member of a file-body context; a node there reaches a provider through the node that expands the block, or through a \`context:\` item of that block.`,
           )
         : warning(
             'context-member-not-found',
             member.line,
-            `No node named "${member.name}" is declared at column 0 in this file, so this entry grants access to nothing.`,
+            scopeName == null
+              ? `No node named "${member.name}" is declared at column 0 in this file, so this entry grants access to nothing.`
+              : `No node named "${member.name}" is declared in \`graph: ${scopeName}\`, so this entry grants access to nothing.`,
           ),
     );
   }
@@ -301,21 +325,20 @@ function reportUnassignedRegionMembers(
   }
 }
 
-// The canvas places every top-level node before painting (flow-doc.ts buildModel): an authored
+// The canvas places every node in a scope before painting (flow-doc.ts buildModel): an authored
 // `pos` where the file has one, the auto-layout grid where it does not. Recomputing that here
 // keeps the region check honest for files the editor has not touched yet.
-function placedTopLevelRects(file: ScannedFile): Map<ScannedNode, Rect> {
-  const root = rootScope(file);
-  const nodes: LayoutNode[] = (root?.nodes ?? []).map((node) => ({
+function placedRectsForScope(scope: ScannedScope): Map<ScannedNode, Rect> {
+  const nodes: LayoutNode[] = scope.nodes.map((node) => ({
     name: node.name,
     pos: posOf(node),
   }));
   const nodesByName = new Map(nodes.map((node) => [node.name, node]));
-  const edges: LayoutEdge[] = (root?.nodes ?? []).flatMap((node) =>
+  const edges: LayoutEdge[] = scope.nodes.flatMap((node) =>
     node.edges.map((edge) => ({ from: nodesByName.get(node.name)!, spec: edge.spec, kind: 'flow' })),
   );
   autoLayout(nodes, edges);
-  return new Map((root?.nodes ?? []).map((node, index) => [node, nodes[index].pos!]));
+  return new Map(scope.nodes.map((node, index) => [node, nodes[index].pos!]));
 }
 
 function posOf(node: ScannedNode): Rect | null {

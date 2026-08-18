@@ -3,7 +3,7 @@
 // would silently drop or misread — see the module comment in flow-scan.ts.
 
 import { error, warning, type Diagnostic } from './flow-diagnostics.js';
-import { CONTEXT_HEADER, GRAPH_HEADER, parsePos } from './flow-format.js';
+import { GRAPH_HEADER, parsePos } from './flow-format.js';
 import type {
   DropReason,
   ScannedContext,
@@ -36,7 +36,7 @@ const NAME_WITH_COLON = /:(\s|$)/;
 
 const DROP_MESSAGES: Record<DropReason, string> = {
   'property-before-node':
-    'Indented line appears before any node is declared, so the parser discards it. Declare a node at column 0 first.',
+    'Indented line appears before any item is declared, so the parser discards it. Declare a node at the item indent of its graph scope first.',
   'orphan-block-entry':
     'Line is indented as a block entry but no `data:` or `references:` block is open above it, so the parser discards it.',
   'malformed-reference-entry':
@@ -237,20 +237,6 @@ function reportNodeName(node: ScannedNode, diagnostics: Diagnostic[]): void {
         'A `graph:` block cannot be nested inside another; the parser reads this as a node literally named "' +
           node.name +
           '" and discards its body.',
-      ),
-    );
-    return;
-  }
-  // A `context:` header is only a block at column 0, so this line became a node literally named
-  // "context: X" and its members were dropped.
-  if (CONTEXT_HEADER.test(node.name)) {
-    diagnostics.push(
-      error(
-        'nested-context-block',
-        node.line,
-        'A `context:` block only exists at column 0; the parser reads this as a node literally named "' +
-          node.name +
-          '" and discards its `nodes:` list.',
       ),
     );
     return;
