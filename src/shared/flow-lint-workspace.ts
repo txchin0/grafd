@@ -1,11 +1,13 @@
 // Linting a whole .flow workspace, which is the only level at which cross-file questions can
 // be answered: does an `expand` link land on a file that exists, does an `{Inner}` refinement
 // name a node in that file, do the expansions form a cycle, and is every file reachable from
-// the entrypoint.
+// the entrypoint. Each .flow's canvas layer is linted here too, against the .flow beside it.
 //
 // Every file is scanned once here and the scans are shared with the single-file rules, whose
 // ExpansionLookup is upgraded to resolve external links against the workspace.
 
+import { flowPathOfCanvasLayer } from './canvas-layer.js';
+import { lintCanvasLayer } from './canvas-layer-lint.js';
 import { byLine, warning, type Diagnostic, type FileDiagnostics } from './flow-diagnostics.js';
 import { parseExpandLink, parseListValue, resolveLinkPath } from './flow-format.js';
 import {
@@ -25,6 +27,8 @@ export interface WorkspaceFile {
 
 export interface WorkspaceLintInput {
   files: WorkspaceFile[];
+  // The `<file>.flow.canvas.json` sidecars found in the workspace.
+  canvasLayers?: WorkspaceFile[];
   manifest?: WorkspaceManifest | null;
 }
 
@@ -52,9 +56,18 @@ export function lintWorkspace(input: WorkspaceLintInput): FileDiagnostics[] {
   const manifestDiagnostics = reportUnreachableFiles(scans, input.manifest ?? null, report);
 
   for (const result of results) result.diagnostics.sort(byLine);
+  const layerResults = lintCanvasLayers(input);
   return manifestDiagnostics.length > 0
-    ? [...results, { path: MANIFEST_FILE_NAME, diagnostics: manifestDiagnostics }]
-    : results;
+    ? [...results, ...layerResults, { path: MANIFEST_FILE_NAME, diagnostics: manifestDiagnostics }]
+    : [...results, ...layerResults];
+}
+
+function lintCanvasLayers(input: WorkspaceLintInput): FileDiagnostics[] {
+  const flowTexts = new Map(input.files.map((file) => [file.path, file.text]));
+  return (input.canvasLayers ?? []).map((layer) => ({
+    path: layer.path,
+    diagnostics: lintCanvasLayer(layer.text, flowTexts.get(flowPathOfCanvasLayer(layer.path)) ?? null),
+  }));
 }
 
 type Report = (path: string, diagnostic: Diagnostic) => void;

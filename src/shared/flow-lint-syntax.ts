@@ -20,6 +20,9 @@ const PREAMBLE_KEYS = ['name', 'description', 'on_error', 'updates', 'entrypoint
 const NODE_KEYS = ['id', 'pos', 'description', 'expand', 'on_error', 'updates', 'entrypoint', 'references'];
 const CONTEXT_KEYS = ['pos', 'description', 'references', 'nodes'];
 const LIST_VALUED_KEYS = ['inherits', 'updates'];
+// Keys someone reaching for styling would write. The format has no style property — styling
+// lives in the graph's canvas layer — so these get a message that says where it went.
+const STYLE_KEYS = new Set(['shape', 'color', 'colour', 'fill', 'stroke', 'style', 'background']);
 // Where a `key: value` line sits, which decides both the keys it may use and how it is named in
 // a diagnostic. Not called `context`: that word is taken by the domain here.
 type PropertySite = 'preamble' | 'node' | 'context';
@@ -289,6 +292,14 @@ function reportPropertyValue(
   if (site === 'preamble' && property.key === 'expand') {
     diagnostics.push(
       warning('expand-in-preamble', property.line, 'A preamble has no `expand` — the file itself is the expansion.'),
+    );
+  } else if (STYLE_KEYS.has(property.key)) {
+    diagnostics.push(
+      warning(
+        'style-in-flow',
+        property.line,
+        `\`${property.key}\` is styling, and styling never goes in a .flow — the editor keeps it in the graph's canvas layer (<file>.flow.canvas.json). Remove the line and set the look in the editor.`,
+      ),
     );
   } else if (!allowedKeys.includes(property.key)) {
     diagnostics.push(

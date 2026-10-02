@@ -6,7 +6,7 @@
 
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { listFlowFiles } from '../server/flow-files.js';
+import { listCanvasLayerFiles, listFlowFiles } from '../server/flow-files.js';
 import { countDiagnostics, type FileDiagnostics } from '../shared/flow-diagnostics.js';
 import { lintWorkspace, type WorkspaceFile } from '../shared/flow-lint-workspace.js';
 import { MANIFEST_FILE_NAME, parseManifest } from '../shared/manifest.js';
@@ -20,7 +20,8 @@ interface Options {
 const DEFAULT_WORKSPACE = '.grafd';
 const USAGE = `Usage: grafd lint [workspace…] [options]
 
-Lints every .flow file in each workspace directory (default: ${DEFAULT_WORKSPACE}).
+Lints every .flow file in each workspace directory (default: ${DEFAULT_WORKSPACE}), and the
+canvas layer (.flow.canvas.json) beside each one.
 
 Options:
   --strict         exit non-zero on warnings as well as errors
@@ -62,16 +63,20 @@ function parseOptions(argv: string[]): Options | 'help' | 'invalid' {
 
 async function lintWorkspaceDirectory(root: string): Promise<FileDiagnostics[]> {
   const absoluteRoot = path.resolve(root);
-  const relativePaths = await listFlowFiles(absoluteRoot);
-  const files: WorkspaceFile[] = await Promise.all(
+  const files = await readWorkspaceFiles(absoluteRoot, await listFlowFiles(absoluteRoot));
+  const canvasLayers = await readWorkspaceFiles(absoluteRoot, await listCanvasLayerFiles(absoluteRoot));
+
+  const results = lintWorkspace({ files, canvasLayers, manifest: await readWorkspaceManifest(absoluteRoot) });
+  return results.map((result) => ({ ...result, path: displayPath(root, result.path) }));
+}
+
+function readWorkspaceFiles(absoluteRoot: string, relativePaths: string[]): Promise<WorkspaceFile[]> {
+  return Promise.all(
     relativePaths.map(async (relativePath) => ({
       path: relativePath,
       text: await readFile(path.join(absoluteRoot, relativePath), 'utf8'),
     })),
   );
-
-  const results = lintWorkspace({ files, manifest: await readWorkspaceManifest(absoluteRoot) });
-  return results.map((result) => ({ ...result, path: displayPath(root, result.path) }));
 }
 
 async function readWorkspaceManifest(absoluteRoot: string) {

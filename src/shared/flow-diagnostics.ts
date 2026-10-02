@@ -3,9 +3,10 @@
 // `error` means the file is corrupt as far as the parser is concerned: content is dropped or
 // mangled, and because the editor round-trips every file it opens (parse → serialize → write),
 // an error left unfixed can destroy content on the next save. `warning` means the file parses
-// cleanly but says something that is probably not what the author meant.
+// cleanly but says something that is probably not what the author meant. `info` reports a state
+// that is expected to arise and needs no action — it never fails a run, strict or not.
 
-export type DiagnosticSeverity = 'error' | 'warning';
+export type DiagnosticSeverity = 'error' | 'warning' | 'info';
 
 export interface Diagnostic {
   rule: string;
@@ -32,6 +33,10 @@ export function warning(rule: string, line: number, message: string): Diagnostic
   return { rule, severity: 'warning', line, message };
 }
 
+export function info(rule: string, line: number, message: string): Diagnostic {
+  return { rule, severity: 'info', line, message };
+}
+
 export function byLine(first: Diagnostic, second: Diagnostic): number {
   return first.line - second.line || first.rule.localeCompare(second.rule);
 }
@@ -41,7 +46,7 @@ export function countDiagnostics(files: FileDiagnostics[]): DiagnosticCounts {
   for (const file of files) {
     for (const diagnostic of file.diagnostics) {
       if (diagnostic.severity === 'error') counts.errors += 1;
-      else counts.warnings += 1;
+      else if (diagnostic.severity === 'warning') counts.warnings += 1;
     }
   }
   return counts;
