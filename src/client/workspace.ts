@@ -9,8 +9,10 @@
 //   watcher for synchronized editing (workspace-folder.ts).
 //
 // Paths are portable (forward-slash, workspace-root-relative). The workspace manifest
-// (grafd.manifest.json) travels through the same read/write calls as any other file;
-// backends exclude it from file listings.
+// (grafd.manifest.json) and each .flow's canvas layer (`<file>.flow.canvas.json`) travel
+// through the same read/write calls as any other file; backends exclude both from file
+// listings. A canvas layer moves and is deleted with its .flow inside the backend: renaming or
+// deleting a .flow is the only way a client relocates or removes one implicitly.
 
 export type WorkspaceKind = 'server' | 'browser' | 'folder';
 
@@ -21,6 +23,9 @@ export interface WorkspaceDelegate {
   // so the old path is not treated as deleted and never written back.
   fileRenamed?(from: string, to: string): void;
   fileChanged(path: string, text: string): void;
+  // A file that file listings never show (a canvas layer) was removed. Listed files report
+  // their removal through filesChanged instead.
+  fileDeleted?(path: string): void;
   connectionChanged(connected: boolean): void;
 }
 
@@ -39,6 +44,7 @@ export interface Workspace {
   stop(): void;
   readFile(path: string): Promise<string | null>;
   writeFile(path: string, text: string): void;
+  // Deleting a .flow also deletes its canvas layer.
   deleteFile(path: string): void;
   // Moves a file (and its content) from one workspace path to another. Both paths are
   // portable and .flow-relative to the workspace root, like the read/write/delete paths.
@@ -46,6 +52,7 @@ export interface Workspace {
   // source is missing or whose target is already taken (a same-file case-only rename being
   // the one exception), and none of them overwrite. Backends also refuse without attempting
   // when they cannot currently perform the move — the connection is down, or the browser
-  // lacks the file-system API a case-only rename would need.
+  // lacks the file-system API a case-only rename would need. The .flow's canvas layer moves
+  // with it, replacing any orphaned layer at the destination.
   renameFile(from: string, to: string): Promise<boolean>;
 }

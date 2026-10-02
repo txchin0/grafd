@@ -267,3 +267,64 @@ describe('websocket rename', () => {
     expect(await filesAt(server)).toEqual(['dir.flow/inner.flow']);
   });
 });
+
+describe('canvas layers', () => {
+  const LAYER = '{"format":"grafd-canvas/1","nodes":{"n":{"shape":"diamond"}}}\n';
+
+  async function readText(server: StartedServer, file: string): Promise<string | null> {
+    const response = await fetch(`${server.url}/api/file?path=${encodeURIComponent(file)}`);
+    return response.ok ? ((await response.json()) as { text: string }).text : null;
+  }
+
+  async function startWithLayer(): Promise<{ server: StartedServer; workspace: string }> {
+    const workspace = await makeWorkspace();
+    await writeFile(path.join(workspace, 'main.flow.canvas.json'), LAYER);
+    const server = await startServer({ workspaceRoot: workspace, port: 0, host: '127.0.0.1' });
+    servers.push(server);
+    return { server, workspace };
+  }
+
+  it('serves a layer but never lists it', async () => {
+    const { server } = await startWithLayer();
+    expect(await readText(server, 'main.flow.canvas.json')).toBe(LAYER);
+    expect(await filesAt(server)).toEqual(['main.flow']);
+  });
+
+  it('moves the layer with its .flow, replacing an orphaned layer at the destination', async () => {
+    const { server, workspace } = await startWithLayer();
+    await writeFile(path.join(workspace, 'renamed.flow.canvas.json'), '{"nodes":{"stale":{"shape":"ellipse"}}}');
+    const client = await openSocket(server);
+    client.send(JSON.stringify({ type: 'rename', from: 'main.flow', to: 'renamed.flow' }));
+    expect(await waitForRenameResult(client)).toBe(true);
+    expect(await readText(server, 'renamed.flow.canvas.json')).toBe(LAYER);
+    expect(await readText(server, 'main.flow.canvas.json')).toBeNull();
+  });
+
+  it('removes an orphaned layer at the destination even when the renamed .flow has none', async () => {
+    const workspace = await makeWorkspace();
+    await writeFile(path.join(workspace, 'renamed.flow.canvas.json'), LAYER);
+    const server = await startServer({ workspaceRoot: workspace, port: 0, host: '127.0.0.1' });
+    servers.push(server);
+    const client = await openSocket(server);
+    client.send(JSON.stringify({ type: 'rename', from: 'main.flow', to: 'renamed.flow' }));
+    expect(await waitForRenameResult(client)).toBe(true);
+    expect(await readText(server, 'renamed.flow.canvas.json')).toBeNull();
+  });
+
+  it('refuses a rename of the layer itself', async () => {
+    const { server } = await startWithLayer();
+    const client = await openSocket(server);
+    client.send(JSON.stringify({ type: 'rename', from: 'main.flow.canvas.json', to: 'other.flow.canvas.json' }));
+    expect(await waitForRenameResult(client)).toBe(false);
+    expect(await readText(server, 'main.flow.canvas.json')).toBe(LAYER);
+  });
+
+  it('deletes the layer with its .flow', async () => {
+    const { server } = await startWithLayer();
+    const client = await openSocket(server);
+    const listPromise = waitForFiles(client, (files) => !files.includes('main.flow'));
+    client.send(JSON.stringify({ type: 'delete', path: 'main.flow' }));
+    await listPromise;
+    expect(await readText(server, 'main.flow.canvas.json')).toBeNull();
+  });
+});

@@ -3,6 +3,7 @@
 // a .flow file, another editor saving — are picked up by a polling watcher that compares
 // modification times and file text, so editing stays synchronized without a server.
 
+import { canvasLayerPathOf, companionLayerOf, isCanvasLayerPath, isFlowPath } from '../shared/canvas-layer.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
 
 const POLL_INTERVAL_MS = 1500;
@@ -28,6 +29,8 @@ export class FolderWorkspace implements Workspace {
   private delegate: WorkspaceDelegate | null = null;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
   private fileHandles = new Map<string, FileSystemFileHandle>();
+  // Canvas layers are watched like .flow files but never listed, so they are kept apart.
+  private layerHandles = new Map<string, FileSystemFileHandle>();
   private readonly lastModified = new Map<string, number>();
   private readonly lastSeenText = new Map<string, string>();
   // Mutations run one at a time in the order they were asked for, so a delete can never land
@@ -44,7 +47,7 @@ export class FolderWorkspace implements Workspace {
 
   async start(delegate: WorkspaceDelegate): Promise<string[]> {
     this.delegate = delegate;
-    this.fileHandles = await this.discoverFlowFiles();
+    ({ flows: this.fileHandles, layers: this.layerHandles } = await this.discoverFiles());
     await this.recordModificationTimes();
     delegate.connectionChanged(true);
     this.pollTimer = setInterval(() => void this.poll(), POLL_INTERVAL_MS);
@@ -81,10 +84,16 @@ export class FolderWorkspace implements Workspace {
     void this.enqueueMutation(async () => {
       try {
         await this.performDelete(path);
+        await this.deleteCompanionLayerOf(path);
       } catch (error) {
         console.error(`Failed to delete ${path} from the opened folder`, error);
       }
     });
+  }
+
+  private async deleteCompanionLayerOf(path: string): Promise<void> {
+    const layerPath = companionLayerOf(path);
+    if (layerPath && (await this.locateFile(layerPath, { create: false }))) await this.performDelete(layerPath);
   }
 
   renameFile(from: string, to: string): Promise<boolean> {
@@ -119,9 +128,10 @@ export class FolderWorkspace implements Workspace {
     }
     await directory.removeEntry(fileName);
     await this.removeEmptyDirectories(chain);
-    this.fileHandles.delete(path);
     this.lastModified.delete(path);
     this.lastSeenText.delete(path);
+    if (this.layerHandles.delete(path)) return;
+    this.fileHandles.delete(path);
     this.delegate?.filesChanged(this.sortedFlowPaths());
   }
 
@@ -133,12 +143,9 @@ export class FolderWorkspace implements Workspace {
     // since then is checked directly — and refused unless it is the file being renamed (a
     // case-only rename is the same entry on a case-insensitive filesystem).
     const existing = await this.locateFile(to, { create: false });
-    const sameEntry =
-      existing != null && typeof handle.isSameEntry === 'function'
-        ? await handle.isSameEntry(existing)
-        : false;
+    const sameEntry = await isSameEntry(handle, existing);
     if (existing && !sameEntry) return false;
-    const move = (handle as FileSystemFileHandle & { move?(name: string): Promise<unknown> }).move;
+    const move = moveOf(handle);
     if (!move) {
       // Older Chromium without FileSystemHandle.move: copy to the new name, then remove the
       // old entry. A same-entry target is a case-only rename, which the copy/delete pair
@@ -159,19 +166,62 @@ export class FolderWorkspace implements Workspace {
         }
         throw error;
       }
+      await this.moveCanvasLayer(from, to);
       return true;
     }
-    await move.call(handle, fileName);
+    await move(fileName);
     this.fileHandles.delete(from);
     this.fileHandles.set(to, handle);
+    this.carryWatchState(from, to);
+    await this.moveCanvasLayer(from, to);
+    this.delegate?.filesChanged(this.sortedFlowPaths());
+    return true;
+  }
+
+  private carryWatchState(from: string, to: string): void {
     const modified = this.lastModified.get(from);
     const seen = this.lastSeenText.get(from);
     this.lastModified.delete(from);
     this.lastSeenText.delete(from);
     if (modified != null) this.lastModified.set(to, modified);
     if (seen != null) this.lastSeenText.set(to, seen);
-    this.delegate?.filesChanged(this.sortedFlowPaths());
-    return true;
+  }
+
+  // A .flow's canvas layer follows it. Best-effort: the .flow has already moved, and reporting
+  // the rename as failed would leave the client writing to the old path, re-creating it.
+  private async moveCanvasLayer(from: string, to: string): Promise<void> {
+    try {
+      await this.performCanvasLayerMove(canvasLayerPathOf(from), canvasLayerPathOf(to));
+    } catch (error) {
+      console.error(`Failed to move the canvas layer of ${from} to ${to} in the opened folder`, error);
+    }
+  }
+
+  // Whatever sits at the destination is an orphan — no .flow owns it, or the rename would have
+  // been refused — and is replaced.
+  private async performCanvasLayerMove(layerPath: string, destinationPath: string): Promise<void> {
+    const layer = await this.locateFile(layerPath, { create: false });
+    const existing = await this.locateFile(destinationPath, { create: false });
+    if (layer && (await isSameEntry(layer, existing))) {
+      await this.moveCaseOnly(layer, layerPath, destinationPath);
+      return;
+    }
+    if (existing) await this.performDelete(destinationPath);
+    if (!layer) return;
+    const text = await (await layer.getFile()).text();
+    await this.performWrite(destinationPath, text);
+    await this.performDelete(layerPath);
+  }
+
+  // One entry under two spellings, which a copy and a delete would destroy. Without the move
+  // API the layer keeps its old spelling and is simply orphaned.
+  private async moveCaseOnly(layer: FileSystemFileHandle, layerPath: string, destinationPath: string): Promise<void> {
+    const move = moveOf(layer);
+    if (!move) return;
+    await move(destinationPath.split('/').pop()!);
+    this.layerHandles.delete(layerPath);
+    this.layerHandles.set(destinationPath, layer);
+    this.carryWatchState(layerPath, destinationPath);
   }
 
   // Innermost first; a non-empty directory ends the walk because its parents contain it.
@@ -193,7 +243,9 @@ export class FolderWorkspace implements Workspace {
     await writable.close();
     const written = await handle.getFile();
     this.lastModified.set(path, written.lastModified);
-    if (path.endsWith('.flow') && !this.fileHandles.has(path)) {
+    if (isCanvasLayerPath(path)) {
+      this.layerHandles.set(path, handle);
+    } else if (isFlowPath(path) && !this.fileHandles.has(path)) {
       this.fileHandles.set(path, handle);
       this.delegate?.filesChanged(this.sortedFlowPaths());
     }
@@ -216,27 +268,33 @@ export class FolderWorkspace implements Workspace {
     }
   }
 
-  private async discoverFlowFiles(
+  private async discoverFiles(
     directory: FileSystemDirectoryHandle = this.root,
     prefix = '',
-  ): Promise<Map<string, FileSystemFileHandle>> {
-    const discovered = new Map<string, FileSystemFileHandle>();
+    discovered: DiscoveredFiles = { flows: new Map(), layers: new Map() },
+  ): Promise<DiscoveredFiles> {
     for await (const entry of directory.values()) {
       if (entry.name.startsWith('.') || IGNORED_DIRECTORIES.has(entry.name)) continue;
+      const path = `${prefix}${entry.name}`;
       if (entry.kind === 'directory') {
-        const nested = await this.discoverFlowFiles(entry as FileSystemDirectoryHandle, `${prefix}${entry.name}/`);
-        for (const [path, handle] of nested) discovered.set(path, handle);
-      } else if (entry.name.endsWith('.flow')) {
-        discovered.set(`${prefix}${entry.name}`, entry as FileSystemFileHandle);
+        await this.discoverFiles(entry as FileSystemDirectoryHandle, `${path}/`, discovered);
+      } else if (isFlowPath(entry.name)) {
+        discovered.flows.set(path, entry as FileSystemFileHandle);
+      } else if (isCanvasLayerPath(entry.name)) {
+        discovered.layers.set(path, entry as FileSystemFileHandle);
       }
     }
     return discovered;
   }
 
   private async recordModificationTimes(): Promise<void> {
-    for (const [path, handle] of this.fileHandles) {
+    for (const [path, handle] of this.watchedHandles()) {
       this.lastModified.set(path, (await handle.getFile()).lastModified);
     }
+  }
+
+  private watchedHandles(): [string, FileSystemFileHandle][] {
+    return [...this.fileHandles, ...this.layerHandles];
   }
 
   private sortedFlowPaths(): string[] {
@@ -247,9 +305,9 @@ export class FolderWorkspace implements Workspace {
     if (!this.delegate) return;
     let merged = false;
     await this.enqueueMutation(async () => {
-      let discovered: Map<string, FileSystemFileHandle>;
+      let discovered: DiscoveredFiles;
       try {
-        discovered = await this.discoverFlowFiles();
+        discovered = await this.discoverFiles();
       } catch {
         this.delegate?.connectionChanged(false);
         return;
@@ -258,16 +316,19 @@ export class FolderWorkspace implements Workspace {
 
       // The scan and this merge are serialized against every mutation, so the snapshot is
       // never older than the rename that re-keyed the map: wholesale replacement is safe.
-      const removedPaths = [...this.fileHandles.keys()].filter((path) => !discovered.has(path));
-      const addedPaths = [...discovered.keys()].filter((path) => !this.fileHandles.has(path));
-      this.fileHandles = discovered;
-      for (const path of removedPaths) {
+      const removedPaths = [...this.fileHandles.keys()].filter((path) => !discovered.flows.has(path));
+      const addedPaths = [...discovered.flows.keys()].filter((path) => !this.fileHandles.has(path));
+      const removedLayers = [...this.layerHandles.keys()].filter((path) => !discovered.layers.has(path));
+      this.fileHandles = discovered.flows;
+      this.layerHandles = discovered.layers;
+      for (const path of [...removedPaths, ...removedLayers]) {
         this.lastModified.delete(path);
         this.lastSeenText.delete(path);
       }
       if (removedPaths.length > 0 || addedPaths.length > 0) {
         this.delegate?.filesChanged(this.sortedFlowPaths());
       }
+      for (const path of removedLayers) this.delegate?.fileDeleted?.(path);
       merged = true;
     });
     if (!merged) return;
@@ -275,7 +336,7 @@ export class FolderWorkspace implements Workspace {
   }
 
   private async emitChangedFiles(): Promise<void> {
-    for (const [path, handle] of this.fileHandles) {
+    for (const [path, handle] of this.watchedHandles()) {
       let file: File;
       try {
         file = await handle.getFile();
@@ -291,4 +352,22 @@ export class FolderWorkspace implements Workspace {
       this.delegate?.fileChanged(path, text);
     }
   }
+}
+
+// Two spellings of one entry (a case-only rename on a case-insensitive filesystem). Without
+// isSameEntry the two cannot be told apart, so they are treated as distinct.
+async function isSameEntry(handle: FileSystemFileHandle, other: FileSystemFileHandle | null): Promise<boolean> {
+  if (other == null || typeof handle.isSameEntry !== 'function') return false;
+  return handle.isSameEntry(other);
+}
+
+// FileSystemHandle.move is missing from older Chromium and from the DOM typings.
+function moveOf(handle: FileSystemFileHandle): ((name: string) => Promise<unknown>) | null {
+  const move = (handle as FileSystemFileHandle & { move?(name: string): Promise<unknown> }).move;
+  return move ? (name) => move.call(handle, name) : null;
+}
+
+interface DiscoveredFiles {
+  flows: Map<string, FileSystemFileHandle>;
+  layers: Map<string, FileSystemFileHandle>;
 }

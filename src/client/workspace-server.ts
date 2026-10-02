@@ -75,7 +75,7 @@ export class ServerWorkspace implements Workspace {
   async readFile(path: string): Promise<string | null> {
     const response = await fetch(`./api/file?path=${encodeURIComponent(path)}`);
     if (!response.ok) return null;
-    return ((await response.json()) as { text: string }).text;
+    return ((await response.json()) as { text: string | null }).text;
   }
 
   writeFile(path: string, text: string): void {
@@ -124,12 +124,14 @@ export class ServerWorkspace implements Workspace {
       const message = JSON.parse(event.data as string) as
         | { type: 'files'; files: string[] }
         | { type: 'file'; path: string; text: string }
+        | { type: 'deleted'; path: string }
         | { type: 'hello'; reloadOnReconnect: boolean }
         | { type: 'rename'; from: string; to: string }
         | { type: 'rename-result'; ok: boolean; id?: number }
         | { type: 'reload' };
       if (message.type === 'files') this.delegate?.filesChanged(message.files);
       else if (message.type === 'file') this.delegate?.fileChanged(message.path, message.text);
+      else if (message.type === 'deleted') this.delegate?.fileDeleted?.(message.path);
       else if (message.type === 'hello') this.reloadOnReconnect = message.reloadOnReconnect;
       else if (message.type === 'rename-result') {
         const pending = this.pendingRename;

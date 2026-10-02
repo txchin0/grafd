@@ -3,6 +3,7 @@
 // a BroadcastChannel relays writes between them (tagged with a sender id so a tab ignores
 // its own).
 
+import { canvasLayerPathOf, companionLayerOf, isCanvasLayerPath } from '../shared/canvas-layer.js';
 import { MANIFEST_FILE_NAME } from '../shared/manifest.js';
 import { newUuid } from '../shared/flow-format.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
@@ -83,14 +84,17 @@ export class BrowserWorkspace implements Workspace {
       this.knownFiles = this.knownFiles.filter((known) => known !== path);
       this.channel?.postMessage({ sender: this.clientId, kind: 'delete', path } satisfies ChannelMessage);
     };
+    const layerPath = companionLayerOf(path);
+    if (layerPath) this.deleteFile(layerPath);
   }
 
   renameFile(from: string, to: string): Promise<boolean> {
     return new Promise((resolve) => {
       const transaction = this.database!.transaction(FILE_STORE, 'readwrite');
       const store = transaction.objectStore(FILE_STORE);
-      // Issued first so its result is settled before the source read's success handler runs.
+      // Issued first so their results are settled before the source read's success handler runs.
       const toRequest = store.get(to) as IDBRequest<StoredFile | undefined>;
+      const layerRequest = store.get(canvasLayerPathOf(from)) as IDBRequest<StoredFile | undefined>;
       const fromRequest = store.get(from) as IDBRequest<StoredFile | undefined>;
       let settled = false;
       const finish = (ok: boolean): void => {
@@ -114,6 +118,7 @@ export class BrowserWorkspace implements Workspace {
         }
         store.put({ path: to, text: stored.text } satisfies StoredFile);
         store.delete(from);
+        moveCanvasLayer(store, from, to, layerRequest.result);
       };
       fromRequest.onerror = () => finish(false);
       toRequest.onerror = () => finish(false);
@@ -148,15 +153,14 @@ export class BrowserWorkspace implements Workspace {
     const keys = await requestToPromise(this.fileStore('readonly').getAllKeys());
     return keys
       .map(String)
-      .filter((path) => path !== MANIFEST_FILE_NAME)
+      .filter(isListedPath)
       .sort();
   }
 
   private receiveFromOtherTab(message: ChannelMessage): void {
     if (message.sender === this.clientId) return;
     if (message.kind === 'delete') {
-      this.knownFiles = this.knownFiles.filter((known) => known !== message.path);
-      this.delegate?.filesChanged([...this.knownFiles]);
+      this.receiveDeletion(message.path);
       return;
     }
     if (message.kind === 'rename') {
@@ -168,11 +172,37 @@ export class BrowserWorkspace implements Workspace {
       this.delegate?.fileRenamed?.(message.from, message.to);
       return;
     }
-    if (message.path !== MANIFEST_FILE_NAME && !this.knownFiles.includes(message.path)) {
+    if (isListedPath(message.path) && !this.knownFiles.includes(message.path)) {
       this.knownFiles.push(message.path);
       this.knownFiles.sort();
       this.delegate?.filesChanged([...this.knownFiles]);
     }
     this.delegate?.fileChanged(message.path, message.text);
+  }
+
+  // A canvas layer is never listed, so its removal is reported on its own.
+  private receiveDeletion(path: string): void {
+    if (isCanvasLayerPath(path)) {
+      this.delegate?.fileDeleted?.(path);
+      return;
+    }
+    this.knownFiles = this.knownFiles.filter((known) => known !== path);
+    this.delegate?.filesChanged([...this.knownFiles]);
+  }
+}
+
+function isListedPath(path: string): boolean {
+  return path !== MANIFEST_FILE_NAME && !isCanvasLayerPath(path);
+}
+
+// Inside the rename's transaction. Whatever sits at the destination's layer path is an orphan —
+// no .flow owns it, or the rename would have been refused — so it is replaced or removed.
+function moveCanvasLayer(store: IDBObjectStore, from: string, to: string, layer: StoredFile | undefined): void {
+  const destination = canvasLayerPathOf(to);
+  if (layer) {
+    store.put({ path: destination, text: layer.text } satisfies StoredFile);
+    store.delete(canvasLayerPathOf(from));
+  } else {
+    store.delete(destination);
   }
 }

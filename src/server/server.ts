@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import chokidar from 'chokidar';
 import { WebSocketServer, type WebSocket } from 'ws';
+import { canvasLayerPathOf, companionLayerOf, isCanvasLayerPath, isFlowPath } from '../shared/canvas-layer.js';
 import { contentHash, listFlowFiles, resolveWorkspacePath, toPortablePath } from './flow-files.js';
 
 export const DEFAULT_WORKSPACE = '.grafd';
@@ -103,7 +104,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     try {
       response.json({ path: request.query.path, text: await readFile(absolute, 'utf8') });
     } catch {
-      response.status(404).json({ error: 'not found' });
+      // Most graphs have no canvas layer, so a missing one is the normal case rather than an
+      // error — and a 404 for every graph opened would fill the browser console.
+      if (isCanvasLayerPath(String(request.query.path))) response.json({ path: request.query.path, text: null });
+      else response.status(404).json({ error: 'not found' });
     }
   });
 
@@ -207,24 +211,33 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
         const { path: portablePath } = message;
         const absolute = resolveWorkspacePath(workspaceRoot, portablePath);
         if (!absolute) return;
-        void queueFileOperation([absolute], async () => {
-          lastWrittenHashes.delete(absolute);
-          await rm(absolute, { force: true });
+        const companion = companionLayerOf(portablePath);
+        const companionAbsolute = companion ? resolveWorkspacePath(workspaceRoot, companion) : null;
+        void queueFileOperation(companionAbsolute ? [absolute, companionAbsolute] : [absolute], async () => {
+          await removeWorkspaceFile(absolute);
+          const companionExisted = companionAbsolute != null && (await isFile(companionAbsolute));
+          if (companionAbsolute) await removeWorkspaceFile(companionAbsolute);
           await removeEmptyParentDirectories(path.dirname(absolute));
+          // A canvas layer is never listed, so its removal is announced on its own.
+          if (isCanvasLayerPath(portablePath)) broadcast({ type: 'deleted', path: portablePath }, { except: socket });
+          if (companion && companionExisted) broadcast({ type: 'deleted', path: companion });
           await broadcastFileList();
         });
       } else if (message.type === 'rename') {
         const { from, to, id } = message;
         // Renames move .flow files only — the manifest is client-owned UI state and must not
-        // be relocatable through the same path. resolveWorkspacePath also admits the manifest
-        // for read/write, so the extension is enforced here rather than by that helper.
+        // be relocatable through the same path, and a canvas layer moves only with its .flow
+        // (below). resolveWorkspacePath also admits both for read/write, so the extension is
+        // enforced here rather than by that helper.
         const absolute = resolveWorkspacePath(workspaceRoot, from);
         const toAbsolute = resolveWorkspacePath(workspaceRoot, to);
-        if (!absolute || !toAbsolute || !from.endsWith('.flow') || !to.endsWith('.flow')) {
+        if (!absolute || !toAbsolute || !isFlowPath(from) || !isFlowPath(to)) {
           sendRenameResult(socket, false, id);
           return;
         }
-        void queueFileOperation([absolute, toAbsolute], async () => {
+        const companionPaths = [canvasLayerAbsolutePathOf(from), canvasLayerAbsolutePathOf(to)]
+          .filter((companion): companion is string => companion != null);
+        void queueFileOperation([absolute, toAbsolute, ...companionPaths], async () => {
           let ok = false;
           try {
             ok = await renameWorkspaceFile(absolute, toAbsolute, from, to, socket);
@@ -256,19 +269,59 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
       console.error('Failed to rename', absolute, 'to', toAbsolute, error);
       return false;
     }
-    const hash = lastWrittenHashes.get(absolute);
-    if (hash) {
-      lastWrittenHashes.delete(absolute);
-      // Carried to the new path so the watcher's `add` echo for the moved file is
-      // suppressed here too: other clients receive the file list, not a content push,
-      // exactly as with an external rename.
-      lastWrittenHashes.set(toAbsolute, hash);
-    }
+    carryWrittenHash(absolute, toAbsolute);
+    await moveCanvasLayer(portableFrom, portableTo);
     // Other clients retarget their open flow and cached documents from this message; it goes
     // out before the file list so the old path is never mistaken for a deletion.
     broadcast({ type: 'rename', from: portableFrom, to: portableTo }, { except });
     await broadcastFileList();
     return true;
+  }
+
+  function carryWrittenHash(fromAbsolute: string, toAbsolute: string): void {
+    const hash = lastWrittenHashes.get(fromAbsolute);
+    if (!hash) return;
+    lastWrittenHashes.delete(fromAbsolute);
+    // Carried to the new path so the watcher's `add` echo for the moved file is suppressed
+    // here too: other clients receive the file list, not a content push, exactly as with an
+    // external rename.
+    lastWrittenHashes.set(toAbsolute, hash);
+  }
+
+  async function removeWorkspaceFile(absolute: string): Promise<void> {
+    lastWrittenHashes.delete(absolute);
+    await rm(absolute, { force: true });
+  }
+
+  function canvasLayerAbsolutePathOf(portableFlowPath: string): string | null {
+    return resolveWorkspacePath(workspaceRoot, canvasLayerPathOf(portableFlowPath));
+  }
+
+  // A .flow's canvas layer follows it. Clients re-key their own copy from the rename message,
+  // so the move sends nothing of its own. Best-effort: the .flow has already moved, and
+  // reporting the rename as failed would leave the client writing to the old path.
+  async function moveCanvasLayer(portableFrom: string, portableTo: string): Promise<void> {
+    const layer = canvasLayerAbsolutePathOf(portableFrom);
+    const destination = canvasLayerAbsolutePathOf(portableTo);
+    if (!layer || !destination) return;
+    try {
+      await replaceWithCanvasLayer(layer, destination);
+    } catch (error) {
+      console.error('Failed to move the canvas layer', layer, 'to', destination, error);
+    }
+  }
+
+  // Whatever sits at the destination is an orphan — no .flow owns it, or the rename would have
+  // been refused — and is overwritten.
+  async function replaceWithCanvasLayer(layer: string, destination: string): Promise<void> {
+    if (await sameFilePath(layer, destination)) {
+      await rename(layer, destination);
+      return;
+    }
+    await removeWorkspaceFile(destination);
+    if (!(await isFile(layer))) return;
+    await rename(layer, destination);
+    carryWrittenHash(layer, destination);
   }
 
   // Whether two absolute paths name the same entry. realpath resolves to the on-disk casing
@@ -329,7 +382,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
     broadcast({ type: 'files', files: await listFlowFiles(workspaceRoot) });
   }
 
-  const watcher = chokidar.watch('**/*.flow', {
+  const watcher = chokidar.watch(['**/*.flow', '**/*.flow.canvas.json'], {
     cwd: workspaceRoot,
     ignored: /(^|[\\/])(node_modules|\.git|\.claude|dist)([\\/]|$)/,
     ignoreInitial: true,
@@ -338,9 +391,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   watcher.on('change', handleFileChangedOnDisk);
   watcher.on('add', async (relativePath) => {
     await handleFileChangedOnDisk(relativePath);
-    await broadcastFileList();
+    if (!isCanvasLayerPath(relativePath)) await broadcastFileList();
   });
-  watcher.on('unlink', broadcastFileList);
+  watcher.on('unlink', async (relativePath) => {
+    const portablePath = toPortablePath(workspaceRoot, path.resolve(workspaceRoot, relativePath));
+    // A canvas layer is not listed, so its removal is announced on its own.
+    if (isCanvasLayerPath(portablePath)) broadcast({ type: 'deleted', path: portablePath });
+    else await broadcastFileList();
+  });
 
   // `tsc --watch` rewrites many files per compile, so the reload is deferred until emission
   // has gone quiet rather than fired per file.

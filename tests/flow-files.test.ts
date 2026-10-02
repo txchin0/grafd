@@ -2,7 +2,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { contentHash, listFlowFiles, resolveWorkspacePath, toPortablePath } from '../src/server/flow-files.js';
+import {
+  contentHash,
+  listCanvasLayerFiles,
+  listFlowFiles,
+  resolveWorkspacePath,
+  toPortablePath,
+} from '../src/server/flow-files.js';
 
 let root: string;
 
@@ -14,6 +20,7 @@ beforeAll(async () => {
   await mkdir(path.join(root, '.hidden'));
   await writeFile(path.join(root, 'a.flow'), 'A\n');
   await writeFile(path.join(root, 'sub', 'b.flow'), 'B\n');
+  await writeFile(path.join(root, 'sub', 'b.flow.canvas.json'), '{}\n');
   await writeFile(path.join(root, 'note.txt'), 'not a flow\n');
   await writeFile(path.join(root, 'node_modules', 'x.flow'), 'X\n');
   await writeFile(path.join(root, 'dist', 'd.flow'), 'D\n');
@@ -28,6 +35,12 @@ describe('resolveWorkspacePath', () => {
   it('resolves .flow paths inside the project root', () => {
     expect(resolveWorkspacePath(root, 'a.flow')).toBe(path.join(root, 'a.flow'));
     expect(resolveWorkspacePath(root, 'sub/b.flow')).toBe(path.join(root, 'sub', 'b.flow'));
+  });
+
+  it('resolves a .flow canvas layer, but no other .json', () => {
+    expect(resolveWorkspacePath(root, 'sub/b.flow.canvas.json')).toBe(path.join(root, 'sub', 'b.flow.canvas.json'));
+    expect(resolveWorkspacePath(root, 'b.canvas.json')).toBeNull();
+    expect(resolveWorkspacePath(root, '../b.flow.canvas.json')).toBeNull();
   });
 
   it('resolves the workspace manifest at the root only', () => {
@@ -57,6 +70,12 @@ describe('toPortablePath', () => {
 describe('listFlowFiles', () => {
   it('finds .flow files recursively, skipping ignored and hidden directories', async () => {
     expect(await listFlowFiles(root)).toEqual(['a.flow', 'sub/b.flow']);
+  });
+});
+
+describe('listCanvasLayerFiles', () => {
+  it('finds canvas layers recursively, apart from the .flow files they belong to', async () => {
+    expect(await listCanvasLayerFiles(root)).toEqual(['sub/b.flow.canvas.json']);
   });
 });
 

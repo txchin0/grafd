@@ -8,22 +8,26 @@ files are read, interpreted, and implemented by AI agents, so the diagram is the
 
 The format is defined in [FLOW-SPEC.md](FLOW-SPEC.md) and the editor is built to round-trip
 it exactly: canvas layout travels inside the file as editor-owned `id` and `pos`
-properties, with no sidecar metadata. A workspace is plain files on disk — open it in any
-editor, share it, diff it, or hand it to an agent.
+properties. Styling — node shapes and edge colours — lives in a separate canvas layer beside
+each graph (`<file>.flow.canvas.json`), so the `.flow` stays pure spec. A workspace is plain
+files on disk — open it in any editor, share it, diff it, or hand it to an agent.
 
 ## Features
 
 - **Freeform canvas editing** — nodes, edges, labels, regions, pan/zoom, marquee
 selection, inline editing, and action-based undo/redo on a rough.js hand-drawn canvas.
+- **Node shapes and edge colours** — draw a node as a rectangle, rounded rectangle, ellipse,
+diamond, hexagon, parallelogram or cylinder, and give an edge one of the theme's colours. Styling
+is stored in the graph's canvas layer, never in the `.flow`, and undoes like any other edit.
 - **Subgraph expansion** — unfold any `expand` reference inline on the canvas, edit inside
 the frame, and have changes routed to the `.flow` file that owns the node.
 - **Two deployment modes** — a self-hosted Node server with WebSocket live sync and direct
 disk writes, or a fully static build that runs entirely in the browser.
 - **Local folder workspaces** — open a folder through the File System Access API
 (Chromium) and stay in sync with other tools editing the same files.
-- **Workspace export** — download a workspace as a `.zip` containing the `.flow` files,
-`grafd.manifest.json`, and `SAVE-GUIDE.md`, the guide AI agents read to work in the
-workspace.
+- **Workspace export** — download a workspace as a `.zip` containing the `.flow` files with
+their canvas layers, `grafd.manifest.json`, and `SAVE-GUIDE.md`, the guide AI agents read to
+work in the workspace.
 - **References** — link any node to project files (with line ranges) or URLs, and jump
 from the canvas to the referenced file.
 - **Themes** — several built-in themes, imported automatically from VS Code color themes
@@ -164,12 +168,15 @@ directory, so it is safe to run while a dev server is live.
 
 ## The `.flow` format
 
-- [FLOW-SPEC.md](FLOW-SPEC.md) — the format specification (currently `flow/1.6`, draft).
+- [FLOW-SPEC.md](FLOW-SPEC.md) — the format specification (currently `flow/1.7`, draft).
 - [SAVE-GUIDE.md](SAVE-GUIDE.md) — the guide embedded in every exported workspace that
 tells AI agents how to parse, interpret, and edit `.flow` files.
 - `grafd.manifest.json` — editor-owned workspace state: the entrypoint flow, the format
 version, display settings, and UI state. Agents read `entrypoint` and `flowVersion`;
 everything else is editor state.
+- `<file>.flow.canvas.json` — a graph's canvas layer: its node shapes and edge colours,
+written only while the graph has any. Editor-owned; agents never read or write it, and move
+or delete it together with its `.flow`.
 
 The `.grafd/` directory in this repository is a working example workspace
 (a user authentication app) you can open immediately.

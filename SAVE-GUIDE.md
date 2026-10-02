@@ -1,4 +1,4 @@
-# .flow Format Guide (flow/1.6)
+# .flow Format Guide (flow/1.7)
 
 You are reading a `.flow` workspace. This guide defines how to parse, interpret, and edit `.flow` files. Read once, then apply to every `.flow` file in the workspace.
 
@@ -9,7 +9,8 @@ You are reading a `.flow` workspace. This guide defines how to parse, interpret,
 3. **Expanded nodes (has `expand`) = you follow the referenced graph.**
 4. Everything is a node. A graph is a node that has been expanded.
 5. `grafd.manifest.json` is the editor's workspace state file. Read its `entrypoint` field to find the root graph and its `flowVersion` field to confirm which format version applies (this guide is that version). Ignore everything else in it and do not edit it.
-6. Nodes may carry the editor-owned properties `id` and `pos`. They are visual/identity metadata, not semantics — see [Editor-Owned Properties](#editor-owned-properties).
+6. Nodes may carry the editor-owned properties `id` and `pos`. They are identity/layout metadata, not semantics — see [Editor-Owned Properties](#editor-owned-properties).
+7. **All styling goes into another file.** How a graph looks — node shapes, edge colours, any decoration — lives in its canvas layer, `<file>.flow.canvas.json`, never in the `.flow`. Never read or write a canvas layer; move and delete it together with its `.flow` — see [Canvas Layer Files](#canvas-layer-files).
 
 ## Workspace Layout
 
@@ -18,6 +19,7 @@ workspace/
   grafd.manifest.json    # editor state: entrypoint + flowVersion + display and UI state (read entrypoint and flowVersion only)
   SAVE-GUIDE.md          # this guide
   main.flow              # root graph (whatever the manifest's entrypoint names)
+  main.flow.canvas.json  # main.flow's styling — editor-owned, never read or edit it
   auth/
     login.flow           # referenced graphs, organized freely in subfolders
 ```
@@ -66,17 +68,35 @@ All properties are optional. A node with no properties is a valid leaf.
 
 ### Editor-Owned Properties
 
-The canvas editor stores its visual metadata directly on the thing it describes (there is no separate metadata file):
+The canvas editor stores identity and layout directly on the thing they describe. Styling is not stored here — it lives in a separate file ([Canvas Layer Files](#canvas-layer-files)).
 
-- `id: <uuid>` — stable node identity across renames.
+- `id: <uuid>` — stable node identity across renames. A node's styling is filed under it.
 - `pos: x, y, w, h` — the rectangle on the canvas. Also carried by a `context:` block.
 
 When editing a `.flow` file:
 
-- **Preserve** existing `id` and `pos` lines on nodes you keep (renaming a node? keep its `id` — that is what makes it a rename instead of a delete-and-create).
+- **Preserve** existing `id` and `pos` lines on nodes you keep (renaming a node? keep its `id` — that is what makes it a rename instead of a delete-and-create, and what keeps the node's shape).
 - **Omit** both on nodes you add. The editor assigns an id and auto-layouts missing positions.
 - **Never** copy an `id` onto a second node; ids are unique per workspace file.
 - **Ignore** both when interpreting the graph — they carry no semantic meaning.
+
+### Canvas Layer Files
+
+Every visual style — a node's shape, an edge's colour, anything else the editor lets a user decorate a graph with — is kept out of the `.flow`, in a JSON file beside it named after it with `.canvas.json` appended:
+
+```
+auth/login.flow               # the graph: meaning, identity, layout
+auth/login.flow.canvas.json   # its styling — exists only while the graph has any
+```
+
+The canvas layer means nothing to you and its content is not part of the format. When working in a workspace:
+
+- **Never** read a `.canvas.json` to interpret a graph, and **never** write or edit one.
+- **Never** put styling into a `.flow`. There is no style property — a `shape:` or `color:` line in a `.flow` is not a style, just an unknown property the linter warns about.
+- **Rename or move** `X.flow` → also rename `X.flow.canvas.json` → `Y.flow.canvas.json` when it exists.
+- **Delete** `X.flow` → also delete `X.flow.canvas.json`.
+- **Create** `X.flow` where an `X.flow.canvas.json` already sits with no `.flow` beside it → delete that leftover first; it belongs to a graph that no longer exists.
+- Keeping node `id`s keeps node styling. Relabelling or retargeting an edge drops its colour — expected; the linter lists the leftover entry as `info`, which needs no action.
 
 ### Inference Rules
 
@@ -354,6 +374,7 @@ All other identifiers are user-defined node names or context names.
 | `pos` on a `context` block | Region is the bounding box of its members |
 | `references` | No known related code or documents — locate them yourself, and add them once you implement the node |
 | `id` / `pos` | Editor assigns them on next open |
+| `.flow.canvas.json` | Every node and edge is drawn in the default look |
 | Edge label | Sequential connection |
 | Edge `data` | Infer payload from context |
 | no `{...}` refinement | Edge enters the subgraph at its inferred entry point |

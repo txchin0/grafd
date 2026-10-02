@@ -12,7 +12,7 @@
 
 // The version of the .flow format this code implements (FLOW-SPEC.md revision history). A
 // workspace declares which version applies to it in grafd.manifest.json's `flowVersion`.
-export const FLOW_FORMAT_VERSION = 'flow/1.6';
+export const FLOW_FORMAT_VERSION = 'flow/1.7';
 
 export interface Rect {
   x: number;
