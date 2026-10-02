@@ -12,6 +12,45 @@ function severityOf(text: string, rule: string): string | undefined {
   return lintFlowFile(text).find((diagnostic) => diagnostic.rule === rule)?.severity;
 }
 
+function crossingBundleFlow(downRight: number, downLeft: number): string {
+  return `---
+name: T
+---
+
+${crossingBundleBody(downRight, downLeft)}`;
+}
+
+function crossingBundleBody(downRight: number, downLeft: number): string {
+  const blocks: string[] = [];
+  for (let i = 0; i < downRight; i++) {
+    const y = i * 20;
+    blocks.push(`Rightward ${i}
+  pos: 0, ${y}, 0, 0
+  -> Right end ${i}
+
+Right end ${i}
+  pos: 100, ${100 + y}, 0, 0`);
+  }
+  for (let i = 0; i < downLeft; i++) {
+    const y = i * 20;
+    blocks.push(`Leftward ${i}
+  pos: 100, ${y}, 0, 0
+  -> Left end ${i}
+
+Left end ${i}
+  pos: 0, ${100 + y}, 0, 0`);
+  }
+  return `${blocks.join('\n\n')}\n`;
+}
+
+function indentFlowBody(text: string, spaces: number): string {
+  const pad = ' '.repeat(spaces);
+  return text
+    .split('\n')
+    .map((line) => (line === '' ? '' : pad + line))
+    .join('\n');
+}
+
 const CLEAN = `# A well-formed file, used as the baseline for every rule below.
 ---
 name: Checkout
@@ -408,6 +447,81 @@ A
 
   it('reports a duplicated edge', () => {
     expect(rulesOf('---\nname: T\n---\n\nA\n  -> B\n  -> B\n\nB\n')).toContain('duplicate-edge');
+  });
+
+  it('stays silent at four crossing pairs, and warns at five', () => {
+    expect(rulesOf(crossingBundleFlow(2, 2))).not.toContain('too-many-edge-crossings');
+    const overLimit = crossingBundleFlow(3, 2);
+    expect(rulesOf(overLimit)).toContain('too-many-edge-crossings');
+    expect(severityOf(overLimit, 'too-many-edge-crossings')).toBe('warning');
+    expect(lintFlowFile(overLimit)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ rule: 'too-many-edge-crossings', severity: 'warning', line: 1 }),
+      ]),
+    );
+  });
+
+  it('counts on_error edges toward the crossing total', () => {
+    const text = `${crossingBundleFlow(2, 2)}
+Rightward 2
+  pos: 0, 40, 0, 0
+  on_error: -> Right end 2
+
+Right end 2
+  pos: 100, 140, 0, 0
+`;
+    expect(rulesOf(text)).toContain('too-many-edge-crossings');
+  });
+
+  it('does not treat edges that meet at a node as a crossing', () => {
+    const text = `---
+name: T
+---
+
+A
+  pos: 0, 0, 0, 0
+  -> B
+
+B
+  pos: 50, 0, 0, 0
+  -> C
+
+C
+  pos: 100, 0, 0, 0
+`;
+    expect(rulesOf(text)).not.toContain('too-many-edge-crossings');
+  });
+
+  it('counts crossings per graph, not across the whole file', () => {
+    const inBlock = `---
+name: T
+---
+
+Nested
+  expand: Nested
+
+graph: Nested
+${indentFlowBody(crossingBundleBody(3, 2), 2)}`;
+    expect(lintFlowFile(inBlock)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ rule: 'too-many-edge-crossings', line: 8 }),
+      ]),
+    );
+    expect(lintFlowFile(inBlock).filter((diagnostic) => diagnostic.rule === 'too-many-edge-crossings')).toHaveLength(1);
+
+    const inBody = `${crossingBundleFlow(3, 2)}
+Nested
+  expand: Nested
+
+graph: Nested
+  Inner
+`;
+    expect(lintFlowFile(inBody)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ rule: 'too-many-edge-crossings', line: 1 }),
+      ]),
+    );
+    expect(lintFlowFile(inBody).filter((diagnostic) => diagnostic.rule === 'too-many-edge-crossings')).toHaveLength(1);
   });
 
   it('reports reference entries the editor would rewrite or drop', () => {

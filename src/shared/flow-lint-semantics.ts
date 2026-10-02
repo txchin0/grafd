@@ -11,7 +11,8 @@ import { error, warning, type Diagnostic } from './flow-diagnostics.js';
 import { isLegalNodeName, parseEdgeExpression, parseExpandLink, parseListValue, parsePos, type Rect } from './flow-format.js';
 import { parseReferenceLineRange } from './reference-target.js';
 import { autoLayout, type LayoutEdge, type LayoutNode } from './auto-layout.js';
-import { rectContainsRect, regionRectFrom } from './rect-math.js';
+import { countCrossingPairs, type CrossingSegment } from './edge-crossings.js';
+import { rectCenter, rectContainsRect, regionRectFrom } from './rect-math.js';
 import type {
   ScannedContext,
   ScannedEdge,
@@ -43,11 +44,20 @@ export function lintSemantics(file: ScannedFile, lookup: ExpansionLookup): Diagn
   // A file that names no provider at all — no block, no `inherits` — never said what it reads, so
   // an `updates` there is evidence of an older file rather than of a mistake.
   const readable = declaresSomeContext(file) ? readableContextsByNode(file) : null;
+  const placedRectsByScope = new Map(
+    file.scopes.map((scope) => [scope, placedRectsForScope(scope)]),
+  );
   for (const scope of file.scopes) {
     reportScope(scope, readable, lookup, diagnostics);
+    reportEdgeCrossings(
+      scope,
+      scope.line ?? file.preamble?.openLine ?? 1,
+      placedRectsByScope.get(scope)!,
+      diagnostics,
+    );
   }
   reportGraphBlockUsage(file, diagnostics);
-  reportContextBlocks(file, diagnostics);
+  reportContextBlocks(file, placedRectsByScope, diagnostics);
   reportPreamble(file, diagnostics);
   return diagnostics;
 }
@@ -158,6 +168,59 @@ function reportScope(
   }
 }
 
+const MAX_EDGE_CROSSING_PAIRS = 4;
+
+// Layout that is still parseable but hard to read: more than four pairs of center-to-center
+// edges crossing. One diagnostic per graph — the count is a property of the whole drawing.
+function reportEdgeCrossings(
+  scope: ScannedScope,
+  line: number,
+  placedRects: Map<ScannedNode, Rect>,
+  diagnostics: Diagnostic[],
+): void {
+  const crossings = countCrossingPairs(crossingSegmentsIn(scope, placedRects));
+  if (crossings <= MAX_EDGE_CROSSING_PAIRS) return;
+  diagnostics.push(
+    warning(
+      'too-many-edge-crossings',
+      line,
+      `This graph has ${crossings} pairs of edges that cross (limit ${MAX_EDGE_CROSSING_PAIRS}); rearrange nodes so fewer edges overlap.`,
+    ),
+  );
+}
+
+function crossingSegmentsIn(
+  scope: ScannedScope,
+  placedRects: Map<ScannedNode, Rect>,
+): CrossingSegment[] {
+  const rectByName = new Map(
+    [...placedRects].map(([node, rect]) => [node.name, rect]),
+  );
+  const segments: CrossingSegment[] = [];
+  for (const node of scope.nodes) {
+    const fromRect = rectByName.get(node.name);
+    if (!fromRect) continue;
+    const from = rectCenter(fromRect);
+    for (const edge of node.edges) {
+      pushSegmentIfResolved(segments, from, rectByName.get(edge.spec.target));
+    }
+    const onError = findProperty(node, 'on_error');
+    if (onError && onError.value.startsWith('->')) {
+      pushSegmentIfResolved(segments, from, rectByName.get(parseEdgeExpression(onError.value).target));
+    }
+  }
+  return segments;
+}
+
+function pushSegmentIfResolved(
+  segments: CrossingSegment[],
+  from: { x: number; y: number },
+  toRect: Rect | undefined,
+): void {
+  if (!toRect) return;
+  segments.push({ from, to: rectCenter(toRect) });
+}
+
 function reportExpand(node: ScannedNode, lookup: ExpansionLookup, diagnostics: Diagnostic[]): void {
   const property = findProperty(node, 'expand');
   if (!property || property.value === '') return;
@@ -223,7 +286,11 @@ function reportUpdatedContexts(
   }
 }
 
-function reportContextBlocks(file: ScannedFile, diagnostics: Diagnostic[]): void {
+function reportContextBlocks(
+  file: ScannedFile,
+  placedRectsByScope: Map<ScannedScope, Map<ScannedNode, Rect>>,
+  diagnostics: Diagnostic[],
+): void {
   const nestedNames = new Set(
     file.scopes.filter((scope) => scope.name != null).flatMap((scope) => scope.nodes.map((node) => node.name)),
   );
@@ -247,7 +314,7 @@ function reportContextBlocks(file: ScannedFile, diagnostics: Diagnostic[]): void
     // region drawn on the redeclaration cannot recruit nodes; flagging them would contradict the
     // redeclaration warning above.
     if (!inherited.has(block.name) && scope) {
-      reportUnassignedRegionMembers(block, placedRectsForScope(scope), diagnostics);
+      reportUnassignedRegionMembers(block, placedRectsByScope.get(scope)!, diagnostics);
     }
     reportReferences(block.references, diagnostics);
   }

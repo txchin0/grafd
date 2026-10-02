@@ -8,6 +8,15 @@
 
 import type { Rect } from './flow-format.js';
 
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export function rectCenter(rect: Rect): Point {
+  return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+}
+
 // How far a region's frame stands off its members, so the enclosure reads as one and a member's
 // own outline never touches it.
 export const REGION_MEMBER_PADDING = 26;
