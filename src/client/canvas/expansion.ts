@@ -252,6 +252,11 @@ export class ExpansionLayer {
     return null;
   }
 
+  // Every unfolded frame on the canvas, outermost first.
+  openFrames(): readonly FrameTarget[] {
+    return this.frames;
+  }
+
   frameFor(host: FlowNode): FrameTarget | null {
     return this.frames.find((frame) => frame.host === host) ?? null;
   }

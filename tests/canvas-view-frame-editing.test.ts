@@ -92,6 +92,8 @@ beforeAll(async () => {
 function stubActions(): CanvasActions {
   return {
     createNode: vi.fn(),
+    createStroke: vi.fn(),
+    resizeDrawings: vi.fn(),
     quickCreateNode: vi.fn(),
     nodeClicked: vi.fn(),
     canvasClicked: vi.fn(),

@@ -44,6 +44,57 @@ describe('lintCanvasLayer', () => {
   });
 });
 
+describe('lintCanvasLayer on drawings', () => {
+  const FLOW_WITH_BLOCK = `${FLOW}\ngraph: Steps\n  Inner\n    id: 33333333-3333-4333-8333-333333333333\n`;
+
+  // As the editor writes it: pretty-printed, one drawing per line.
+  function layerWithDrawings(drawings: unknown[]): string {
+    const head = JSON.stringify({ format: 'grafd-canvas/1' }, null, 2).slice(0, -2);
+    const lines = drawings.map((drawing) => `    ${JSON.stringify(drawing)}`).join(',\n');
+    return `${head},\n  "drawings": [\n${lines}\n  ]\n}\n`;
+  }
+
+  const GOOD = { id: 'ok', kind: 'stroke', graph: 'Steps', color: 'red', width: 'thin', points: [[0, 0], [1, 1]] };
+
+  it('passes valid strokes, and drawings of kinds it does not know', () => {
+    expect(rulesOf(layerWithDrawings([GOOD, { id: 'note', kind: 'text' }]), FLOW_WITH_BLOCK)).toEqual([]);
+  });
+
+  it('flags each problem on the drawing\'s own line', () => {
+    const text = layerWithDrawings([
+      GOOD,
+      { id: 'bad-points', kind: 'stroke', points: [[0]] },
+      { id: 'bad-style', kind: 'stroke', color: 'mauve', width: 'huge', points: [[0, 0]] },
+      { kind: 'stroke', points: [[0, 0]] },
+      'not an object',
+    ]);
+    const diagnostics = lintCanvasLayer(text, FLOW_WITH_BLOCK);
+    const lines = text.split('\n');
+    expect(diagnostics.map((diagnostic) => `${diagnostic.rule} ${lines[diagnostic.line - 1].trim().slice(0, 18)}`)).toEqual([
+      'invalid-stroke {"id":"bad-points"',
+      'invalid-stroke-color {"id":"bad-style",',
+      'unknown-stroke-width {"id":"bad-style",',
+      'invalid-stroke {"kind":"stroke","',
+      'invalid-drawings "not an object"',
+    ]);
+  });
+
+  it('reports a stroke filed under a block the .flow lacks as info', () => {
+    expect(rulesOf(layerWithDrawings([{ ...GOOD, graph: 'Gone' }]), FLOW_WITH_BLOCK)).toEqual(['info unknown-drawing-graph']);
+  });
+
+  it('warns when drawings is not a list, and when two drawings share an id', () => {
+    expect(rulesOf(layerText({ drawings: { oops: true } }))).toEqual(['warning invalid-drawings']);
+    expect(rulesOf(layerWithDrawings([GOOD, GOOD]), FLOW_WITH_BLOCK)).toEqual(['warning duplicate-drawing-id']);
+  });
+
+  it('finds a drawing by its id in a hand-formatted file', () => {
+    const text = layerText({ drawings: [{ kind: 'stroke', id: 'hand', points: 'nope' }] });
+    const [diagnostic] = lintCanvasLayer(text, FLOW);
+    expect(text.split('\n')[diagnostic.line - 1]).toContain('"hand"');
+  });
+});
+
 describe('workspace lint of canvas layers', () => {
   it('lints each layer against the .flow beside it', () => {
     const results = lintWorkspace({

@@ -51,6 +51,8 @@ function createSurface() {
   const canvas = createCanvasMock();
   const actions = {
     createNode: vi.fn(),
+    createStroke: vi.fn(),
+    resizeDrawings: vi.fn(),
     quickCreateNode: vi.fn(),
     nodeClicked: vi.fn(),
     canvasClicked: vi.fn(),

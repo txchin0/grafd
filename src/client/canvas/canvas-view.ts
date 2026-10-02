@@ -5,7 +5,7 @@
 //
 // Drawing the scene itself belongs to ScenePainter, which this builds fresh for each render
 // pass; what stays here is the editing chrome the painter must not know about — selection
-// outlines, ports, the marquee and the in-flight edge.
+// outlines, ports, the marquee, the in-flight edge and the stroke under the pen.
 //
 // The ExpansionLayer decorates each model with per-frame display geometry (`model.display`).
 // Read a node's rect through `displayRectOf`, never its authored `pos`, or an unfolded frame
@@ -15,6 +15,16 @@
 import rough from 'roughjs';
 import type { ContextBlock, FlowDocument, FlowNode, Rect } from '../../shared/flow-format.js';
 import { DEFAULT_ROUGHNESS } from '../../shared/manifest.js';
+import {
+  DEFAULT_STROKE_WIDTH,
+  STROKE_LINE_WIDTHS,
+  strokePointBounds,
+  transformedStroke,
+  translationBy,
+  type Stroke,
+  type StrokeTransform,
+  type StrokeWidth,
+} from '../../shared/canvas-drawings.js';
 import {
   displayRectOf,
   displayRects,
@@ -57,6 +67,7 @@ import {
 import {
   applyCombinedMove,
   applyRegionResize,
+  effectiveMoveDelta,
   movingRegionGroupFor,
   regionRectDuringResize,
   regionRectsWithDrawnMove,
@@ -66,6 +77,22 @@ import {
   type CombinedMoveSnapshot,
 } from './region-gestures.js';
 import { hitRegionAt, hitRegionHandleAt } from './region-hit-test.js';
+import { hitStrokeAt, strokesInsideRect, worldBoundsOf, type StrokeSurface } from './drawing-hit-test.js';
+import {
+  sameDrawingSelection,
+  storedDrawingKey,
+  type DrawingMove,
+  type DrawingSelection,
+  type StoredDrawing,
+} from './drawing-selection.js';
+import {
+  beginStrokeGesture,
+  extendStrokeGesture,
+  finishedStrokePoints,
+  resizedStrokeTransform,
+  type StrokeGesture,
+} from './stroke-gesture.js';
+import { inkStroke, strokeInkColor } from './stroke-painter.js';
 import {
   HANDLE_HIT_RADIUS_PX,
   hitResizeCorner,
@@ -106,19 +133,55 @@ import {
 export type { CameraLink, View, ViewportSize } from './camera-transition.js';
 export { childViewLinkedTo, interpolateView, parentViewLinkedTo } from './camera-transition.js';
 
-export type Tool = 'select' | 'node' | 'context';
+export type Tool = 'select' | 'node' | 'context' | 'draw';
 
+// What the pen draws with: a colour slot or `#rrggbb` (null for the theme's ink) and a width.
+export interface DrawStyle {
+  color: string | null;
+  width: StrokeWidth;
+}
 
+// A selected stroke, remembered with the surface it was selected on so it can be found again in
+// the rebuilt models after an edit — a frame's model is rebuilt whenever its document changes.
+interface HeldDrawing extends DrawingSelection {
+  surfaceKey: string;
+}
 
+// The strokes on screen as the view lays them out: a model, where it sits in the world, and the
+// frame host it is unfolded under (null for the top-level graph).
+interface ViewStrokeSurface extends StrokeSurface {
+  host: FlowNode | null;
+}
+
+// What a stroke's corner handles resize: a lone stroke, or exactly one whole group.
+interface ResizableStrokes {
+  surface: ViewStrokeSurface;
+  drawings: DrawingSelection[];
+  strokes: Stroke[];
+}
+
+// A stroke a move gesture carries, once per stored stroke however many frames show it.
+interface MovingStroke {
+  drawing: DrawingSelection;
+  storedKey: string;
+  scale: number;
+}
 
 type MoveGesture = CombinedMoveSnapshot & {
   type: 'move';
-  pressed: { kind: 'node'; node: FlowNode } | { kind: 'region'; context: ModelContext };
+  pressed:
+    | { kind: 'node'; node: FlowNode }
+    | { kind: 'region'; context: ModelContext }
+    | { kind: 'drawing'; drawing: DrawingSelection };
   pressedBadge: BadgeHit | null;
   // The explicitly selected nodes — what membership measures as "free" nodes — as distinct
   // from the members a moving region carries along.
   selectedNodes: FlowNode[];
   regionRects: Map<ContextBlock, Rect>;
+  movingStrokes: MovingStroke[];
+  // How far each carried stroke has travelled so far, in its own model's units, keyed by its
+  // stored key. Painted as an offset; the layer is written only when the drag lands.
+  strokeOffsets: Map<string, Point>;
   startWorld: Point;
   startScreen: Point;
   moved: boolean;
@@ -139,6 +202,19 @@ type Gesture =
     }
   | { type: 'create'; tool: Tool; startWorld: Point; startScreen: Point; rect: Rect | null }
   | { type: 'marquee'; startWorld: Point; rect: Rect | null }
+  | StrokeGesture
+  | {
+      type: 'stroke-resize';
+      // A lone stroke, or every member of one group — all on one surface, all stretched alike.
+      drawings: DrawingSelection[];
+      storedKeys: string[];
+      corner: ResizeCorner;
+      // The strokes' combined point bounds when the drag began, in their own model's units.
+      startBox: Rect;
+      startWorld: Point;
+      scale: number;
+      transform: StrokeTransform;
+    }
   | { type: 'pinch'; pointers: [number, number]; start: PinchAnchor };
 
 interface HeldScene {
@@ -208,13 +284,24 @@ export interface CanvasActions {
   quickCreateNode(point: Point, frameHost: FlowNode | null): void;
   nodeClicked(node: FlowNode): void;
   canvasClicked(): void;
-  // Membership changes travel with the move so the whole drag lands as one undo step (R19). A
-  // resize reports none: it changes a node's size, never which region it was dropped into.
-  moveCommitted(nodes: FlowNode[], membershipChanges?: MembershipChange[]): void;
+  // Membership changes and the strokes dragged along travel with the move so the whole drag
+  // lands as one undo step (R19). A resize reports neither: it changes a node's size, never which
+  // region it was dropped into. A drag of strokes alone reports no nodes.
+  moveCommitted(nodes: FlowNode[], membershipChanges?: MembershipChange[], drawingMoves?: DrawingMove[]): void;
   // A region gesture writes the blocks' own rectangles in place, the positions of the members
-  // they carried, and whatever membership they swept up — one action, so one undo step. A mixed
-  // selection move reports every moved region, not only the one that was pressed.
-  regionMoved(regions: RegionTarget[], movedNodes: FlowNode[], membershipChanges: MembershipChange[]): void;
+  // they carried, the strokes dragged along and whatever membership they swept up — one action,
+  // so one undo step. A mixed selection move reports every moved region, not only the one that
+  // was pressed.
+  regionMoved(
+    regions: RegionTarget[],
+    movedNodes: FlowNode[],
+    membershipChanges: MembershipChange[],
+    drawingMoves: DrawingMove[],
+  ): void;
+  // Points are in the coordinate space of the graph that will own the stroke.
+  createStroke(points: Point[], frameHost: FlowNode | null, style: DrawStyle): void;
+  // One transform for every stroke, in their own model's units.
+  resizeDrawings(drawings: DrawingSelection[], transform: StrokeTransform): void;
   regionResized(region: RegionTarget, membershipChanges: MembershipChange[]): void;
   deleteRegion(region: RegionTarget): void;
   createRegion(rect: Rect, frameHost: FlowNode | null, memberNames: string[]): void;
@@ -251,6 +338,7 @@ export type ContextTarget =
   | { kind: 'node'; node: FlowNode }
   | { kind: 'edge'; edge: ModelEdge }
   | { kind: 'region'; region: RegionTarget }
+  | { kind: 'drawing' }
   | { kind: 'canvas'; world: Point };
 
 // A region names the document it lives in rather than a node, because it has no id and nothing
@@ -280,6 +368,15 @@ const FIT_PADDING = 80;
 // Where the origin sits relative to the viewport centre when there is nothing to frame.
 const EMPTY_CANVAS_ORIGIN = { x: 200, y: 150 };
 const EMPTY_SNAPSHOT_SIZE = { w: 400, h: 300 };
+// How far, in world units, the selection outline sits outside a node or stroke, and a group's
+// outline outside its members' combined ink.
+const SELECTION_OUTLINE_INFLATE = 5;
+const GROUP_OUTLINE_INFLATE = 10;
+const NOTICE_MS = 2400;
+const NOTICE_FONT = '13px system-ui, sans-serif';
+const NOTICE_PADDING_PX = 8;
+const NOTICE_OFFSET_PX = 14;
+const TOP_LEVEL_TRANSFORM: FrameTransform = { scale: 1, tx: 0, ty: 0 };
 const DIVE_IN_MS = 650;
 const BACK_OUT_MS = 560;
 export const SNAPSHOT_PADDING = 48;
@@ -357,6 +454,12 @@ export class CanvasView {
   // gesture — but the single-region accessor below stays for the callers that address one
   // region as an edit target.
   selectedRegions = new Set<ModelContext>();
+  // Strokes share the selection too. Kept as last laid out; read through `selectedDrawings`.
+  private heldDrawings: HeldDrawing[] = [];
+  // Strokes to select once laid out: written by an edit whose models are rebuilt before the next
+  // render. Tried once, at that render.
+  private drawingsToHold: StoredDrawing[] = [];
+  drawStyle: DrawStyle = { color: null, width: DEFAULT_STROKE_WIDTH };
   readonly expansionLayer: ExpansionLayer;
   gridIsVisible = true;
   doubleClickOpensSubgraph = true;
@@ -371,6 +474,7 @@ export class CanvasView {
   private spaceDown = false;
   private renderQueued = false;
   private readonly wheelIntents = new WheelIntentReader();
+  private notice: { text: string; world: Point; until: number } | null = null;
 
   // Every pointer currently down, at its latest position on the canvas. A second entry turns
   // whatever one finger had started into a pinch, so this is kept for mouse pointers too.
@@ -539,13 +643,16 @@ export class CanvasView {
     this.selection = new Set([node]);
     this.selectedEdge = null;
     this.selectedRegions.clear();
+    this.heldDrawings = [];
     this.requestRender();
   }
 
-  setSelection(nodes: FlowNode[], regions: ModelContext[] = []): void {
+  setSelection(nodes: FlowNode[], regions: ModelContext[] = [], drawings: StoredDrawing[] = []): void {
     this.selection = new Set(nodes);
     this.selectedRegions = new Set(regions);
     this.selectedEdge = null;
+    this.heldDrawings = [];
+    this.drawingsToHold = drawings;
     this.requestRender();
   }
 
@@ -553,13 +660,20 @@ export class CanvasView {
     this.selection.clear();
     this.selectedEdge = null;
     this.selectedRegions.clear();
+    this.heldDrawings = [];
     this.requestRender();
+  }
+
+  /** The selected strokes, one entry per place a stroke is drawn. */
+  get selectedDrawings(): DrawingSelection[] {
+    return this.heldDrawings.map(({ model, id }) => ({ model, id }));
   }
 
   /** Selects a region of the open graph by name — the only handle a region has. */
   selectRegion(name: string): void {
     this.selection.clear();
     this.selectedEdge = null;
+    this.heldDrawings = [];
     const context = this.model.contexts.find((candidate) => candidate.block.name === name);
     this.selectedRegions = context ? new Set([context]) : new Set();
     this.requestRender();
@@ -878,9 +992,32 @@ export class CanvasView {
     }
     if (event.button !== 0) return;
 
+    if (this.tool === 'draw') {
+      this.actions.canvasClicked();
+      this.gesture = beginStrokeGesture(this.expansionLayer.frameAt(world), world, screen);
+      this.requestRender();
+      return;
+    }
+
     const port = this.hitPort(world);
     if (port) {
       this.gesture = { type: 'edge', from: port.node, toWorld: world, hoverTarget: null };
+      return;
+    }
+
+    const strokeHandle = this.hitStrokeResizeHandle(world);
+    if (strokeHandle) {
+      const { resizable, corner } = strokeHandle;
+      this.gesture = {
+        type: 'stroke-resize',
+        drawings: resizable.drawings,
+        storedKeys: resizable.drawings.map((drawing) => storedDrawingKey(drawing.model, drawing.id)),
+        corner,
+        startBox: boundsOfRects(resizable.strokes.map(strokePointBounds))!,
+        startWorld: world,
+        scale: resizable.surface.transform.scale,
+        transform: translationBy({ x: 0, y: 0 }),
+      };
       return;
     }
 
@@ -917,7 +1054,8 @@ export class CanvasView {
 
     const wantsCreate = (this.tool === 'node' || this.tool === 'context') && !event.shiftKey;
     const node = this.hitNode(world);
-    if (node && !(wantsCreate && this.isFrameBackground(node, world))) {
+    const stroke = wantsCreate ? null : this.hitStrokeAbove(node, world);
+    if (node && !stroke && !(wantsCreate && this.isFrameBackground(node, world))) {
       if (event.shiftKey && this.selection.has(node)) {
         this.selection.delete(node);
         this.requestRender();
@@ -927,6 +1065,7 @@ export class CanvasView {
         if (!event.shiftKey) {
           this.selection.clear();
           this.selectedRegions.clear();
+          this.heldDrawings = [];
         }
         this.selection.add(node);
         this.selectedEdge = null;
@@ -947,6 +1086,7 @@ export class CanvasView {
       this.selectedEdge = edge;
       this.selection.clear();
       this.selectedRegions.clear();
+      this.heldDrawings = [];
       this.actions.canvasClicked();
       this.requestRender();
       return;
@@ -966,6 +1106,7 @@ export class CanvasView {
         if (!event.shiftKey) {
           this.selection.clear();
           this.selectedRegions.clear();
+          this.heldDrawings = [];
         }
         this.selectedRegions.add(region);
         this.selectedEdge = null;
@@ -975,10 +1116,16 @@ export class CanvasView {
       return;
     }
 
+    if (stroke) {
+      this.pressStroke(stroke, world, screen, event.shiftKey);
+      return;
+    }
+
     if (!event.shiftKey) {
       this.selection.clear();
       this.selectedEdge = null;
       this.selectedRegions.clear();
+      this.heldDrawings = [];
       this.actions.canvasClicked();
     }
     this.gesture = wantsCreate
@@ -996,7 +1143,7 @@ export class CanvasView {
   private beginMoveGesture(
     world: Point,
     screen: Point,
-    pressed: { kind: 'node'; node: FlowNode } | { kind: 'region'; context: ModelContext },
+    pressed: MoveGesture['pressed'],
     pressedBadge: BadgeHit | null,
   ): MoveGesture {
     const movingRegions = movingRegionGroupFor(this.model, [...this.selectedRegions]);
@@ -1011,6 +1158,8 @@ export class CanvasView {
       type: 'move',
       pressed,
       pressedBadge,
+      movingStrokes: this.movingStrokesFor(nodes),
+      strokeOffsets: new Map(),
       selectedNodes,
       startPositions: new Map(nodes.map((entry) => [entry, { x: entry.pos!.x, y: entry.pos!.y }])),
       // World-space drag deltas are divided by each node's locus scale so nodes inside
@@ -1023,6 +1172,44 @@ export class CanvasView {
       startScreen: screen,
       moved: false,
     };
+  }
+
+  // The selected strokes a move carries, once per stored stroke. A stroke inside a frame whose
+  // host is itself moving already travels with the frame, as a node inside it does.
+  private movingStrokesFor(movingNodes: readonly FlowNode[]): MovingStroke[] {
+    const moving = new Set(movingNodes);
+    const surfaces = this.strokeSurfaces();
+    const strokes: MovingStroke[] = [];
+    const seen = new Set<string>();
+    for (const drawing of this.heldDrawings) {
+      const surface = surfaces.find((candidate) => candidate.model === drawing.model);
+      const storedKey = storedDrawingKey(drawing.model, drawing.id);
+      if (!surface || seen.has(storedKey) || this.isInsideMovingFrame(surface.host, moving)) continue;
+      seen.add(storedKey);
+      strokes.push({ drawing: { model: drawing.model, id: drawing.id }, storedKey, scale: surface.transform.scale });
+    }
+    return strokes;
+  }
+
+  private isInsideMovingFrame(host: FlowNode | null, moving: ReadonlySet<FlowNode>): boolean {
+    for (let frameHost = host; frameHost; frameHost = this.expansionLayer.hostOf(frameHost)) {
+      if (moving.has(frameHost)) return true;
+    }
+    return false;
+  }
+
+  private moveCarriedStrokes(gesture: MoveGesture, world: Point): void {
+    const reference = gesture.pressed.kind === 'node' ? gesture.pressed.node : null;
+    const delta = effectiveMoveDelta(gesture, world, reference);
+    for (const stroke of gesture.movingStrokes) {
+      gesture.strokeOffsets.set(stroke.storedKey, { x: delta.x / stroke.scale, y: delta.y / stroke.scale });
+    }
+  }
+
+  private drawingMovesOf(gesture: MoveGesture): DrawingMove[] {
+    return gesture.movingStrokes
+      .map((stroke) => ({ ...stroke.drawing, offset: gesture.strokeOffsets.get(stroke.storedKey) ?? { x: 0, y: 0 } }))
+      .filter((move) => move.offset.x !== 0 || move.offset.y !== 0);
   }
 
   // A second pointer replaces the single-pointer gesture with a pinch. Nothing the abandoned
@@ -1149,6 +1336,7 @@ export class CanvasView {
       const screenDistance = Math.hypot(screen.x - gesture.startScreen.x, screen.y - gesture.startScreen.y);
       if (!gesture.moved && screenDistance < DRAG_THRESHOLD_PX) return;
       applyCombinedMove(gesture, world, snap);
+      this.moveCarriedStrokes(gesture, world);
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'resize') {
@@ -1167,6 +1355,15 @@ export class CanvasView {
       this.requestRender();
     } else if (gesture.type === 'create' || gesture.type === 'marquee') {
       gesture.rect = normalizedRect(gesture.startWorld, world);
+      this.requestRender();
+    } else if (gesture.type === 'draw') {
+      if (extendStrokeGesture(gesture, world, screen)) this.requestRender();
+    } else if (gesture.type === 'stroke-resize') {
+      const localDelta = {
+        x: (world.x - gesture.startWorld.x) / gesture.scale,
+        y: (world.y - gesture.startWorld.y) / gesture.scale,
+      };
+      gesture.transform = resizedStrokeTransform(gesture.startBox, gesture.corner, localDelta);
       this.requestRender();
     }
   }
@@ -1221,9 +1418,10 @@ export class CanvasView {
             gesture.movingRegions.map((context) => this.regionTargetOf(context)),
             movedNodes,
             this.membershipChangesFor(gesture),
+            this.drawingMovesOf(gesture),
           );
         } else {
-          this.actions.moveCommitted(movedNodes, this.membershipChangesFor(gesture));
+          this.actions.moveCommitted(movedNodes, this.membershipChangesFor(gesture), this.drawingMovesOf(gesture));
         }
       } else {
         this.dispatchPress(gesture, world, event.detail);
@@ -1238,6 +1436,10 @@ export class CanvasView {
       this.completeCreateGesture(gesture, world);
     } else if (gesture.type === 'marquee' && gesture.rect) {
       this.selectInMarquee(gesture.rect);
+    } else if (gesture.type === 'draw') {
+      this.actions.createStroke(finishedStrokePoints(gesture, this.view.scale), gesture.frameHost, { ...this.drawStyle });
+    } else if (gesture.type === 'stroke-resize' && !isIdentityTransform(gesture.transform)) {
+      this.actions.resizeDrawings(gesture.drawings, gesture.transform);
     }
     this.requestRender();
   }
@@ -1245,6 +1447,7 @@ export class CanvasView {
   // A press that selected something without dragging it has nothing to write; it was a click,
   // and a click opens the editor of whatever it landed on.
   private dispatchPress(gesture: MoveGesture, world: Point, clickCount: number): void {
+    if (gesture.pressed.kind === 'drawing') return;
     if (gesture.pressed.kind === 'region') {
       if (clickCount < 2) this.actions.regionClicked(this.regionTargetOf(gesture.pressed.context));
       return;
@@ -1372,6 +1575,12 @@ export class CanvasView {
       const frame = regionRectOf(this.model, context);
       if (frame && rectContainsRect(rect, frame)) this.selectedRegions.add(context);
     }
+    const surfaces = this.strokeSurfaces();
+    for (const drawing of strokesInsideRect(surfaces, rect)) {
+      const surface = surfaces.find((candidate) => candidate.model === drawing.model)!;
+      if (this.isInsideMovingFrame(surface.host, this.selection)) continue;
+      this.holdDrawing(drawing, surface);
+    }
   }
 
   private hasSelectedAncestorFrame(node: FlowNode): boolean {
@@ -1393,7 +1602,8 @@ export class CanvasView {
   }
 
   private onDoubleClick(event: MouseEvent): void {
-    if (this.sceneTransition) return;
+    // A pen tapped twice is drawing dots, not asking for a node.
+    if (this.sceneTransition || this.tool === 'draw') return;
     const world = this.screenToWorld(this.eventPoint(event));
     // Edges win over nodes so edges inside unfolded frames stay editable — a frame always
     // contains its subgraph's edges.
@@ -1422,7 +1632,7 @@ export class CanvasView {
       this.actions.openExpand(subgraph);
       return;
     }
-    if (this.hitNode(world) || this.hitGhost(world)) return;
+    if (this.hitNode(world) || this.hitGhost(world) || this.hitStrokeAbove(null, world)) return;
     const target = this.creationTargetAt(world);
     this.actions.quickCreateNode(target.point, target.frameHost);
   }
@@ -1436,7 +1646,8 @@ export class CanvasView {
     const screenPoint = { x: event.clientX, y: event.clientY };
 
     const node = this.hitNode(world);
-    if (node) {
+    const stroke = this.hitStrokeAbove(node, world);
+    if (node && !stroke) {
       if (!this.selection.has(node)) this.select(node);
       this.actions.contextMenu({ kind: 'node', node }, screenPoint);
       return;
@@ -1445,6 +1656,7 @@ export class CanvasView {
     if (edge) {
       this.selectedEdge = edge;
       this.selection.clear();
+      this.heldDrawings = [];
       this.requestRender();
       this.actions.contextMenu({ kind: 'edge', edge }, screenPoint);
       return;
@@ -1458,6 +1670,11 @@ export class CanvasView {
         this.requestRender();
       }
       this.actions.contextMenu({ kind: 'region', region: this.regionTargetOf(region) }, screenPoint);
+      return;
+    }
+    if (stroke) {
+      if (!this.isDrawingHeld(stroke)) this.selectOnlyDrawing(stroke);
+      this.actions.contextMenu({ kind: 'drawing' }, screenPoint);
       return;
     }
     this.actions.contextMenu({ kind: 'canvas', world }, screenPoint);
@@ -1568,7 +1785,7 @@ export class CanvasView {
   }
 
   private hitResizeHandle(world: Point): { node: FlowNode; corner: ResizeCorner } | null {
-    if (this.selection.size !== 1 || this.selectedRegions.size > 0) return null;
+    if (this.selection.size !== 1 || this.selectedRegions.size > 0 || this.heldDrawings.length > 0) return null;
     const [node] = this.selection;
     const corner = hitResizeCorner(this.rect(node), world, HANDLE_HIT_RADIUS_PX / this.view.scale);
     return corner ? { node, corner } : null;
@@ -1661,12 +1878,14 @@ export class CanvasView {
   }
 
   private updateCursor(world?: Point): void {
-    let cursor = this.tool === 'node' ? 'crosshair' : 'default';
+    let cursor = this.tool === 'node' || this.tool === 'draw' ? 'crosshair' : 'default';
     if (this.spaceDown || this.gesture?.type === 'pan') cursor = 'grab';
-    else if (world) {
+    else if (world && this.tool !== 'draw') {
       if (this.hitBadge(world)) cursor = 'pointer';
       else if (this.hitPort(world)) cursor = 'crosshair';
-      else if (this.hitResizeHandle(world) || this.hitRegionHandle(world)) cursor = 'nwse-resize';
+      else if (this.hitResizeHandle(world) || this.hitRegionHandle(world) || this.hitStrokeResizeHandle(world)) {
+        cursor = 'nwse-resize';
+      }
       else if (this.hitNode(world) || this.hitGhost(world)) cursor = 'move';
       else if (this.hitRegion(world)) cursor = 'move';
     }
@@ -1685,6 +1904,7 @@ export class CanvasView {
   private scenePainter(hiddenTitles: HiddenCanvasTitles): ScenePainter {
     return new ScenePainter({
       regionRects: this.regionRectsForPainting(),
+      drawingTransforms: this.strokeTransformsInFlight() ?? undefined,
       ctx: this.ctx,
       rough: this.rough,
       baseRoughness: this.baseRoughness,
@@ -1709,6 +1929,7 @@ export class CanvasView {
 
     const expansionState = this.expansionLayer.layout(this.model, performance.now());
     this.expansionLayer.collectLoci(this.model);
+    this.resolveHeldDrawings();
     const dpr = this.devicePixelRatio;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.drawGridIfVisible(this.view);
@@ -1720,6 +1941,8 @@ export class CanvasView {
     this.drawSelectionDecorations();
     this.drawPorts();
     this.drawGestureOverlay(painter);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.drawNotice();
 
     this.actions.afterRender?.();
     if (expansionState.animating) this.requestRender();
@@ -1868,7 +2091,7 @@ export class CanvasView {
   private drawSelectionDecorations(): void {
     this.drawSelectedRegionDecorations();
     const { ctx } = this;
-    const inflate = 5;
+    const inflate = SELECTION_OUTLINE_INFLATE;
     ctx.save();
     ctx.strokeStyle = canvasPalette.select;
     ctx.lineWidth = 1.4 / this.view.scale;
@@ -1878,17 +2101,33 @@ export class CanvasView {
       const { x, y, w, h } = this.rect(node);
       ctx.strokeRect(x - inflate, y - inflate, w + inflate * 2, h + inflate * 2);
     }
+    for (const { x, y, w, h } of this.selectedStrokeOutlines()) {
+      ctx.strokeRect(x - inflate, y - inflate, w + inflate * 2, h + inflate * 2);
+    }
+    ctx.setLineDash([]);
+    for (const { x, y, w, h } of this.selectedGroupOutlines().map((union) => padRect(union, GROUP_OUTLINE_INFLATE))) {
+      ctx.strokeRect(x, y, w, h);
+    }
     ctx.restore();
 
-    if (this.selection.size === 1 && this.selectedRegions.size === 0) {
-      const [node] = this.selection;
-      if (!this.isNodeVisible(node)) return;
-      const handleSize = 8 / this.view.scale;
-      ctx.fillStyle = canvasPalette.select;
-      for (const origin of selectionHandleOrigins(this.rect(node), handleSize)) {
-        ctx.fillRect(origin.x, origin.y, handleSize, handleSize);
-      }
+    const handleRect = this.resizeHandleRect();
+    if (!handleRect) return;
+    const handleSize = 8 / this.view.scale;
+    ctx.fillStyle = canvasPalette.select;
+    for (const origin of selectionHandleOrigins(handleRect, handleSize)) {
+      ctx.fillRect(origin.x, origin.y, handleSize, handleSize);
     }
+  }
+
+  // Corner handles belong to a selection of exactly one node, one stroke or one group; any other
+  // selection is not resizable, and handles it would not answer would lie about what a press does.
+  private resizeHandleRect(): Rect | null {
+    if (this.selection.size === 1 && this.selectedRegions.size === 0 && this.heldDrawings.length === 0) {
+      const [node] = this.selection;
+      return this.isNodeVisible(node) ? this.rect(node) : null;
+    }
+    const resizable = this.resizableStrokeSelection();
+    return resizable ? this.strokeHandleRect(resizable) : null;
   }
 
   // Every selected region gets the same dashed outline a node does, drawn on its frame rather
@@ -1920,7 +2159,7 @@ export class CanvasView {
   }
 
   private drawPorts(): void {
-    if (this.gesture && this.gesture.type !== 'edge') return;
+    if (this.tool === 'draw' || (this.gesture && this.gesture.type !== 'edge')) return;
     const { ctx } = this;
     const nodesWithPorts = new Set([...this.selection]);
     if (this.hoverNode) nodesWithPorts.add(this.hoverNode);
@@ -1978,8 +2217,248 @@ export class CanvasView {
         ctx.lineWidth = 2 / this.view.scale;
         ctx.strokeRect(x - 3, y - 3, w + 6, h + 6);
       }
+    } else if (gesture.type === 'draw') {
+      const { scale, tx, ty } = gesture.transform;
+      ctx.save();
+      ctx.transform(scale, 0, 0, scale, tx, ty);
+      inkStroke(ctx, gesture.points, strokeInkColor(this.drawStyle.color), STROKE_LINE_WIDTHS[this.drawStyle.width]);
+      ctx.restore();
     }
   }
+
+  // A short message beside the pointer — for an edit the canvas could not make, shown where the
+  // user is looking rather than somewhere they are not.
+  flashNotice(text: string): void {
+    const viewportCenter = { x: this.viewport.width / 2, y: this.viewport.height / 2 };
+    const world = this.hoverPoint ?? this.screenToWorld(viewportCenter);
+    this.notice = { text, world, until: performance.now() + NOTICE_MS };
+    this.requestRender();
+    setTimeout(() => this.requestRender(), NOTICE_MS);
+  }
+
+  // Drawn in screen pixels, so it reads the same at every zoom.
+  private drawNotice(): void {
+    if (this.notice && performance.now() >= this.notice.until) this.notice = null;
+    if (!this.notice) return;
+    const { ctx } = this;
+    const anchor = this.worldToScreen(this.notice.world);
+    ctx.save();
+    ctx.font = NOTICE_FONT;
+    const width = ctx.measureText(this.notice.text).width + NOTICE_PADDING_PX * 2;
+    const height = 13 + NOTICE_PADDING_PX * 2;
+    const left = Math.max(0, Math.min(anchor.x + NOTICE_OFFSET_PX, this.viewport.width - width));
+    const top = Math.max(0, Math.min(anchor.y + NOTICE_OFFSET_PX, this.viewport.height - height));
+    ctx.fillStyle = canvasPalette.edgeLabelBg;
+    ctx.strokeStyle = canvasPalette.error;
+    ctx.lineWidth = 1;
+    ctx.fillRect(left, top, width, height);
+    ctx.strokeRect(left, top, width, height);
+    ctx.fillStyle = canvasPalette.ink;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(this.notice.text, left + NOTICE_PADDING_PX, top + height / 2);
+    ctx.restore();
+  }
+
+  // Every model on screen that strokes can be drawn in, outermost first.
+  private strokeSurfaces(): ViewStrokeSurface[] {
+    return [
+      { model: this.model, transform: TOP_LEVEL_TRANSFORM, clip: null, host: null },
+      ...this.expansionLayer.openFrames().map((frame) => ({
+        model: frame.model,
+        transform: frame.transform,
+        clip: frame.interior,
+        host: frame.host,
+      })),
+    ];
+  }
+
+  // A stroke under the point, unless something of the graph is there: strokes are painted over
+  // everything but never stand in the way of a node. An unfolded frame's empty interior counts as
+  // nothing, so the strokes drawn inside a frame can be picked up.
+  private hitStrokeAbove(node: FlowNode | null, world: Point): DrawingSelection | null {
+    if (node && !this.isFrameBackground(node, world)) return null;
+    return hitStrokeAt(this.strokeSurfaces(), world, EDGE_HIT_DISTANCE / this.view.scale);
+  }
+
+  private pressStroke(stroke: DrawingSelection, world: Point, screen: Point, shiftKey: boolean): void {
+    this.actions.canvasClicked();
+    const held = this.isDrawingHeld(stroke);
+    if (shiftKey && held) {
+      const group = new Set(this.groupOfDrawing(stroke));
+      this.heldDrawings = this.heldDrawings.filter((drawing) => drawing.model !== stroke.model || !group.has(drawing.id));
+      this.requestRender();
+      return;
+    }
+    if (!held) {
+      if (shiftKey) this.holdDrawing(stroke, this.surfaceOfModel(stroke.model));
+      else this.selectOnlyDrawing(stroke);
+    }
+    this.selectedEdge = null;
+    this.gesture = this.beginMoveGesture(world, screen, { kind: 'drawing', drawing: stroke }, null);
+    this.requestRender();
+  }
+
+  private selectOnlyDrawing(drawing: DrawingSelection): void {
+    this.selection.clear();
+    this.selectedRegions.clear();
+    this.selectedEdge = null;
+    this.heldDrawings = [];
+    this.holdDrawing(drawing, this.surfaceOfModel(drawing.model));
+    this.requestRender();
+  }
+
+  private isDrawingHeld(drawing: DrawingSelection): boolean {
+    return this.heldDrawings.some((held) => sameDrawingSelection(held, drawing));
+  }
+
+  // A grouped stroke is never held alone: its whole group comes with it, which is what makes the
+  // group move, recolour and delete as one.
+  private holdDrawing(drawing: DrawingSelection, surface: ViewStrokeSurface | null): void {
+    if (!surface) return;
+    for (const id of this.groupOfDrawing(drawing)) {
+      const member = { model: drawing.model, id };
+      if (!this.isDrawingHeld(member)) this.heldDrawings.push({ ...member, surfaceKey: surfaceKeyOf(surface) });
+    }
+  }
+
+  private groupOfDrawing(drawing: DrawingSelection): string[] {
+    return drawing.model.visuals?.strokeGroupOf(drawing.id) ?? [drawing.id];
+  }
+
+  // Selects every stroke grouped with one already selected — after a grouping changes what
+  // belongs together, the selection follows it.
+  holdWholeGroups(): void {
+    const surfaces = this.strokeSurfaces();
+    for (const held of [...this.heldDrawings]) {
+      this.holdDrawing(held, surfaces.find((surface) => surface.model === held.model) ?? null);
+    }
+    this.requestRender();
+  }
+
+  private surfaceOfModel(model: FlowModel): ViewStrokeSurface | null {
+    return this.strokeSurfaces().find((surface) => surface.model === model) ?? null;
+  }
+
+  // Edits rebuild models, so a held stroke is found again on the surface it was selected on —
+  // the same model when it survived, otherwise the one now laid out in its place. A stroke that is
+  // gone, or whose frame closed, leaves the selection.
+  private resolveHeldDrawings(): void {
+    this.holdLaidOutDrawings();
+    const surfaces = this.strokeSurfaces();
+    const resolved: HeldDrawing[] = [];
+    for (const held of this.heldDrawings) {
+      const surface = surfaces.find((candidate) => candidate.model === held.model)
+        ?? surfaces.find((candidate) => surfaceKeyOf(candidate) === held.surfaceKey);
+      const stroke = surface?.model.visuals?.strokes().find((candidate) => candidate.id === held.id);
+      if (!surface || !stroke) continue;
+      const drawing = { model: surface.model, id: held.id };
+      if (!resolved.some((entry) => sameDrawingSelection(entry, drawing))) {
+        resolved.push({ ...drawing, surfaceKey: held.surfaceKey });
+      }
+    }
+    this.heldDrawings = resolved;
+  }
+
+  // Each stroke is held where it is first laid out: the open graph before any frame showing it.
+  private holdLaidOutDrawings(): void {
+    if (this.drawingsToHold.length === 0) return;
+    const surfaces = this.strokeSurfaces();
+    for (const stored of this.drawingsToHold) {
+      const surface = surfaces.find((candidate) => isSurfaceStoring(candidate, stored));
+      if (surface) this.holdDrawing({ model: surface.model, id: stored.id }, surface);
+    }
+    this.drawingsToHold = [];
+  }
+
+  // World rects of the selected strokes, following any drag in progress.
+  private selectedStrokeOutlines(): Rect[] {
+    const surfaces = this.strokeSurfaces();
+    return this.heldDrawings.flatMap((held) => {
+      const surface = surfaces.find((candidate) => candidate.model === held.model);
+      const stroke = surface?.model.visuals?.strokes().find((candidate) => candidate.id === held.id);
+      return surface && stroke ? [worldBoundsOf(this.strokeAsShown(held, stroke), surface)] : [];
+    });
+  }
+
+  // One solid outline around each selected group, around the dashed ones of its members.
+  private selectedGroupOutlines(): Rect[] {
+    const surfaces = this.strokeSurfaces();
+    const outlined = new Set<string>();
+    return this.heldDrawings.flatMap((held) => {
+      const group = this.groupOfDrawing(held);
+      const groupKey = storedDrawingKey(held.model, [...group].sort().join(' '));
+      const surface = surfaces.find((candidate) => candidate.model === held.model);
+      if (group.length < 2 || !surface || outlined.has(groupKey)) return [];
+      outlined.add(groupKey);
+      const members = new Set(group);
+      const memberBounds = (surface.model.visuals?.strokes() ?? [])
+        .filter((stroke) => members.has(stroke.id))
+        .map((stroke) => worldBoundsOf(this.strokeAsShown(held, stroke), surface));
+      const union = boundsOfRects(memberBounds);
+      return union ? [union] : [];
+    });
+  }
+
+  // How far each stroke a gesture is carrying has been moved or stretched so far, keyed by its
+  // stored key. Painted over the stored stroke; the layer is written only when the drag lands.
+  private strokeTransformsInFlight(): ReadonlyMap<string, StrokeTransform> | null {
+    const gesture = this.gesture;
+    if (gesture?.type === 'stroke-resize') return new Map(gesture.storedKeys.map((key) => [key, gesture.transform]));
+    if (gesture?.type !== 'move') return null;
+    return new Map([...gesture.strokeOffsets].map(([key, offset]) => [key, translationBy(offset)]));
+  }
+
+  private strokeAsShown(drawing: DrawingSelection, stroke: Stroke): Stroke {
+    const transform = this.strokeTransformsInFlight()?.get(storedDrawingKey(drawing.model, drawing.id));
+    return transform ? transformedStroke(stroke, transform) : stroke;
+  }
+
+  // The selection is a lone stroke, or exactly the members of one group (a grouped stroke is never
+  // held alone, so a single group selected means every held stroke shares the first one's group).
+  private resizableStrokeSelection(): ResizableStrokes | null {
+    if (this.heldDrawings.length === 0 || this.selection.size > 0 || this.selectedRegions.size > 0) return null;
+    const [first] = this.heldDrawings;
+    const group = new Set(this.groupOfDrawing(first));
+    const isOneWholeGroup = this.heldDrawings.length === group.size
+      && this.heldDrawings.every((held) => held.model === first.model && group.has(held.id));
+    if (!isOneWholeGroup) return null;
+    const surface = this.surfaceOfModel(first.model);
+    const strokes = (surface?.model.visuals?.strokes() ?? []).filter((stroke) => group.has(stroke.id));
+    if (!surface || strokes.length !== group.size) return null;
+    return { surface, drawings: strokes.map((stroke) => ({ model: first.model, id: stroke.id })), strokes };
+  }
+
+  // On the stroke's ink for a lone stroke, on the group's outline for a group — where the eye
+  // already sees the edge of the thing being resized.
+  private strokeHandleRect(resizable: ResizableStrokes): Rect {
+    const shownBounds = resizable.strokes.map((stroke) =>
+      worldBoundsOf(this.strokeAsShown({ model: resizable.surface.model, id: stroke.id }, stroke), resizable.surface));
+    const bounds = boundsOfRects(shownBounds)!;
+    return resizable.strokes.length > 1 ? padRect(bounds, GROUP_OUTLINE_INFLATE) : bounds;
+  }
+
+  private hitStrokeResizeHandle(world: Point): { resizable: ResizableStrokes; corner: ResizeCorner } | null {
+    const resizable = this.resizableStrokeSelection();
+    if (!resizable) return null;
+    const corner = hitResizeCorner(this.strokeHandleRect(resizable), world, HANDLE_HIT_RADIUS_PX / this.view.scale);
+    return corner ? { resizable, corner } : null;
+  }
+}
+
+function isIdentityTransform(transform: StrokeTransform): boolean {
+  return transform.scaleX === 1 && transform.scaleY === 1 && transform.x === 0 && transform.y === 0;
+}
+
+function isSurfaceStoring(surface: ViewStrokeSurface, stored: StoredDrawing): boolean {
+  const { model } = surface;
+  return model.sourcePath === stored.path
+    && model.sourceScope === stored.scope
+    && (model.visuals?.strokes().some((stroke) => stroke.id === stored.id) ?? false);
+}
+
+function surfaceKeyOf(surface: ViewStrokeSurface): string {
+  return [surface.host?.id ?? '', surface.model.sourcePath ?? '', surface.model.sourceScope ?? ''].join('\n');
 }
 
 function isTypingTarget(element: EventTarget | null): boolean {

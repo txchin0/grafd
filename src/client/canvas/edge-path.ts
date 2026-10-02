@@ -6,7 +6,7 @@
 // away from the ink, so they all read `EdgeGeometry.path` instead.
 
 import type { Rect } from '../../shared/flow-format.js';
-import type { Point } from '../geometry.js';
+import { distanceToPolyline, type Point } from '../geometry.js';
 
 // rough.js renders `curve` as a cardinal spline: it pads the point list by repeating the first and
 // last entry, then chains one cubic Bézier per interior pair. Flattening mirrors that construction
@@ -76,23 +76,8 @@ export function flattenEdgePath(through: Point[]): Point[] {
   return path;
 }
 
-function distanceToSegment(point: Point, a: Point, b: Point): number {
-  const abX = b.x - a.x;
-  const abY = b.y - a.y;
-  const lengthSquared = abX * abX + abY * abY;
-  const t = lengthSquared === 0
-    ? 0
-    : Math.max(0, Math.min(1, ((point.x - a.x) * abX + (point.y - a.y) * abY) / lengthSquared));
-  const closest = { x: a.x + abX * t, y: a.y + abY * t };
-  return Math.hypot(point.x - closest.x, point.y - closest.y);
-}
-
 export function distanceToEdgePath(point: Point, path: Point[]): number {
-  let nearest = Infinity;
-  for (let index = 1; index < path.length; index += 1) {
-    nearest = Math.min(nearest, distanceToSegment(point, path[index - 1], path[index]));
-  }
-  return nearest;
+  return distanceToPolyline(point, path);
 }
 
 function segmentLengths(path: Point[]): number[] {

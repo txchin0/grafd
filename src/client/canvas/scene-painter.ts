@@ -24,7 +24,10 @@ import { canvasPalette, resolveLayerColor } from '../theme.js';
 import type { HiddenCanvasTitles } from './canvas-view.js';
 import { edgeEnd, edgePathApproach, edgePathMidpoint } from './edge-path.js';
 import { drawnShapeOf, edgeReachesInsideOpenFrame, layOutModelEdges, type EdgeGeometryMap } from './edge-layout.js';
+import { STROKE_LINE_WIDTHS, transformedStroke, type StrokeTransform } from '../../shared/canvas-drawings.js';
+import { storedDrawingKey } from './drawing-selection.js';
 import type { ExpansionLayer, FrameExpansion } from './expansion.js';
+import { inkStroke, strokeInkColor } from './stroke-painter.js';
 import { BADGE_DIAMETER, BADGE_SYMBOLS, nodeBadges } from './node-badges.js';
 import { outlinePathData, shapeOutline, shapeTextBox, type ShapeOutline } from './node-shapes.js';
 import {
@@ -84,6 +87,9 @@ export interface ScenePainterOptions {
   // (R18); a resize in progress paints the drawn rectangle being dragged, not the union with
   // members that would otherwise stick the frame at their bounds. Everything else derives per pass.
   regionRects?: ReadonlyMap<ContextBlock, Rect>;
+  // How each stroke a gesture is moving or resizing has been carried so far, in its own model's
+  // units, keyed by `storedDrawingKey`. The layer is written only when the drag lands.
+  drawingTransforms?: ReadonlyMap<string, StrokeTransform>;
 }
 
 function seedFrom(text: string): number {
@@ -103,6 +109,7 @@ export class ScenePainter {
   private readonly edgeGeometry: EdgeGeometryMap;
   private readonly expansions: ExpansionLayer;
   private readonly regionRects: ReadonlyMap<ContextBlock, Rect> | null;
+  private readonly drawingTransforms: ReadonlyMap<string, StrokeTransform> | null;
 
   constructor(options: ScenePainterOptions) {
     this.ctx = options.ctx;
@@ -113,6 +120,7 @@ export class ScenePainter {
     this.edgeGeometry = options.edgeGeometry;
     this.expansions = options.expansions;
     this.regionRects = options.regionRects ?? null;
+    this.drawingTransforms = options.drawingTransforms ?? null;
   }
 
   // Labels get their own pass after nodes so they stay readable even where an edge dives under
@@ -133,6 +141,17 @@ export class ScenePainter {
     for (const edge of redirected) this.drawEdge(model, edge);
     for (const edge of model.edges) this.drawEdgeLabel(edge);
     for (const ghost of model.ghosts) this.drawGhost(ghost, { clickable: !model.embedded });
+    // Last, over the solid node fills: a circle or underline drawn around a node must stay as
+    // visible once committed as it was under the pen.
+    this.drawStrokes(model);
+  }
+
+  private drawStrokes(model: FlowModel): void {
+    for (const stored of model.visuals?.strokes() ?? []) {
+      const transform = this.drawingTransforms?.get(storedDrawingKey(model, stored.id));
+      const stroke = transform ? transformedStroke(stored, transform) : stored;
+      inkStroke(this.ctx, stroke.points, strokeInkColor(stroke.color), STROKE_LINE_WIDTHS[stroke.width]);
+    }
   }
 
   // A region is an enclosure, not a container: hachure fill and a dashed outline, so it reads as

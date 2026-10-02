@@ -55,8 +55,11 @@ through the same read/write path as .flow files.
 
 All styling lives outside the .flow too, in each graph's **canvas layer**
 `<file>.flow.canvas.json` (FLOW-SPEC.md §2.1, §11.5; `src/shared/canvas-layer.ts`): node shapes
-keyed by node `id`, edge colours keyed by a key derived from the edge, plus unknown keys carried
-through verbatim (a `drawings` list is reserved for free draw). It is purely cosmetic — losing it
+keyed by node `id`, edge colours keyed by a key derived from the edge, freehand strokes in a
+`drawings` list (each filed under the graph scope it was drawn in — `graph` names the block, absent
+for the body — in that scope's coordinates), groups of things picked up as one (a `groups` list
+of typed members — drawings for now, built to take nodes later), plus unknown keys carried
+through verbatim. It is purely cosmetic — losing it
 costs decoration, never meaning or layout — so it may separate from its graph when `id`/`pos`
 may not. Never add style properties to the .flow grammar; new visual features extend the layer.
 Backends move and delete a layer with its .flow (`companionLayerOf` is the one rule; a failed
@@ -97,6 +100,10 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   a document's visuals are keyed by), `followIdentityChanges` (re-keying after an edit), and
   positional capture/apply for copies (one record per copied node). An `on_error` edge's key is
   filed under its node in `edgeKeys`, since the property has no stable EdgeSpec object.
+  `canvas-drawings.ts` reads and edits the strokes (moves and resizes are one `StrokeTransform`);
+  `followIdentityChanges` re-files them when their `graph:` block is renamed and drops them when
+  it is removed. `canvas-groups.ts` holds groups: grouping merges rather than nests, a group left
+  with fewer than two members dissolves, and members of kinds the editor does not know are kept.
   `canvas-layer-lint.ts` lints a layer against its .flow.
 - `src/shared/flow-scan.ts` — the linter's positioned re-walk of the line grammar: mirrors
   `parseFlow`'s branch structure but keeps line numbers and records every line the parser
@@ -149,6 +156,13 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
     and a mouse-wheel notch arrive as the same event, so the device is inferred from the delta
     shape and latched for the rest of a streak; ctrl+wheel (what a touchpad pinch sends) is
     always a smooth zoom. Owns `ZOOM_STEP_FACTOR`, the one discrete zoom step.
+  - `stroke-gesture.ts` / `stroke-painter.ts` / `drawing-hit-test.ts` / `drawing-selection.ts` —
+    the draw tool: a stroke in progress (owned by the graph the pen landed in, kept in its
+    coordinates) and strokes resized by a corner (a lone stroke, or a whole group stretched as
+    one), how ink is laid down (shared by the scene painter and the live preview, and
+    drawn over nodes), what a press or marquee picks up, and a selected stroke's two identities —
+    where it is drawn (one per frame showing it) and where it is stored (what every write uses).
+    A grouped stroke is never selected alone — selecting it selects its whole group.
   - `pinch-gesture.ts` — the camera during a two-finger gesture. Pan and zoom fall out of one
     calculation: the world point under the fingers' midpoint when they landed is held under
     their current midpoint. Scale limits are passed in, so the view stays the only place that
@@ -185,7 +199,10 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
 - `src/client/model-visuals.ts` — dresses a `FlowModel` in its layer (`model.visuals`: shape
   per node, colour per edge) for painting and edge layout.
 - `src/client/visual-pickers.ts` — the shape buttons and colour swatches in the node and edge
-  editors.
+  editors, and the draw tool's colour and width.
+- `src/client/drawing-ops.ts` — what the draw tool writes: a stroke lands in the layer of the file
+  that owns the graph it was drawn in (an unfolded frame's subgraph, whichever file that is),
+  and moves, recolours and deletes join whatever action is open.
 - `src/client/context/` — context-block (region) lifecycle behind the canvas's regions:
   create/group/rename/delete (`orchestration.ts`), the `inherits` the editor generates for a
   member's expansion (`inherits.ts`), and the workspace-wide rename a provider's name forces

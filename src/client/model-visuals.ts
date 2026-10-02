@@ -1,5 +1,5 @@
-// Dresses a view-model in its file's canvas layer: which shape each node draws as and which
-// colour each edge takes. Resolved per model build, like traits, so painting and edge layout
+// Dresses a view-model in its file's canvas layer: which shape each node draws as, which
+// colour each edge takes, and the strokes drawn in the model's graph scope. Resolved per model build, like traits, so painting and edge layout
 // read answers rather than re-deriving edge keys every frame.
 
 import {
@@ -8,7 +8,10 @@ import {
   nodeShapeOf,
   type CanvasLayer,
   type DocumentIdentities,
+  type Drawing,
 } from '../shared/canvas-layer.js';
+import { strokesInScope, type Stroke } from '../shared/canvas-drawings.js';
+import { drawingGroupsOf, type Group } from '../shared/canvas-groups.js';
 import type { FlowDocument } from '../shared/flow-format.js';
 import type { FlowModel, ModelEdge, ModelVisuals } from './flow-doc.js';
 
@@ -28,6 +31,36 @@ function visualsFor(model: FlowModel, layer: CanvasLayer | null): ModelVisuals {
   return {
     shapeOf: (node) => nodeShapeOf(layer, node.id),
     edgeColorOf: (edge) => (layer ? edgeColorOf(layer, keyOf(edge)) : null),
+    strokes: strokeReaderFor(layer, model.sourceScope),
+    strokeGroupOf: strokeGroupReaderFor(layer),
+  };
+}
+
+// Kept like the strokes are, until a layer edit replaces the `groups` list.
+function strokeGroupReaderFor(layer: CanvasLayer | null): (strokeId: string) => string[] {
+  let readFrom: Group[] | null = null;
+  let groupOf = new Map<string, string[]>();
+  return (strokeId) => {
+    if (layer && layer.groups !== readFrom) {
+      readFrom = layer.groups;
+      groupOf = drawingGroupsOf(layer);
+    }
+    return groupOf.get(strokeId) ?? [strokeId];
+  };
+}
+
+// Strokes are read on every frame, so the parse is kept until the list changes. Every layer edit
+// replaces the `drawings` array rather than editing it, which is what makes identity enough.
+function strokeReaderFor(layer: CanvasLayer | null, scope: string | null): () => Stroke[] {
+  let readFrom: Drawing[] | null = null;
+  let strokes: Stroke[] = [];
+  return () => {
+    if (!layer) return [];
+    if (layer.drawings !== readFrom) {
+      readFrom = layer.drawings;
+      strokes = strokesInScope(layer, scope);
+    }
+    return strokes;
   };
 }
 

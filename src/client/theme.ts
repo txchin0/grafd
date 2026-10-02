@@ -4,7 +4,7 @@
 // through `var(--token)`, and the canvas — which cannot read custom properties — gets the
 // same tokens resolved into concrete colour strings once per theme change.
 
-import { EDGE_COLOR_SLOTS, isEdgeColorSlot, type EdgeColorSlot } from '../shared/canvas-layer.js';
+import { LAYER_COLOR_SLOTS, isLayerColorSlot, type LayerColorSlot } from '../shared/canvas-layer.js';
 
 export interface ThemeDescriptor {
   id: string;
@@ -46,7 +46,7 @@ export interface CanvasPalette {
   marqueeFill: string;
   portFill: string;
   // What each canvas-layer colour slot draws as, read from `--canvas-slot-<slot>`.
-  slots: Record<EdgeColorSlot, string>;
+  slots: Record<LayerColorSlot, string>;
 }
 
 export type CanvasColorField = Exclude<keyof CanvasPalette, 'slots'>;
@@ -73,7 +73,7 @@ export const CANVAS_COLOR_TOKENS: Record<CanvasColorField, string> = {
   portFill: '--canvas-port-fill',
 };
 
-export function edgeColorSlotToken(slot: EdgeColorSlot): string {
+export function layerColorSlotToken(slot: LayerColorSlot): string {
   return `--canvas-slot-${slot}`;
 }
 
@@ -122,8 +122,8 @@ export function resolveCanvasPalette(style: CSSStyleDeclaration): CanvasPalette 
   for (const field of Object.keys(CANVAS_COLOR_TOKENS) as CanvasColorField[]) {
     resolved[field] = readColorToken(style, CANVAS_COLOR_TOKENS[field], DEFAULT_CANVAS_PALETTE[field]);
   }
-  for (const slot of EDGE_COLOR_SLOTS) {
-    resolved.slots[slot] = readColorToken(style, edgeColorSlotToken(slot), DEFAULT_CANVAS_PALETTE.slots[slot]);
+  for (const slot of LAYER_COLOR_SLOTS) {
+    resolved.slots[slot] = readColorToken(style, layerColorSlotToken(slot), DEFAULT_CANVAS_PALETTE.slots[slot]);
   }
   return resolved;
 }
@@ -144,7 +144,7 @@ export function applyTheme(id: ThemeId): void {
 // What a canvas-layer colour draws as in the current theme: a slot through the palette, a hex
 // value as itself.
 export function resolveLayerColor(color: string, palette: CanvasPalette = canvasPalette): string {
-  return isEdgeColorSlot(color) ? palette.slots[color] : color;
+  return isLayerColorSlot(color) ? palette.slots[color] : color;
 }
 
 // The canvas itself is transparent — the background a viewer sees is the page's, so the theme

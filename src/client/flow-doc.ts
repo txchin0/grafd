@@ -34,6 +34,7 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import type { NodeShape } from '../shared/canvas-layer.js';
+import { strokeBounds, type Stroke } from '../shared/canvas-drawings.js';
 import type { DisplayGeometry } from './canvas/expansion.js';
 import type { Point } from './geometry.js';
 import { DEFAULT_NODE_SIZE, autoLayout } from '../shared/auto-layout.js';
@@ -106,6 +107,11 @@ export interface FlowModel {
 export interface ModelVisuals {
   shapeOf(node: FlowNode): NodeShape;
   edgeColorOf(edge: ModelEdge): string | null;
+  // The strokes drawn in this model's graph scope, in its coordinates.
+  strokes(): Stroke[];
+  // The ids of the strokes picked up together with this one — its whole group, itself included —
+  // or just its own when it is not grouped.
+  strokeGroupOf(strokeId: string): string[];
 }
 
 // The rects a model currently occupies on screen: each node's display rect once a geometry
@@ -118,6 +124,8 @@ export function displayRects(model: FlowModel): Rect[] {
     // A region the user drew before populating it occupies space no node accounts for, so it has
     // to be measured here or it would be cropped out of fit-to-content and out of exports.
     ...model.contexts.map((context) => regionRectOf(model, context)),
+    // Drawings are content too: an unfolded frame grows to hold them, and exports keep them.
+    ...(model.visuals?.strokes() ?? []).map(strokeBounds),
   ].filter((rect): rect is Rect => rect != null);
 }
 

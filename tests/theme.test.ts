@@ -8,11 +8,11 @@ import {
   PAGE_BACKGROUND_TOKEN,
   THEMES,
   isThemeId,
-  edgeColorSlotToken,
+  layerColorSlotToken,
   resolveCanvasPalette,
   type CanvasColorField,
 } from '../src/client/theme.js';
-import { EDGE_COLOR_SLOTS } from '../src/shared/canvas-layer.js';
+import { LAYER_COLOR_SLOTS } from '../src/shared/canvas-layer.js';
 
 const themesCss = readFileSync(new URL('../public/themes.css', import.meta.url), 'utf8');
 
@@ -59,7 +59,7 @@ describe('themes.css', () => {
   });
 
   it('declares every canvas token the palette resolves', () => {
-    for (const token of [...Object.values(CANVAS_COLOR_TOKENS), ...EDGE_COLOR_SLOTS.map(edgeColorSlotToken)]) {
+    for (const token of [...Object.values(CANVAS_COLOR_TOKENS), ...LAYER_COLOR_SLOTS.map(layerColorSlotToken)]) {
       expect(fallbackBlock.tokens.has(token), token).toBe(true);
     }
   });
@@ -68,8 +68,8 @@ describe('themes.css', () => {
     for (const field of Object.keys(CANVAS_COLOR_TOKENS) as CanvasColorField[]) {
       expect(fallbackBlock.tokens.get(CANVAS_COLOR_TOKENS[field]), field).toBe(DEFAULT_CANVAS_PALETTE[field]);
     }
-    for (const slot of EDGE_COLOR_SLOTS) {
-      expect(fallbackBlock.tokens.get(edgeColorSlotToken(slot)), slot).toBe(DEFAULT_CANVAS_PALETTE.slots[slot]);
+    for (const slot of LAYER_COLOR_SLOTS) {
+      expect(fallbackBlock.tokens.get(layerColorSlotToken(slot)), slot).toBe(DEFAULT_CANVAS_PALETTE.slots[slot]);
     }
     expect(fallbackBlock.tokens.get(PAGE_BACKGROUND_TOKEN)).toBe(DEFAULT_PAGE_BACKGROUND);
   });
@@ -85,9 +85,9 @@ describe('resolveCanvasPalette', () => {
   });
 
   it('reads every colour slot from its token', () => {
-    const tokens = Object.fromEntries(EDGE_COLOR_SLOTS.map((slot) => [edgeColorSlotToken(slot), `slot(${slot})`]));
+    const tokens = Object.fromEntries(LAYER_COLOR_SLOTS.map((slot) => [layerColorSlotToken(slot), `slot(${slot})`]));
     const resolved = resolveCanvasPalette(stubbedStyle(tokens));
-    for (const slot of EDGE_COLOR_SLOTS) expect(resolved.slots[slot]).toBe(`slot(${slot})`);
+    for (const slot of LAYER_COLOR_SLOTS) expect(resolved.slots[slot]).toBe(`slot(${slot})`);
   });
 
   it('trims the surrounding whitespace a declaration may carry', () => {

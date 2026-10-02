@@ -6,6 +6,7 @@ import { parseFlow, serializeFlow, type ContextBlock, type FlowDocument, type Fl
 import { assignMissingIds, allContextBlocks, contextBlockNamed, nodesIn, allNodes } from '../src/client/flow-doc.js';
 import type { DocumentOwner } from '../src/client/canvas/expansion.js';
 import type { RegionTarget } from '../src/client/canvas/canvas-view.js';
+import type { DrawingSelection } from '../src/client/canvas/drawing-selection.js';
 import type { OpenFlow } from '../src/client/open-flow.js';
 import { createClipboard, type Clipboard, type ClipboardOptions } from '../src/client/clipboard.js';
 import {
@@ -55,6 +56,14 @@ graph: Steps
     pos: 200, 200, 200, 88
 `;
 
+// For the tests about nodes and regions: no strokes are ever selected.
+const withoutDrawings = {
+  selectedDrawings: () => [],
+  copyDrawings: () => [],
+  pasteDrawings: () => [],
+  runAction: (body: () => void) => body(),
+} satisfies Partial<ClipboardOptions>;
+
 interface Harness {
   doc: FlowDocument;
   clipboard: Clipboard;
@@ -99,6 +108,7 @@ function harnessFor(text: string, flowOverride?: Partial<OpenFlow>, documentReso
     deleteSelection: () => options.deleteSelection(),
     captureVisuals: () => null,
     applyCapturedVisuals: () => {},
+    ...withoutDrawings,
   } satisfies ClipboardOptions);
   const setSelection = (nodes: FlowNode[], regions: ContextBlock[]) => {
     selection = nodes;
@@ -247,6 +257,7 @@ describe('clipboard and the canvas layer', () => {
       applyCapturedVisuals: (to, copies, visuals) => {
         if (visuals) applyCapturedVisuals(layer, documentIdentities(to.doc), copies, visuals);
       },
+      ...withoutDrawings,
     } satisfies ClipboardOptions);
     const select = (names: string[]) => {
       selection = names.map((name) => allNodes(doc).find((node) => node.name === name)!);
@@ -276,5 +287,68 @@ describe('clipboard and the canvas layer', () => {
     expect(nodeShapeOf(layer, askCopy.id)).toBe('diamond');
     // The copy's edge still points at the original Answer, under its own key.
     expect(edgeColorOf(layer, documentIdentities(doc).edgeKeys.get(askCopy.edges[0])!)).toBe('green');
+  });
+});
+
+describe('clipboard and strokes', () => {
+  const carried = { drawings: [{ id: 's', kind: 'stroke', points: [[10, 20], [30, 40]] }], groups: [] };
+
+  function strokeHarness() {
+    const doc = parseFlow(MAIN);
+    assignMissingIds(doc);
+    const owner: DocumentOwner = { doc, path: 'main.flow' };
+    const flow = {
+      doc,
+      path: 'main.flow',
+      scope: null,
+      model: { nodes: [], edges: [], ghosts: [], contexts: [], nodesByName: new Map(), traits: new Map(), sourceDoc: doc, sourcePath: 'main.flow', sourceScope: null },
+    } as OpenFlow;
+    const selectedDrawings: DrawingSelection[] = [{ model: flow.model, id: 's' }];
+    const deletions: string[] = [];
+    let openActions = 0;
+    const pasteDrawings = vi.fn((target: { owner: DocumentOwner; scope: string | null }) => [
+      { path: target.owner.path, scope: target.scope, id: 'copy' },
+    ]);
+    const select = vi.fn();
+    const clipboard = createClipboard({
+      openFlow: () => flow,
+      selection: () => [],
+      selectedRegions: () => [],
+      selectedDrawings: () => selectedDrawings,
+      select,
+      ownerOf: () => owner,
+      ownerOfRegion: () => owner,
+      documentAt: () => owner,
+      applyToDoc: (_owner, mutation) => mutation(),
+      deleteSelection: () => deletions.push(openActions > 0 ? 'inside an action' : 'alone'),
+      captureVisuals: () => null,
+      applyCapturedVisuals: () => {},
+      copyDrawings: () => [{ owner, scope: null, carried }],
+      pasteDrawings,
+      runAction: (body) => {
+        openActions += 1;
+        body();
+        openActions -= 1;
+      },
+    } satisfies ClipboardOptions);
+    return { owner, clipboard, deletions, pasteDrawings, select };
+  }
+
+  it('cuts strokes as one action, and pastes them back under the pointer, selected', () => {
+    const { owner, clipboard, deletions, pasteDrawings, select } = strokeHarness();
+    clipboard.cut();
+    expect(deletions).toEqual(['inside an action']);
+    expect(clipboard.hasContent()).toBe(true);
+
+    clipboard.paste({ x: 110, y: 120 });
+    expect(pasteDrawings).toHaveBeenCalledWith({ owner, scope: null }, carried, { x: 100, y: 100 });
+    expect(select).toHaveBeenCalledWith([], [], [{ path: 'main.flow', scope: null, id: 'copy' }]);
+  });
+
+  it('duplicates strokes a step away from themselves', () => {
+    const { owner, clipboard, pasteDrawings, select } = strokeHarness();
+    clipboard.duplicateSelection();
+    expect(pasteDrawings).toHaveBeenCalledWith({ owner, scope: null }, carried, { x: 24, y: 24 });
+    expect(select).toHaveBeenCalledWith([], [], [{ path: 'main.flow', scope: null, id: 'copy' }]);
   });
 });

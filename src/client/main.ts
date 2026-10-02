@@ -47,7 +47,10 @@ import { DEFAULT_NODE_SIZE } from '../shared/auto-layout.js';
 import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, MembershipChange, ModelContext, ModelEdge } from './flow-doc.js';
 import type { Point } from './geometry.js';
-import { CanvasView, type ContextTarget, type EdgeDrop, type Tool, type View } from './canvas/canvas-view.js';
+import { CanvasView, type ContextTarget, type DrawStyle, type EdgeDrop, type Tool, type View } from './canvas/canvas-view.js';
+import type { DrawingMove } from './canvas/drawing-selection.js';
+import { createDrawingOps } from './drawing-ops.js';
+import { createColorSwatches, createStrokeWidthPicker } from './visual-pickers.js';
 import { createContextMenu, type MenuItem } from './context-menu.js';
 import type { Modal } from './modal.js';
 import { createPreferencesDialog } from './preferences-dialog.js';
@@ -75,6 +78,7 @@ import {
   parseCanvasLayer,
   serializeCanvasLayer,
 } from '../shared/canvas-layer.js';
+import { drawingsForExtractedDocument } from '../shared/canvas-drawings.js';
 import { CanvasLayerStore } from './canvas-layer-store.js';
 import { createCanvasLayerSync } from './canvas-layer-sync.js';
 import { dressModel } from './model-visuals.js';
@@ -163,6 +167,10 @@ const elements = {
   toolSelectButton: elementById<HTMLButtonElement>('tool-select-button'),
   toolNodeButton: elementById<HTMLButtonElement>('tool-node-button'),
   toolContextButton: elementById<HTMLButtonElement>('tool-context-button'),
+  toolDrawButton: elementById<HTMLButtonElement>('tool-draw-button'),
+  drawStyle: elementById<HTMLDivElement>('draw-style'),
+  drawColor: elementById<HTMLDivElement>('draw-color'),
+  drawWidth: elementById<HTMLDivElement>('draw-width'),
   zoomIn: elementById<HTMLButtonElement>('zoom-in-button'),
   zoomOut: elementById<HTMLButtonElement>('zoom-out-button'),
   zoomLevel: elementById<HTMLButtonElement>('zoom-level-button'),
@@ -192,6 +200,24 @@ const contextMenu = createContextMenu();
 // assigned after view/editors exist — those callbacks only run on user gestures.
 let contextOps: ContextOrchestration;
 
+// What the draw tool and selected strokes write. Like the clipboard below, it reaches everything
+// through callbacks, so it can be built before the view exists.
+const drawingOps = createDrawingOps({
+  session: () => session,
+  layerSync,
+  creationTargetFor: (frameHost) => creationTargetFor(frameHost),
+  ensureScope: (target) => {
+    if (target.scope == null || FlowDoc.graphBlockNames(target.owner.doc).includes(target.scope)) return;
+    applyToDoc(target.owner, () => creationItems(target), { commit: 'now' });
+  },
+  documentOwnerAt: (path) => {
+    const doc = expandTargetDoc(path);
+    return doc ? { doc, path } : null;
+  },
+  rerenderAfterEditTo: (owner) => rerenderAfterEditTo(owner),
+  notify: (text) => view.flashNotice(text),
+});
+
 // Copy/cut/paste/duplicate. Built here rather than beside the canvas because everything it
 // needs — the selection, the owning document of a node, the routed mutation — is reached
 // through callbacks, so nothing it depends on has to exist yet.
@@ -199,11 +225,12 @@ const clipboard = createClipboard({
   openFlow: () => openFlow,
   selection: () => [...view.selection],
   selectedRegions: () => view.selectedRegionTargets(),
-  select: (nodes, regions) => {
-    const contexts = (regions ?? [])
+  selectedDrawings: () => view.selectedDrawings,
+  select: (nodes, regions, drawings) => {
+    const contexts = regions
       .map((block) => view.model.contexts.find((context) => context.block === block))
       .filter((context): context is ModelContext => context != null);
-    view.setSelection(nodes, contexts);
+    view.setSelection(nodes, contexts, drawings);
   },
   ownerOf,
   ownerOfRegion: (region) => contextOps.ownerOfRegion(region),
@@ -216,6 +243,9 @@ const clipboard = createClipboard({
   deleteSelection: () => deleteSelection(),
   captureVisuals: (owner, nodes) => layerSync.captureVisuals(owner, nodes),
   applyCapturedVisuals: (owner, copies, visuals) => layerSync.applyCapturedVisuals(owner, copies, visuals),
+  copyDrawings: (selections) => drawingOps.copyDrawings(selections),
+  pasteDrawings: (target, drawings, offset) => drawingOps.pasteDrawings(target, drawings, offset),
+  runAction: (body) => session.runAction(body),
 });
 
 
@@ -770,6 +800,7 @@ function extractSubgraphIntoFile(node: FlowNode): void {
   // nodes that moved out, and the new file is written from a re-parse with no link to them.
   const blockNodes = FlowDoc.nodesIn(FlowDoc.scopeItems(owner.doc, blockName));
   const blockVisuals = layerSync.captureVisuals(owner, blockNodes);
+  const parentDrawings = layerSync.drawingContentOf(owner) ?? { drawings: [], groups: [] };
 
   // The extracted file is new, so it has no prior text to restore and takes no part in the undo
   // step: the parent document's rewrite is the whole of what this action can put back.
@@ -787,7 +818,9 @@ function extractSubgraphIntoFile(node: FlowNode): void {
   // its name, which is what pairs it with the node it came from.
   const extractedByName = new Map(FlowDoc.nodesIn((extracted as FlowDocument).items).map((node) => [node.name, node]));
   const copies = blockNodes.map((node) => extractedByName.get(node.name) ?? null);
-  registerCreatedFlowFile(path, text, layerSync.layerTextForNewDocument(extracted, copies, blockVisuals));
+  const carriedBlockNames = new Set(FlowDoc.graphBlockNames(extracted));
+  const carried = drawingsForExtractedDocument(parentDrawings, blockName, carriedBlockNames);
+  registerCreatedFlowFile(path, text, layerSync.layerTextForNewDocument(extracted, copies, blockVisuals, carried));
   session.adoptText(path, text);
   // Extraction moves the block out of the owning document, so a scope naming it is now stale.
   if (owner.path === openFlow?.path) dropScopeIfMissing();
@@ -851,14 +884,20 @@ function deleteSelection(): void {
   const nodes = [...view.selection];
   const edge = view.selectedEdge;
   const regions = view.selectedRegionTargets();
-  if (nodes.length > 0 && regions.length > 0) {
+  const drawings = view.selectedDrawings;
+  const selectedKinds = [nodes.length, regions.length, drawings.length].filter((count) => count > 0).length;
+  if (selectedKinds > 1) {
     editors.closeAll();
-    // One mixed delete is one undo step: the nodes, the blocks, the stripped `updates:` and the
-    // `inherits` rewrites all land together.
+    // One mixed delete is one undo step: the nodes, the blocks, the strokes, the stripped
+    // `updates:` and the `inherits` rewrites all land together.
     session.runAction(() => {
-      writeNodesDeletion(nodes);
-      contextOps.writeRegionDeletions(regions);
+      if (nodes.length > 0) writeNodesDeletion(nodes);
+      if (regions.length > 0) contextOps.writeRegionDeletions(regions);
+      if (drawings.length > 0) drawingOps.deleteDrawings(drawings);
     });
+    view.clearSelection();
+  } else if (drawings.length > 0) {
+    drawingOps.deleteDrawings(drawings);
     view.clearSelection();
   } else if (nodes.length > 0) {
     editors.closeAll();
@@ -1334,8 +1373,13 @@ function commitMovesFor(
   nodes: FlowNode[],
   membershipChanges: MembershipChange[] = [],
   alsoTouched: DocumentOwner[] = [],
+  drawingMoves: DrawingMove[] = [],
 ): void {
-  session.runAction(() => writeMovesAndMembership(nodes, membershipChanges, alsoTouched));
+  session.runAction(() => {
+    const movesGraph = nodes.length > 0 || membershipChanges.length > 0 || alsoTouched.length > 0;
+    if (movesGraph) writeMovesAndMembership(nodes, membershipChanges, alsoTouched);
+    if (drawingMoves.length > 0) drawingOps.moveDrawings(drawingMoves);
+  });
 }
 
 function writeMovesAndMembership(
@@ -1518,9 +1562,14 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   },
   nodeClicked: (node) => editors.openNodeEditor(node),
   canvasClicked: () => editors.closeAll(),
-  moveCommitted: (nodes, membershipChanges) => commitMovesFor(nodes ?? [], membershipChanges ?? []),
-  regionMoved: (regions, movedNodes, membershipChanges) =>
-    commitMovesFor(movedNodes, membershipChanges, regions.map((region) => contextOps.ownerOfRegion(region))),
+  moveCommitted: (nodes, membershipChanges, drawingMoves) =>
+    commitMovesFor(nodes ?? [], membershipChanges ?? [], [], drawingMoves ?? []),
+  regionMoved: (regions, movedNodes, membershipChanges, drawingMoves) =>
+    commitMovesFor(movedNodes, membershipChanges, regions.map((region) => contextOps.ownerOfRegion(region)), drawingMoves),
+  createStroke: (points, frameHost, style) => {
+    if (openFlow) drawingOps.createStroke(points, frameHost, style);
+  },
+  resizeDrawings: (drawings, transform) => drawingOps.resizeDrawings(drawings, transform),
   regionResized: (region, membershipChanges) =>
     commitMovesFor([], membershipChanges, [contextOps.ownerOfRegion(region)]),
   deleteRegion: (region) => contextOps.deleteRegion(region),
@@ -1542,6 +1591,7 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   },
   afterRender: () => {
     editors.reposition();
+    showDrawStyleWhenRelevant();
     elements.zoomLevel.textContent = `${Math.round(view.view.scale * 100)}%`;
   },
 }, expansions);
@@ -1639,6 +1689,7 @@ function applyPreferences(preferences: Preferences): void {
   view.doubleClickOpensSubgraph = preferences.openSubgraphOnDoubleClick;
   applyTheme(preferences.theme);
   applySidebarVisibility(preferences.sidebarCollapsed);
+  setDrawStyle({ color: preferences.drawColor, width: preferences.drawWidth });
   view.requestRender();
 }
 
@@ -1685,6 +1736,7 @@ function openCanvasContextMenu(target: ContextTarget, screenPoint: Point): void 
     target.kind === 'node' ? nodeMenuItems(target.node, screenPoint)
     : target.kind === 'edge' ? edgeMenuItems(target.edge)
     : target.kind === 'region' ? contextOps.regionMenuItems(target.region, screenPoint)
+    : target.kind === 'drawing' ? drawingMenuItems()
     : canvasMenuItems(target.world);
   contextMenu.open(items, screenPoint);
 }
@@ -1751,6 +1803,35 @@ function edgeMenuItems(edge: ModelEdge): MenuItem[] {
   ];
 }
 
+function drawingMenuItems(): MenuItem[] {
+  const drawings = view.selectedDrawings;
+  const count = drawings.length;
+  const items: MenuItem[] = [];
+  if (count > 1) {
+    items.push({ label: `Group ${count} drawings`, disabled: !drawingOps.canGroup(drawings), onSelect: groupSelectedDrawings });
+  }
+  if (drawingOps.isAnyGrouped(drawings)) items.push({ label: 'Ungroup', onSelect: ungroupSelectedDrawings });
+  items.push({ label: 'Duplicate', onSelect: clipboard.duplicateSelection });
+  items.push({ label: 'Copy', onSelect: clipboard.copy });
+  items.push({ label: 'Cut', onSelect: clipboard.cut });
+  items.push({ separator: true });
+  items.push({ label: count > 1 ? `Delete ${count} drawings` : 'Delete drawing', danger: true, onSelect: deleteSelection });
+  return items;
+}
+
+function hasCopyableSelection(): boolean {
+  return view.selection.size > 0 || view.selectedRegions.size > 0 || view.selectedDrawings.length > 0;
+}
+
+function groupSelectedDrawings(): void {
+  drawingOps.groupDrawings(view.selectedDrawings);
+  view.holdWholeGroups();
+}
+
+function ungroupSelectedDrawings(): void {
+  drawingOps.ungroupDrawings(view.selectedDrawings);
+}
+
 function canvasMenuItems(world: Point): MenuItem[] {
   const creation = view.creationTargetAt(world);
   return [
@@ -1765,17 +1846,48 @@ function canvasMenuItems(world: Point): MenuItem[] {
   ];
 }
 
+let currentTool: Tool = 'select';
+
 function setTool(tool: Tool): void {
+  currentTool = tool;
   view.setTool(tool);
   elements.toolSelectButton.classList.toggle('active', tool === 'select');
   elements.toolNodeButton.classList.toggle('active', tool === 'node');
   elements.toolContextButton.classList.toggle('active', tool === 'context');
+  elements.toolDrawButton.classList.toggle('active', tool === 'draw');
+  showDrawStyleWhenRelevant();
+}
+
+// The pen's colour and width show while drawing, and while strokes are selected — a swatch
+// picked outside the draw tool then recolours them as well. With the pen in hand it only sets
+// the pen: strokes still selected from before are not what the user is choosing a colour for.
+function showDrawStyleWhenRelevant(): void {
+  const relevant = currentTool === 'draw' || view.selectedDrawings.length > 0;
+  if (elements.drawStyle.hidden === relevant) elements.drawStyle.hidden = !relevant;
+}
+
+const drawColorPicker = createColorSwatches(elements.drawColor, (color) => {
+  const selected = view.selectedDrawings;
+  if (selected.length > 0 && currentTool !== 'draw') drawingOps.recolorDrawings(selected, color);
+  setDrawStyle({ ...view.drawStyle, color });
+});
+const drawWidthPicker = createStrokeWidthPicker(elements.drawWidth, (width) => setDrawStyle({ ...view.drawStyle, width }));
+
+function setDrawStyle(style: DrawStyle): void {
+  view.drawStyle = style;
+  drawColorPicker.fill(style.color);
+  drawWidthPicker.fill(style.width);
+  if (style.color === currentPreferences.drawColor && style.width === currentPreferences.drawWidth) return;
+  const preferences = { ...currentPreferences, drawColor: style.color, drawWidth: style.width };
+  savePreferences(preferences);
+  currentPreferences = preferences;
 }
 
 function wireViewControls(): void {
   elements.toolSelectButton.addEventListener('click', () => setTool('select'));
   elements.toolNodeButton.addEventListener('click', () => setTool('node'));
   elements.toolContextButton.addEventListener('click', () => setTool('context'));
+  elements.toolDrawButton.addEventListener('click', () => setTool('draw'));
   elements.zoomIn.addEventListener('click', () => view.stepZoom(1));
   elements.zoomOut.addEventListener('click', () => view.stepZoom(-1));
   elements.zoomLevel.addEventListener('click', () => view.setZoom(1));
@@ -1861,16 +1973,21 @@ function wireKeyboard(): void {
       event.preventDefault();
       toggleSidebar();
     } else if (ctrl && event.key.toLowerCase() === 'c') {
-      if (view.selection.size === 0 && view.selectedRegions.size === 0) return;
+      if (!hasCopyableSelection()) return;
       event.preventDefault();
       clipboard.copy();
     } else if (ctrl && event.key.toLowerCase() === 'x') {
-      if (view.selection.size === 0 && view.selectedRegions.size === 0) return;
+      if (!hasCopyableSelection()) return;
       event.preventDefault();
       clipboard.cut();
     } else if (ctrl && event.key.toLowerCase() === 'v') {
       event.preventDefault();
       clipboard.paste();
+    } else if (ctrl && event.key.toLowerCase() === 'g') {
+      if (view.selectedDrawings.length === 0) return;
+      event.preventDefault();
+      if (event.shiftKey) ungroupSelectedDrawings();
+      else groupSelectedDrawings();
     } else if (ctrl && event.key.toLowerCase() === 'd') {
       event.preventDefault();
       clipboard.duplicateSelection();
@@ -1891,6 +2008,8 @@ function wireKeyboard(): void {
       setTool('node');
     } else if (!ctrl && (event.key.toLowerCase() === 'c' || event.key === '3')) {
       setTool('context');
+    } else if (!ctrl && (event.key.toLowerCase() === 'd' || event.key === '4')) {
+      setTool('draw');
     } else if (event.key === 'Escape') {
       contextMenu.close();
       editors.closeAll();

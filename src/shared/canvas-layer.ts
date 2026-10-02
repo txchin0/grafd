@@ -1,6 +1,6 @@
 // A workspace's canvas layer: everything about how a graph looks that is not layout. Each
 // `<file>.flow` may have a `<file>.flow.canvas.json` beside it holding per-node and per-edge
-// visuals (and, later, free drawings). It is editor-owned and purely cosmetic: losing it costs
+// visuals and the free drawings made over it. It is editor-owned and purely cosmetic: losing it costs
 // decoration, never meaning or layout, which is why it may live outside the .flow file when
 // `id` and `pos` may not (FLOW-SPEC.md §2.1).
 //
@@ -8,8 +8,18 @@
 // says — its source's id, its target (by id when the target resolves in its scope, so renaming
 // the target never breaks the key), its `{Inner}` refinements and its label. The editor moves
 // entries when its own edits change a key; an edit made outside the editor orphans them.
+// Drawings are filed by the graph scope they were drawn in (canvas-drawings.ts), and groups hold
+// things that are picked up as one (canvas-groups.ts).
 
-import { serializeEdgeExpression, type EdgeSpec, type FlowDocument, type FlowItem, type FlowNode } from './flow-format.js';
+import {
+  serializeEdgeExpression,
+  type EdgeSpec,
+  type FlowDocument,
+  type FlowItem,
+  type FlowNode,
+  type GraphItem,
+} from './flow-format.js';
+import { pruneGroups, type Group } from './canvas-groups.js';
 
 export const CANVAS_LAYER_FORMAT = 'grafd-canvas/1';
 export const CANVAS_LAYER_SUFFIX = '.canvas.json';
@@ -19,28 +29,36 @@ export type NodeShape = (typeof NODE_SHAPES)[number];
 export const DEFAULT_NODE_SHAPE: NodeShape = 'rectangle';
 
 // Named slots rather than colours: each theme defines what a slot looks like, so a coloured
-// edge stays legible in every theme. A `#rrggbb` value is accepted as an escape hatch.
-export const EDGE_COLOR_SLOTS = ['red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple', 'gray'] as const;
-export type EdgeColorSlot = (typeof EDGE_COLOR_SLOTS)[number];
+// edge or drawing stays legible in every theme. A `#rrggbb` value is accepted as an escape hatch.
+export const LAYER_COLOR_SLOTS = ['red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple', 'gray'] as const;
+export type LayerColorSlot = (typeof LAYER_COLOR_SLOTS)[number];
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 
 // Entries keep every field they were read with, known or not, so a layer written by a newer
 // editor survives a save by an older one. The typed readers below validate what they read.
 export type NodeVisual = { shape?: unknown } & Record<string, unknown>;
 export type EdgeVisual = { color?: unknown } & Record<string, unknown>;
+// One entry of the `drawings` list, kept whole; canvas-drawings.ts reads the kinds it knows.
+export type Drawing = { id?: unknown; kind?: unknown; graph?: unknown } & Record<string, unknown>;
 
 export interface CanvasLayer {
   nodes: Record<string, NodeVisual>;
   edges: Record<string, EdgeVisual>;
-  // Top-level keys this editor does not interpret (the reserved `drawings` list among them),
-  // carried through verbatim.
+  drawings: Drawing[];
+  groups: Group[];
+  // Top-level keys this editor does not interpret, carried through verbatim — among them a
+  // `drawings` or `groups` value that is not a list, which is kept for a hand fix rather than
+  // discarded.
   extras: Record<string, unknown>;
 }
 
 const KNOWN_TOP_LEVEL_KEYS = new Set(['format', 'nodes', 'edges']);
+// Lists of objects, written one entry per line after everything else, in this order.
+const ENTRY_LIST_KEYS = ['groups', 'drawings'] as const;
+type EntryListKey = (typeof ENTRY_LIST_KEYS)[number];
 
 export function emptyCanvasLayer(): CanvasLayer {
-  return { nodes: {}, edges: {}, extras: {} };
+  return { nodes: {}, edges: {}, drawings: [], groups: [], extras: {} };
 }
 
 export function canvasLayerPathOf(flowPath: string): string {
@@ -70,12 +88,12 @@ export function isNodeShape(value: unknown): value is NodeShape {
   return (NODE_SHAPES as readonly unknown[]).includes(value);
 }
 
-export function isEdgeColorSlot(value: unknown): value is EdgeColorSlot {
-  return (EDGE_COLOR_SLOTS as readonly unknown[]).includes(value);
+export function isLayerColorSlot(value: unknown): value is LayerColorSlot {
+  return (LAYER_COLOR_SLOTS as readonly unknown[]).includes(value);
 }
 
-export function isEdgeColor(value: unknown): value is string {
-  return isEdgeColorSlot(value) || (typeof value === 'string' && HEX_COLOR.test(value));
+export function isLayerColor(value: unknown): value is string {
+  return isLayerColorSlot(value) || (typeof value === 'string' && HEX_COLOR.test(value));
 }
 
 // Tolerant: unparseable text, or text that is not a JSON object, reads as an empty layer — the
@@ -86,9 +104,26 @@ export function parseCanvasLayer(text: string | null | undefined): CanvasLayer {
   if (!raw) return emptyCanvasLayer();
   const extras: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw)) {
-    if (!KNOWN_TOP_LEVEL_KEYS.has(key)) extras[key] = value;
+    if (KNOWN_TOP_LEVEL_KEYS.has(key) || (isEntryListKey(key) && Array.isArray(value))) continue;
+    extras[key] = value;
   }
-  return { nodes: readEntries(raw.nodes), edges: readEntries(raw.edges), extras };
+  return {
+    nodes: readEntries(raw.nodes),
+    edges: readEntries(raw.edges),
+    drawings: readEntryList(raw.drawings),
+    groups: readEntryList(raw.groups),
+    extras,
+  };
+}
+
+// A `drawings` or `groups` value that is not a list is carried in `extras` and written back as
+// it was; any drawing edit would write a list over it, so none is made until it is fixed.
+export function drawingListsAreEditable(layer: CanvasLayer): boolean {
+  return ENTRY_LIST_KEYS.every((key) => !(key in layer.extras));
+}
+
+function isEntryListKey(key: string): key is EntryListKey {
+  return (ENTRY_LIST_KEYS as readonly string[]).includes(key);
 }
 
 // Text that is there but says nothing this editor can read. Unlike a missing file, it must not
@@ -112,6 +147,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value != null && !Array.isArray(value);
 }
 
+function readEntryList(raw: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isPlainObject).map((entry) => ({ ...entry }));
+}
+
 function readEntries(raw: unknown): Record<string, Record<string, unknown>> {
   if (!isPlainObject(raw)) return {};
   const entries: Record<string, Record<string, unknown>> = {};
@@ -129,12 +169,30 @@ export function serializeCanvasLayer(layer: CanvasLayer): string | null {
   if (Object.keys(layer.nodes).length > 0) document.nodes = sortedEntries(layer.nodes);
   if (Object.keys(layer.edges).length > 0) document.edges = sortedEntries(layer.edges);
   Object.assign(document, layer.extras);
-  return JSON.stringify(document, null, 2) + '\n';
+  const lists = ENTRY_LIST_KEYS
+    .map((key): [EntryListKey, Record<string, unknown>[]] => [key, layer[key]])
+    .filter(([, entries]) => entries.length > 0);
+  for (const [key] of lists) delete document[key];
+  const objectText = JSON.stringify(document, null, 2);
+  return (lists.length === 0 ? objectText : withEntryListsAppended(objectText, lists)) + '\n';
+}
+
+// A stroke is hundreds of coordinates, and pretty-printing would give each its own line. Each
+// entry of a list is written on one line instead, the lists last so they can be appended.
+function withEntryListsAppended(objectText: string, lists: [EntryListKey, Record<string, unknown>[]][]): string {
+  const listTexts = lists.map(([key, entries]) => {
+    const entryLines = entries.map((entry) => `    ${JSON.stringify(entry)}`).join(',\n');
+    return `  ${JSON.stringify(key)}: [\n${entryLines}\n  ]`;
+  });
+  const body = objectText.slice(0, objectText.lastIndexOf('}')).trimEnd();
+  return `${body},\n${listTexts.join(',\n')}\n}`;
 }
 
 export function canvasLayerIsEmpty(layer: CanvasLayer): boolean {
   return Object.keys(layer.nodes).length === 0
     && Object.keys(layer.edges).length === 0
+    && layer.drawings.length === 0
+    && layer.groups.length === 0
     && Object.keys(layer.extras).length === 0;
 }
 
@@ -153,7 +211,7 @@ export function nodeShapeOf(layer: CanvasLayer | null, nodeId: string | null): N
 export function edgeColorOf(layer: CanvasLayer | null, edgeKey: string | null): string | null {
   if (!layer || edgeKey == null) return null;
   const color = layer.edges[edgeKey]?.color;
-  return isEdgeColor(color) ? color : null;
+  return isLayerColor(color) ? color : null;
 }
 
 // The default shape is never written; clearing the last field of an entry removes the entry.
@@ -193,14 +251,19 @@ export function flowEdgeKey(sourceId: string, spec: EdgeSpec, targetId: string |
 // Comparing two captures of the same document object tells which entries an edit moved.
 export interface DocumentIdentities {
   nodeIds: Map<FlowNode, string>;
+  // The name of each `graph:` block, which is what drawings made inside it are filed under.
+  graphNames: Map<GraphItem, string>;
   // A node's `on_error` edge is filed under the node itself: the property is re-parsed on every
   // read, so its EdgeSpec has no stable object to file it under.
   edgeKeys: Map<EdgeSpec | FlowNode, string>;
 }
 
 export function documentIdentities(doc: FlowDocument): DocumentIdentities {
-  const identities: DocumentIdentities = { nodeIds: new Map(), edgeKeys: new Map() };
+  const identities: DocumentIdentities = { nodeIds: new Map(), graphNames: new Map(), edgeKeys: new Map() };
   for (const scopeNodes of graphScopesOf(doc)) collectScopeIdentities(scopeNodes, identities);
+  for (const item of doc.items) {
+    if (item.kind === 'graph') identities.graphNames.set(item, item.name);
+  }
   return identities;
 }
 
@@ -236,16 +299,43 @@ function collectScopeIdentities(nodes: FlowNode[], identities: DocumentIdentitie
 }
 
 // Moves every entry whose node or edge an edit re-keyed and drops those whose node or edge the
-// edit removed, comparing two captures of the same document. Entries the `before` capture does
-// not account for — orphans of an edit made outside the editor — are left alone: they are not
-// this edit's to discard. Returns whether the layer changed.
+// edit removed, comparing two captures of the same document. Drawings follow the `graph:` block
+// they were drawn in the same way: renamed with it, dropped with it, leaving their groups when they
+// go. Entries the `before` capture
+// does not account for — orphans of an edit made outside the editor — are left alone: they are
+// not this edit's to discard. Returns whether the layer changed.
 export function followIdentityChanges(layer: CanvasLayer, before: DocumentIdentities, after: DocumentIdentities): boolean {
   const nodes = rekeyEntries(layer.nodes, before.nodeIds, after.nodeIds);
   const edges = rekeyEntries(layer.edges, before.edgeKeys, after.edgeKeys);
-  const changed = !sameEntries(nodes, layer.nodes) || !sameEntries(edges, layer.edges);
+  const drawings = refileDrawings(layer.drawings, before.graphNames, after.graphNames);
+  const groupsBefore = layer.groups;
+  const changed = !sameEntries(nodes, layer.nodes)
+    || !sameEntries(edges, layer.edges)
+    || !sameItems(drawings, layer.drawings);
   layer.nodes = nodes;
   layer.edges = edges;
-  return changed;
+  layer.drawings = drawings;
+  pruneGroups(layer);
+  return changed || layer.groups !== groupsBefore;
+}
+
+function refileDrawings(
+  drawings: Drawing[],
+  before: Map<GraphItem, string>,
+  after: Map<GraphItem, string>,
+): Drawing[] {
+  const blockByNameBefore = new Map([...before].map(([block, name]) => [name, block]));
+  return drawings.flatMap((drawing) => {
+    const block = typeof drawing.graph === 'string' ? blockByNameBefore.get(drawing.graph) : undefined;
+    if (!block) return [drawing];
+    const nameAfter = after.get(block);
+    if (nameAfter == null) return [];
+    return [nameAfter === drawing.graph ? drawing : { ...drawing, graph: nameAfter }];
+  });
+}
+
+function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
+  return a.length === b.length && a.every((item, index) => item === b[index]);
 }
 
 function rekeyEntries<Owner, Entry>(

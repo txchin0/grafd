@@ -75,7 +75,7 @@ describe('parse and serialize', () => {
     });
     const layer = parseCanvasLayer(text);
     expect(layer.nodes.a).toEqual({ shape: 'diamond', glow: 3 });
-    expect(layer.extras.drawings).toEqual([{ id: 'd1', kind: 'stroke', points: [[0, 0], [4, 4]] }]);
+    expect(layer.drawings).toEqual([{ id: 'd1', kind: 'stroke', points: [[0, 0], [4, 4]] }]);
     expect(parseCanvasLayer(serializeCanvasLayer(layer))).toEqual(layer);
   });
 

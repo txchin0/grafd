@@ -102,3 +102,45 @@ export function rectBorderPointFrom(rect: Rect, origin: Point, direction: Point)
 export function halfExtentAlong(rect: Rect, direction: Point): number {
   return (Math.abs(direction.x) * rect.w + Math.abs(direction.y) * rect.h) / 2;
 }
+
+export function distanceToSegment(point: Point, a: Point, b: Point): number {
+  const abX = b.x - a.x;
+  const abY = b.y - a.y;
+  const lengthSquared = abX * abX + abY * abY;
+  const t = lengthSquared === 0
+    ? 0
+    : Math.max(0, Math.min(1, ((point.x - a.x) * abX + (point.y - a.y) * abY) / lengthSquared));
+  const closest = { x: a.x + abX * t, y: a.y + abY * t };
+  return Math.hypot(point.x - closest.x, point.y - closest.y);
+}
+
+// A lone point is a polyline too: a tap of the pen leaves one.
+export function distanceToPolyline(point: Point, polyline: readonly Point[]): number {
+  if (polyline.length === 1) return Math.hypot(point.x - polyline[0].x, point.y - polyline[0].y);
+  let nearest = Infinity;
+  for (let index = 1; index < polyline.length; index += 1) {
+    nearest = Math.min(nearest, distanceToSegment(point, polyline[index - 1], polyline[index]));
+  }
+  return nearest;
+}
+
+// Ramer–Douglas–Peucker: drops every point that lies within `tolerance` of the line its
+// neighbours would draw anyway. The endpoints always survive.
+export function simplifyPolyline(points: readonly Point[], tolerance: number): Point[] {
+  if (points.length <= 2) return [...points];
+  const first = points[0];
+  const last = points[points.length - 1];
+  let farthestIndex = 0;
+  let farthestDistance = 0;
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const distance = distanceToSegment(points[index], first, last);
+    if (distance > farthestDistance) {
+      farthestIndex = index;
+      farthestDistance = distance;
+    }
+  }
+  if (farthestDistance <= tolerance) return [first, last];
+  const before = simplifyPolyline(points.slice(0, farthestIndex + 1), tolerance);
+  const after = simplifyPolyline(points.slice(farthestIndex), tolerance);
+  return [...before.slice(0, -1), ...after];
+}

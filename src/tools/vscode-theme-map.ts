@@ -5,8 +5,8 @@
 // registered id) hold for imported themes without changing the tests. `theme-import.ts` is the
 // CLI that turns the mapped tokens into edits; this module stays pure and file-free.
 
-import { EDGE_COLOR_SLOTS, type EdgeColorSlot } from '../shared/canvas-layer.js';
-import { edgeColorSlotToken } from '../client/theme.js';
+import { LAYER_COLOR_SLOTS, type LayerColorSlot } from '../shared/canvas-layer.js';
+import { layerColorSlotToken } from '../client/theme.js';
 
 export type ThemeScheme = 'dark' | 'light';
 
@@ -58,7 +58,7 @@ export const THEME_TOKEN_ORDER = [
   '--canvas-select',
   '--canvas-marquee-fill',
   '--canvas-port-fill',
-  ...EDGE_COLOR_SLOTS.map(edgeColorSlotToken),
+  ...LAYER_COLOR_SLOTS.map(layerColorSlotToken),
 ];
 
 export function deriveThemeId(name: string): string {
@@ -180,7 +180,7 @@ interface SchemeDefaults {
   edgeLabelAlpha: number;
   regionFillAlpha: number;
   marqueeAlpha: number;
-  slots: Record<EdgeColorSlot, string>;
+  slots: Record<LayerColorSlot, string>;
 }
 
 const DARK_DEFAULTS: SchemeDefaults = {
@@ -328,8 +328,8 @@ export function mapThemeToTokens(theme: VscodeColorTheme): MappedTheme {
     ['--canvas-select', accent],
     ['--canvas-marquee-fill', toAlpha(accent, defaults.marqueeAlpha)],
     ['--canvas-port-fill', bg],
-    ...EDGE_COLOR_SLOTS.map((slot): [string, string] => [
-      edgeColorSlotToken(slot),
+    ...LAYER_COLOR_SLOTS.map((slot): [string, string] => [
+      layerColorSlotToken(slot),
       pick(...SLOT_SOURCES[slot]) ?? defaults.slots[slot],
     ]),
   ]);
@@ -338,7 +338,7 @@ export function mapThemeToTokens(theme: VscodeColorTheme): MappedTheme {
 
 // A VS Code theme's terminal palette is the closest thing it has to a named set of hues; slots
 // with no terminal colour of their own (orange) borrow the nearest warning-ish key.
-const SLOT_SOURCES: Record<EdgeColorSlot, string[]> = {
+const SLOT_SOURCES: Record<LayerColorSlot, string[]> = {
   red: ['terminal.ansiRed'],
   orange: ['editorWarning.foreground', 'list.warningForeground'],
   yellow: ['terminal.ansiYellow'],

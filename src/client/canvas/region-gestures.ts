@@ -76,6 +76,31 @@ export function applyCombinedMove(gesture: CombinedMoveSnapshot, world: Point, s
   }
 }
 
+// How far, in world units, a combined move actually carried what it moved. Positions snap
+// absolutely, so the pointer's raw delta can be up to a grid step off; strokes dragged along must
+// travel the snapped distance or they drift away from the nodes they annotate. Measured on
+// `reference` when given, otherwise on the first node or authored region the move carries; a
+// move with neither — strokes alone — follows the pointer exactly.
+export function effectiveMoveDelta(gesture: CombinedMoveSnapshot, world: Point, reference: FlowNode | null): Point {
+  const node = reference && gesture.startPositions.has(reference) ? reference : firstKey(gesture.startPositions);
+  if (node) {
+    const start = gesture.startPositions.get(node)!;
+    const scale = gesture.scales.get(node) ?? 1;
+    return { x: (node.pos!.x - start.x) * scale, y: (node.pos!.y - start.y) * scale };
+  }
+  const block = firstKey(gesture.startRects);
+  if (block) {
+    const start = gesture.startRects.get(block)!;
+    return { x: block.pos!.x - start.x, y: block.pos!.y - start.y };
+  }
+  return { x: world.x - gesture.startWorld.x, y: world.y - gesture.startWorld.y };
+}
+
+function firstKey<Key>(map: ReadonlyMap<Key, unknown>): Key | null {
+  for (const key of map.keys()) return key;
+  return null;
+}
+
 export function rollbackCombinedMove(gesture: CombinedMoveSnapshot): void {
   for (const [node, start] of gesture.startPositions) Object.assign(node.pos!, start);
   for (const [block, start] of gesture.startRects) Object.assign(block.pos!, start);

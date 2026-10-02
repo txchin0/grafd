@@ -7,6 +7,9 @@
 //
 // Copies are new objects with fresh ids, so nothing links them to their sources: the copy
 // sites capture their sources' visuals and put them on the copies explicitly.
+//
+// Drawings are filed by graph scope rather than by node, so they follow the same commits: a
+// `graph:` block renamed or removed takes its drawings with it.
 
 import {
   applyCapturedVisuals,
@@ -15,6 +18,7 @@ import {
   capturedVisualsAreEmpty,
   captureVisuals,
   documentIdentities,
+  drawingListsAreEditable,
   edgeColorOf,
   emptyCanvasLayer,
   flowPathOfCanvasLayer,
@@ -29,6 +33,7 @@ import {
   type DocumentIdentities,
   type NodeShape,
 } from '../shared/canvas-layer.js';
+import type { CarriedDrawings } from '../shared/canvas-drawings.js';
 import type { FlowDocument, FlowNode } from '../shared/flow-format.js';
 import type { DocumentOwner } from './canvas/expansion.js';
 import type { CanvasLayerStore } from './canvas-layer-store.js';
@@ -45,6 +50,15 @@ export interface CanvasLayerSync {
   // there was no layer to edit (still loading, or unreadable) or nothing to key the edit by.
   setShape(owner: DocumentOwner, node: FlowNode, shape: NodeShape): boolean;
   setEdgeColor(owner: DocumentOwner, edge: ModelEdge, color: string | null): boolean;
+  // Drawing edits, each its own undoable action — or part of the one already open, so a stroke
+  // moved or deleted with nodes lands in the same undo step. False when there was no layer.
+  // A drawing edit, its own undoable action or part of the one already open, so a stroke moved
+  // or deleted with nodes lands in the same undo step. False, with nothing written, when there
+  // was no layer or it cannot take drawing edits (see drawingListsAreEditable).
+  editDrawings(owner: DocumentOwner, edit: (layer: CanvasLayer) => void): boolean;
+  drawingsAreEditable(owner: DocumentOwner): boolean;
+  // The drawings and groups an extraction copies from, or null when the layer is not readable.
+  drawingContentOf(owner: DocumentOwner): CarriedDrawings | null;
   // A layer file changed on disk. Returns whether a loaded layer was replaced, so the canvas
   // needs redrawing.
   adoptWatchedLayer(layerPath: string, text: string | null): boolean;
@@ -54,8 +68,14 @@ export interface CanvasLayerSync {
   // layer write in the same undo step.
   applyCapturedVisuals(owner: DocumentOwner, copies: FlowNode[], captured: CapturedVisuals | null): void;
   // The layer text for a document this editor is about to create from copies of `sources`
-  // (paired by position, null where a source has no copy), or null when it has no visuals.
-  layerTextForNewDocument(doc: FlowDocument, copies: (FlowNode | null)[], captured: CapturedVisuals | null): string | null;
+  // (paired by position, null where a source has no copy) and the drawings it takes along, or
+  // null when it has no visuals.
+  layerTextForNewDocument(
+    doc: FlowDocument,
+    copies: (FlowNode | null)[],
+    captured: CapturedVisuals | null,
+    carried: CarriedDrawings,
+  ): string | null;
 }
 
 export function createCanvasLayerSync(session: () => EditSession, layers: CanvasLayerStore): CanvasLayerSync {
@@ -104,6 +124,15 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
     return key != null && editLayer(owner.path, (layer) => setEdgeColor(layer, key, color));
   }
 
+  function drawingsAreEditable(owner: DocumentOwner): boolean {
+    const layer = layers.layerFor(owner.path);
+    return layer != null && drawingListsAreEditable(layer);
+  }
+
+  function editDrawings(owner: DocumentOwner, edit: (layer: CanvasLayer) => void): boolean {
+    return drawingsAreEditable(owner) && editLayer(owner.path, edit);
+  }
+
   // A layer only matters once its .flow has been loaded; until then the next load reads the
   // file fresh. Like a document push, a tracked layer goes through the session, which cancels
   // any layer commit still pending against it. Text that is not a layer is never adopted as an
@@ -142,12 +171,16 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
     doc: FlowDocument,
     copies: (FlowNode | null)[],
     captured: CapturedVisuals | null,
+    carried: CarriedDrawings,
   ): string | null {
-    if (!captured) return null;
     const layer = emptyCanvasLayer();
-    const pairedCopies = copies.filter((copy): copy is FlowNode => copy != null);
-    const pairedCaptured = captured.filter((_, index) => copies[index] != null);
-    applyCapturedVisuals(layer, documentIdentities(doc), pairedCopies, pairedCaptured);
+    layer.drawings = carried.drawings;
+    layer.groups = carried.groups;
+    if (captured) {
+      const pairedCopies = copies.filter((copy): copy is FlowNode => copy != null);
+      const pairedCaptured = captured.filter((_, index) => copies[index] != null);
+      applyCapturedVisuals(layer, documentIdentities(doc), pairedCopies, pairedCaptured);
+    }
     return serializeCanvasLayer(layer);
   }
 
@@ -157,6 +190,12 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
     edgeColorOf: (owner, edge) => edgeColorOf(layers.layerFor(owner.path), edgeLayerKey(owner.doc, edge)),
     setShape,
     setEdgeColor: setEdgeColorOf,
+    editDrawings,
+    drawingsAreEditable,
+    drawingContentOf: (owner) => {
+      const layer = layers.layerFor(owner.path);
+      return layer ? { drawings: layer.drawings, groups: layer.groups } : null;
+    },
     adoptWatchedLayer,
     captureVisuals: captureVisualsOf,
     applyCapturedVisuals: applyCapturedVisualsTo,

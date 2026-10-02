@@ -1,4 +1,4 @@
-// Copy, cut, paste and duplicate for canvas nodes and context regions.
+// Copy, cut, paste and duplicate for canvas nodes, context regions and drawn strokes.
 //
 // The clipboard is session-local and holds detached node copies alongside the path and
 // `graph:` scope they came from, so paste can route back into the .flow file that owns them —
@@ -7,13 +7,18 @@
 // Regions ride the same groups: a region belongs to the graph scope that declares it, so a
 // paste whose target is a `graph:` block writes the block into that scope. The nodes' canvas
 // visuals are captured with them, positionally, since a copy shares no id with its source.
+// Strokes ride the same groups too, in the same scope coordinates as the nodes beside them, so a
+// paste keeps a stroke where it was drawn relative to them.
 
+import { strokePointsOf, type CarriedDrawings } from '../shared/canvas-drawings.js';
 import type { CapturedVisuals } from '../shared/canvas-layer.js';
-import type { ContextBlock, FlowNode, Rect } from '../shared/flow-format.js';
+import type { ContextBlock, FlowNode } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { Point } from './geometry.js';
 import type { DocumentOwner } from './canvas/expansion.js';
 import type { RegionTarget } from './canvas/canvas-view.js';
+import type { DrawingSelection, StoredDrawing } from './canvas/drawing-selection.js';
+import type { CopiedDrawings, CreationTarget } from './drawing-ops.js';
 import type { OpenFlow } from './open-flow.js';
 
 // How far a duplicate lands from its original, and where a paste with no pointer position goes.
@@ -25,6 +30,7 @@ interface ClipboardGroup {
   nodes: FlowNode[];
   regions: ContextBlock[];
   visuals: CapturedVisuals | null;
+  drawings: CarriedDrawings;
 }
 
 interface CopiedGroup extends Omit<ClipboardGroup, 'visuals'> {
@@ -35,7 +41,8 @@ export interface ClipboardOptions {
   openFlow(): OpenFlow | null;
   selection(): FlowNode[];
   selectedRegions(): RegionTarget[];
-  select(nodes: FlowNode[], regions?: ContextBlock[]): void;
+  selectedDrawings(): DrawingSelection[];
+  select(nodes: FlowNode[], regions: ContextBlock[], drawings: StoredDrawing[]): void;
   ownerOf(node: FlowNode): DocumentOwner;
   ownerOfRegion(region: RegionTarget): DocumentOwner;
   // Resolves a path this session has loaded, so a paste can reach a frame's own document.
@@ -45,6 +52,10 @@ export interface ClipboardOptions {
   captureVisuals(owner: DocumentOwner, nodes: FlowNode[]): CapturedVisuals | null;
   // Runs inside the mutation that made the copies, so its layer write joins that edit's commit.
   applyCapturedVisuals(owner: DocumentOwner, copies: FlowNode[], visuals: CapturedVisuals | null): void;
+  copyDrawings(selections: DrawingSelection[]): CopiedDrawings[];
+  pasteDrawings(target: CreationTarget, drawings: CarriedDrawings, offset: Point): StoredDrawing[];
+  // Cut, paste and duplicate each write several documents; this makes each one undo step.
+  runAction(body: () => void): void;
 }
 
 export interface Clipboard {
@@ -64,16 +75,20 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
     const key = `${path}\0${scope ?? ''}`;
     let group = byScope.get(key);
     if (!group) {
-      group = { owner, path, scope, nodes: [], regions: [] };
+      group = { owner, path, scope, nodes: [], regions: [], drawings: { drawings: [], groups: [] } };
       byScope.set(key, group);
     }
     return group;
   }
 
+  function hasSelection(): boolean {
+    return options.selection().length > 0 || options.selectedRegions().length > 0 || options.selectedDrawings().length > 0;
+  }
+
   function copy(): void {
+    if (!hasSelection()) return;
     const selection = options.selection();
     const selectedRegions = options.selectedRegions();
-    if (selection.length === 0 && selectedRegions.length === 0) return;
     const byScope = new Map<string, CopiedGroup>();
     for (const node of selection) {
       const owner = options.ownerOf(node);
@@ -85,23 +100,27 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
       const scope = FlowDoc.containingGraphBlockNameForContext(owner.doc, region.block);
       groupFor(byScope, owner, scope).regions.push(structuredClone(region.block));
     }
+    for (const { owner, scope, carried } of options.copyDrawings(options.selectedDrawings())) {
+      groupFor(byScope, owner, scope).drawings = carried;
+    }
     groups = [...byScope.values()].map((group) => ({
       path: group.path,
       scope: group.scope,
       nodes: FlowDoc.cloneNodesDetached(group.nodes),
       regions: group.regions,
       visuals: options.captureVisuals(group.owner, group.nodes),
+      drawings: group.drawings,
     }));
   }
 
   function cut(): void {
-    if (options.selection().length === 0 && options.selectedRegions().length === 0) return;
+    if (!hasSelection()) return;
     copy();
-    options.deleteSelection();
+    options.runAction(() => options.deleteSelection());
   }
 
   function hasContent(): boolean {
-    return groups.some((group) => group.nodes.length > 0 || group.regions.length > 0);
+    return groups.some((group) => group.nodes.length > 0 || group.regions.length > 0 || group.drawings.drawings.length > 0);
   }
 
   // Duplicates nodes and regions of a selection as one cluster, per owning document. A region
@@ -154,19 +173,30 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
   }
 
   function duplicateSelection(): void {
-    const nodes = options.selection();
-    const regions = options.selectedRegions();
-    if (nodes.length === 0 && regions.length === 0) return;
-    const copies = duplicateCluster(nodes, regions, { x: DUPLICATE_STEP, y: DUPLICATE_STEP });
-    if (copies.nodes.length + copies.regions.length > 0) options.select(copies.nodes, copies.regions);
+    if (!hasSelection()) return;
+    const offset = { x: DUPLICATE_STEP, y: DUPLICATE_STEP };
+    options.runAction(() => {
+      const copies = duplicateCluster(options.selection(), options.selectedRegions(), offset);
+      const drawingCopies = options.copyDrawings(options.selectedDrawings())
+        .flatMap(({ owner, scope, carried }) => options.pasteDrawings({ owner, scope }, carried, offset));
+      selectIfAny(copies.nodes, copies.regions, drawingCopies);
+    });
+  }
+
+  function selectIfAny(nodes: FlowNode[], regions: ContextBlock[], drawings: StoredDrawing[]): void {
+    if (nodes.length + regions.length + drawings.length > 0) options.select(nodes, regions, drawings);
   }
 
   // Paste at the pointer places the first positioned item under it and keeps the rest in
   // formation around it; with no pointer position it offsets like a duplicate instead.
   function offsetToward(world: Point | undefined): Point {
     const anchor = groups
-      .flatMap((group) => [...group.nodes.map((node) => node.pos), ...group.regions.map((region) => region.pos)])
-      .find((pos): pos is Rect => pos != null);
+      .flatMap((group) => [
+        ...group.nodes.map((node) => node.pos),
+        ...group.regions.map((region) => region.pos),
+        ...group.drawings.drawings.map((drawing) => strokePointsOf(drawing.points)?.[0]),
+      ])
+      .find((pos): pos is Point => pos != null);
     if (!world || !anchor) return { x: DUPLICATE_STEP, y: DUPLICATE_STEP };
     return { x: Math.round(world.x - anchor.x), y: Math.round(world.y - anchor.y) };
   }
@@ -174,12 +204,17 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
   function paste(world?: Point): void {
     const flow = options.openFlow();
     if (!flow || !hasContent()) return;
+    options.runAction(() => pasteInto(flow, world));
+  }
+
+  function pasteInto(flow: OpenFlow, world: Point | undefined): void {
     // A group whose original document is no longer loaded falls back to the open flow, where
     // the user can at least see what they pasted.
     const fallback: DocumentOwner = { doc: flow.doc, path: flow.path };
     const offset = offsetToward(world);
     const pastedNodes: FlowNode[] = [];
     const pastedRegions: ContextBlock[] = [];
+    const pastedDrawings: StoredDrawing[] = [];
     for (const group of groups) {
       const resolved = options.documentAt(group.path);
       const owner = resolved ?? fallback;
@@ -201,8 +236,9 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
           nested ? 'before-nodes' : 'end',
         ));
       });
+      pastedDrawings.push(...options.pasteDrawings({ owner, scope }, group.drawings, offset));
     }
-    if (pastedNodes.length + pastedRegions.length > 0) options.select(pastedNodes, pastedRegions);
+    selectIfAny(pastedNodes, pastedRegions, pastedDrawings);
   }
 
   return { copy, cut, paste, duplicateSelection, hasContent };

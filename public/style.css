@@ -606,6 +606,11 @@ html, body {
 }
 .swatch.chosen { background: transparent; border-width: 2px; }
 
+/* The draw tool's pen: its colour and width, shown while drawing or while strokes are selected. */
+#draw-style { display: flex; gap: 8px; align-items: center; }
+#draw-style[hidden] { display: none; }
+#draw-style .swatch-default::after { background: var(--canvas-ink); }
+
 /* Read-only lines in an editor: what the file already says, and why an edit was refused. */
 .field-note { font-size: var(--text-caption); color: var(--muted); margin: 0; }
 .field-error { font-size: var(--text-caption); color: var(--danger); margin: 0; }

@@ -5,6 +5,8 @@
 
 export const PREFERENCES_STORAGE_KEY = 'grafd.preferences';
 
+import { DEFAULT_STROKE_WIDTH, isStrokeWidth, type StrokeWidth } from '../shared/canvas-drawings.js';
+import { isLayerColor } from '../shared/canvas-layer.js';
 import { EDITOR_LINK_SCHEMES, type EditorLinkScheme } from './reference-link.js';
 import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from './theme.js';
 
@@ -14,6 +16,9 @@ export interface Preferences {
   editorLinkScheme: EditorLinkScheme;
   theme: ThemeId;
   sidebarCollapsed: boolean;
+  // The pen the draw tool picks up with: a colour slot or `#rrggbb` (null for ink), and a width.
+  drawColor: string | null;
+  drawWidth: StrokeWidth;
 }
 
 export function defaultPreferences(): Preferences {
@@ -23,6 +28,8 @@ export function defaultPreferences(): Preferences {
     editorLinkScheme: 'vscode',
     theme: DEFAULT_THEME_ID,
     sidebarCollapsed: false,
+    drawColor: null,
+    drawWidth: DEFAULT_STROKE_WIDTH,
   };
 }
 
@@ -51,6 +58,8 @@ export function parsePreferences(text: string | null | undefined): Preferences {
     sidebarCollapsed: typeof record.sidebarCollapsed === 'boolean'
       ? record.sidebarCollapsed
       : defaults.sidebarCollapsed,
+    drawColor: isLayerColor(record.drawColor) ? record.drawColor : defaults.drawColor,
+    drawWidth: isStrokeWidth(record.drawWidth) ? record.drawWidth : defaults.drawWidth,
   };
 }
 
