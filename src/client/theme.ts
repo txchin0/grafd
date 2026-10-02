@@ -4,6 +4,8 @@
 // through `var(--token)`, and the canvas — which cannot read custom properties — gets the
 // same tokens resolved into concrete colour strings once per theme change.
 
+import { EDGE_COLOR_SLOTS, isEdgeColorSlot, type EdgeColorSlot } from '../shared/canvas-layer.js';
+
 export interface ThemeDescriptor {
   id: string;
   label: string;
@@ -43,9 +45,13 @@ export interface CanvasPalette {
   select: string;
   marqueeFill: string;
   portFill: string;
+  // What each canvas-layer colour slot draws as, read from `--canvas-slot-<slot>`.
+  slots: Record<EdgeColorSlot, string>;
 }
 
-export const CANVAS_COLOR_TOKENS: Record<keyof CanvasPalette, string> = {
+export type CanvasColorField = Exclude<keyof CanvasPalette, 'slots'>;
+
+export const CANVAS_COLOR_TOKENS: Record<CanvasColorField, string> = {
   grid: '--canvas-grid',
   ink: '--canvas-ink',
   muted: '--canvas-muted',
@@ -66,6 +72,10 @@ export const CANVAS_COLOR_TOKENS: Record<keyof CanvasPalette, string> = {
   marqueeFill: '--canvas-marquee-fill',
   portFill: '--canvas-port-fill',
 };
+
+export function edgeColorSlotToken(slot: EdgeColorSlot): string {
+  return `--canvas-slot-${slot}`;
+}
 
 export const PAGE_BACKGROUND_TOKEN = '--bg';
 
@@ -93,14 +103,27 @@ export const DEFAULT_CANVAS_PALETTE: CanvasPalette = {
   select: '#6aa9e9',
   marqueeFill: 'rgba(106, 169, 233, 0.08)',
   portFill: '#1b1e24',
+  slots: {
+    red: '#e07a7a',
+    orange: '#e39a5b',
+    yellow: '#d9c06a',
+    green: '#7fc48a',
+    cyan: '#6cc4cf',
+    blue: '#6aa9e9',
+    purple: '#b48ad9',
+    gray: '#8a939e',
+  },
 };
 
 export const DEFAULT_PAGE_BACKGROUND = '#17191d';
 
 export function resolveCanvasPalette(style: CSSStyleDeclaration): CanvasPalette {
-  const resolved = {} as CanvasPalette;
-  for (const field of Object.keys(CANVAS_COLOR_TOKENS) as (keyof CanvasPalette)[]) {
+  const resolved = { slots: {} } as CanvasPalette;
+  for (const field of Object.keys(CANVAS_COLOR_TOKENS) as CanvasColorField[]) {
     resolved[field] = readColorToken(style, CANVAS_COLOR_TOKENS[field], DEFAULT_CANVAS_PALETTE[field]);
+  }
+  for (const slot of EDGE_COLOR_SLOTS) {
+    resolved.slots[slot] = readColorToken(style, edgeColorSlotToken(slot), DEFAULT_CANVAS_PALETTE.slots[slot]);
   }
   return resolved;
 }
@@ -116,6 +139,12 @@ export const canvasPalette: CanvasPalette = { ...DEFAULT_CANVAS_PALETTE };
 export function applyTheme(id: ThemeId): void {
   document.documentElement.dataset.theme = id;
   Object.assign(canvasPalette, resolveCanvasPalette(rootStyle()));
+}
+
+// What a canvas-layer colour draws as in the current theme: a slot through the palette, a hex
+// value as itself.
+export function resolveLayerColor(color: string, palette: CanvasPalette = canvasPalette): string {
+  return isEdgeColorSlot(color) ? palette.slots[color] : color;
 }
 
 // The canvas itself is transparent — the background a viewer sees is the page's, so the theme

@@ -22,7 +22,9 @@ import {
   type Rect,
 } from '../../shared/flow-format.js';
 import * as FlowDoc from '../flow-doc.js';
+import type { CanvasLayer } from '../../shared/canvas-layer.js';
 import type { EdgeSpec } from '../../shared/flow-format.js';
+import { dressModel } from '../model-visuals.js';
 import type { FlowModel, ModelEdge } from '../flow-doc.js';
 import {
   easeInOutCubic,
@@ -151,6 +153,8 @@ export class ExpansionLayer {
   private readonly externalDocs = new Map<string, ExternalDocEntry>();
   private readonly onNeedsRender: () => void;
   private readonly readExternalFile: (path: string) => Promise<string | null>;
+  private readonly layerFor: (path: string | null) => CanvasLayer | null;
+  private readonly loadCanvasLayer: (path: string) => Promise<unknown>;
   private topModel: FlowModel | null = null;
   // Parents precede their children, so a reverse scan finds the innermost frame first.
   private frames: FrameTarget[] = [];
@@ -159,12 +163,21 @@ export class ExpansionLayer {
   constructor({
     onNeedsRender,
     readExternalFile,
+    layerFor = () => null,
+    loadCanvasLayer = () => Promise.resolve(),
   }: {
     onNeedsRender: () => void;
     readExternalFile: (path: string) => Promise<string | null>;
+    // The canvas layer that dresses a file's sub-models.
+    layerFor?: (path: string | null) => CanvasLayer | null;
+    // An external document is published only once its canvas layer has loaded too, so the
+    // first edit to it already has the layer its commits re-key.
+    loadCanvasLayer?: (path: string) => Promise<unknown>;
   }) {
     this.onNeedsRender = onNeedsRender;
     this.readExternalFile = readExternalFile;
+    this.layerFor = layerFor;
+    this.loadCanvasLayer = loadCanvasLayer;
   }
 
   // Forgets everything session-local — open frames, cached documents and sub-models — when
@@ -530,6 +543,7 @@ export class ExpansionLayer {
     const expandValue = getProp(node, 'expand');
     const subModel = this.buildSubModel(model, expandValue!);
     if (!subModel) return null;
+    dressModel(subModel, this.layerFor(subModel.sourcePath));
     subModel.embedded = true;
     this.subModels.set(node.id!, subModel);
     return subModel;
@@ -560,8 +574,9 @@ export class ExpansionLayer {
     const cached = this.externalDocs.get(path);
     if (cached) return cached.doc ?? null;
     const entry: ExternalDocEntry = { key: path, loading: true };
-    entry.loadPromise = this.readExternalFile(path)
-      .then((text) => {
+    const layerLoaded = this.loadCanvasLayer(path).catch(() => undefined);
+    entry.loadPromise = Promise.all([this.readExternalFile(path), layerLoaded])
+      .then(([text]) => {
         if (text == null) throw new Error('not found');
         // A later adoptDocument (open file) or adoptExternalText (watcher) may have replaced
         // this entry — or a rename may have re-keyed it while the fetch was in flight — so

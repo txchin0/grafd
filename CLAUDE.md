@@ -14,9 +14,9 @@ The app runs in two hosting modes with identical features:
 
 In either mode the user can open a local folder through the File System Access API
 (Chromium); a polling watcher keeps edits synchronized with other tools writing to the same
-folder. Any workspace can be exported from the UI as a .zip containing the .flow files,
-`grafd.manifest.json`, and `SAVE-GUIDE.md` (the guide AI agents read to work in an exported
-workspace — keep it in sync with the format implementation).
+folder. Any workspace can be exported from the UI as a .zip containing the .flow files and
+their canvas layers, `grafd.manifest.json`, and `SAVE-GUIDE.md` (the guide AI agents read to
+work in an exported workspace — keep it in sync with the format implementation).
 
 The codebase is TypeScript, compiled by `tsc` alone — no bundler. `npm run build` emits
 `src/` to `dist/` (which is served, never edited); `npm run watch` recompiles on change
@@ -53,6 +53,17 @@ this workspace conforms to, defined as `FLOW_FORMAT_VERSION` in `flow-format.ts`
 It is editor-owned, ignored by agents apart from `entrypoint` and `flowVersion`, and travels
 through the same read/write path as .flow files.
 
+All styling lives outside the .flow too, in each graph's **canvas layer**
+`<file>.flow.canvas.json` (FLOW-SPEC.md §2.1, §11.5; `src/shared/canvas-layer.ts`): node shapes
+keyed by node `id`, edge colours keyed by a key derived from the edge, plus unknown keys carried
+through verbatim (a `drawings` list is reserved for free draw). It is purely cosmetic — losing it
+costs decoration, never meaning or layout — so it may separate from its graph when `id`/`pos`
+may not. Never add style properties to the .flow grammar; new visual features extend the layer.
+Backends move and delete a layer with its .flow (`companionLayerOf` is the one rule; a failed
+layer move never fails the .flow's rename), never list it, and report its removal through
+`WorkspaceDelegate.fileDeleted`. A layer that exists but cannot be read is never treated as
+absent: the editor draws defaults and refuses visual edits rather than overwrite it.
+
 Everything else follows the spec. `src/shared/flow-format.ts` is the single
 parser/serializer, used by both the server and the browser, and defines the shared domain
 types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
@@ -66,8 +77,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   in `public/index.html`). Watches `.grafd/` by default (override via CLI path argument), and
   reports the project root that node references resolve against — the launch directory,
   overridable with `--project-root=<path>` — over `/api/project-root`.
-- `src/server/flow-files.ts` — path safety (`.flow`-only, root-confined), portable path
-  conversion, recursive `.flow` discovery, content hashing.
+- `src/server/flow-files.ts` — path safety (`.flow`, canvas layers and the manifest only,
+  root-confined), portable path conversion, recursive `.flow` and canvas-layer discovery,
+  content hashing.
 - `src/shared/flow-format.ts` — parse/serialize `.flow` text, format helpers. No DOM, no
   Node APIs.
 - `src/client/workspace.ts` — the `Workspace` interface the app shell talks to; backends:
@@ -80,6 +92,12 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   file tree (rendering and delete interaction live in main.ts).
 - `src/shared/manifest.ts` — `grafd.manifest.json` types, tolerant parsing, startup-flow
   choice.
+- `src/shared/canvas-layer.ts` — the canvas layer: tolerant parse/serialize (an empty layer
+  serializes to null — no file), shapes and colour slots, edge keys, `documentIdentities` (what
+  a document's visuals are keyed by), `followIdentityChanges` (re-keying after an edit), and
+  positional capture/apply for copies (one record per copied node). An `on_error` edge's key is
+  filed under its node in `edgeKeys`, since the property has no stable EdgeSpec object.
+  `canvas-layer-lint.ts` lints a layer against its .flow.
 - `src/shared/flow-scan.ts` — the linter's positioned re-walk of the line grammar: mirrors
   `parseFlow`'s branch structure but keeps line numbers and records every line the parser
   would drop. `flow-diagnostics.ts` (severities), `flow-lint-syntax.ts` (structure),
@@ -109,12 +127,17 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
     about the camera, viewport, selection rectangle or gestures. Built fresh per render pass
     from explicit inputs, which is how an export renders the same scene with different
     settings (no hidden title, its own geometry map) without the view mutating itself.
-  - `edge-layout.ts` — where each edge runs: border points, the bow that fans parallel edges
-    apart, self-loops, and redirection onto a node inside an unfolded frame. Pure — the shape
-    of an edge is settled before anything is drawn, so it is testable without a renderer.
+  - `edge-layout.ts` — where each edge runs: border points (on the node's drawn shape), the
+    bow that fans parallel edges apart, self-loops, and redirection onto a node inside an
+    unfolded frame. Pure — the shape of an edge is settled before anything is drawn, so it is
+    testable without a renderer.
+  - `node-shapes.ts` — a node shape inside its rectangle: the outline (and its SVG path data,
+    shared by the painter and the picker icons), where a ray leaves it, and the box its text fits
+    in. The rectangle stays the node's layout and hit area; an unfolded frame is always a
+    rectangle.
   - `node-metrics.ts` — text measurement: title/description wrapping and the title band. The
     inline title editor overlays the band this computes while the painter fills it, so both go
-    through here or the overlay drifts off the ink.
+    through here — both laying out in the shape's text box — or the overlay drifts off the ink.
   - `node-badges.ts` — where the expand/collapse affordances sit and what they show. The
     contract between painting and hit-testing, so neither owns it.
   - `region-hit-test.ts` / `region-gestures.ts` / `resize-handles.ts` — what a press lands on in
@@ -143,10 +166,26 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   that lets nodes inside frames be edited in place (mutations are routed to the .flow file
   that owns them).
 - `src/client/edit-session.ts` — the edit pipeline every document goes through: tracked
-  documents and their committed text, the commit debounce, the writes, and the undo history.
-  The unit of undo is the *action*, not the commit: `runAction` groups every write an action
-  makes into one step, and `suspendAction` hands the rest of an action to work that resumes
-  after an await (see `docs/undo-atomicity.md`).
+  documents (.flow documents and canvas layers, each under its own path) and their committed
+  state, the commit debounce, the writes, and the undo history. The unit of undo is the
+  *action*, not the commit: `runAction` groups every write an action makes into one step, and
+  `suspendAction` hands the rest of an action to work that resumes after an await (see
+  `docs/undo-atomicity.md`). "No file" is a real state (`ABSENT_FILE`): an emptied layer is
+  deleted, and undo/redo delete it again. A `FlowCommitObserver` hears when a flow document is
+  tracked and just before each of its commits.
+- `src/client/canvas-layer-store.ts` / `canvas-layer-sync.ts` — the loaded layers (beside the
+  expansion layer's documents; an external document is published only once its layer loaded),
+  and the commit observer that keeps them in step: each flow commit compares the document's
+  identities with those at its previous commit and moves or drops the entries an edit re-keyed.
+  Mutations edit node and edge objects in place, so no mutation site re-keys by hand; copies
+  (duplicate, paste, extraction to a file) carry visuals explicitly by position. The sync is
+  also main.ts's one door to the layers: shape/colour reads and edits, and watcher pushes. The
+  store settles an unreadable file (failed read, not a JSON object) as unreadable rather than
+  empty, offering no layer to edit until a readable version is adopted.
+- `src/client/model-visuals.ts` — dresses a `FlowModel` in its layer (`model.visuals`: shape
+  per node, colour per edge) for painting and edge layout.
+- `src/client/visual-pickers.ts` — the shape buttons and colour swatches in the node and edge
+  editors.
 - `src/client/context/` — context-block (region) lifecycle behind the canvas's regions:
   create/group/rename/delete (`orchestration.ts`), the `inherits` the editor generates for a
   member's expansion (`inherits.ts`), and the workspace-wide rename a provider's name forces
@@ -165,7 +204,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   `themes.css` is the single source of truth for every colour, one `:root[data-theme="…"]`
   block per theme; DOM chrome reads the tokens directly, and `resolveCanvasPalette` resolves
   the `--canvas-*` ones into the palette `scene-painter.ts` draws from, refilled on each theme
-  change. Adding a theme means a new block plus one entry in `THEMES` — nothing else —
+  change. The `--canvas-slot-*` tokens are the colours a canvas layer names for edges
+  (`resolveLayerColor`), so every theme supplies its own. Adding a theme means a new block plus
+  one entry in `THEMES` — nothing else —
   and `npm run import:theme -- path/to/theme.color-theme.json` (src/tools/theme-import.ts)
   does both from a VS Code color theme.
 - `src/client/main.ts` — app state, WebSocket sync, sidebar, keyboard shortcuts, and the action

@@ -5,8 +5,10 @@
 // which for nodes selected inside an inline-expanded frame is not the open file. Cloning at
 // copy time means later edits to (or deletion of) the originals never disturb a later paste.
 // Regions ride the same groups: a region belongs to the graph scope that declares it, so a
-// paste whose target is a `graph:` block writes the block into that scope.
+// paste whose target is a `graph:` block writes the block into that scope. The nodes' canvas
+// visuals are captured with them, positionally, since a copy shares no id with its source.
 
+import type { CapturedVisuals } from '../shared/canvas-layer.js';
 import type { ContextBlock, FlowNode, Rect } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { Point } from './geometry.js';
@@ -22,6 +24,11 @@ interface ClipboardGroup {
   scope: string | null;
   nodes: FlowNode[];
   regions: ContextBlock[];
+  visuals: CapturedVisuals | null;
+}
+
+interface CopiedGroup extends Omit<ClipboardGroup, 'visuals'> {
+  owner: DocumentOwner;
 }
 
 export interface ClipboardOptions {
@@ -35,6 +42,9 @@ export interface ClipboardOptions {
   documentAt(path: string): DocumentOwner | null;
   applyToDoc(owner: DocumentOwner, mutation: () => void): void;
   deleteSelection(): void;
+  captureVisuals(owner: DocumentOwner, nodes: FlowNode[]): CapturedVisuals | null;
+  // Runs inside the mutation that made the copies, so its layer write joins that edit's commit.
+  applyCapturedVisuals(owner: DocumentOwner, copies: FlowNode[], visuals: CapturedVisuals | null): void;
 }
 
 export interface Clipboard {
@@ -48,12 +58,13 @@ export interface Clipboard {
 export function createClipboard(options: ClipboardOptions): Clipboard {
   let groups: ClipboardGroup[] = [];
 
-  function groupFor(byScope: Map<string, ClipboardGroup>, path: string, scope: string | null): ClipboardGroup {
+  function groupFor(byScope: Map<string, CopiedGroup>, owner: DocumentOwner, scope: string | null): CopiedGroup {
+    const { path } = owner;
     // NUL separates the two halves so a path containing the scope's text cannot collide.
     const key = `${path}\0${scope ?? ''}`;
     let group = byScope.get(key);
     if (!group) {
-      group = { path, scope, nodes: [], regions: [] };
+      group = { owner, path, scope, nodes: [], regions: [] };
       byScope.set(key, group);
     }
     return group;
@@ -63,22 +74,23 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
     const selection = options.selection();
     const selectedRegions = options.selectedRegions();
     if (selection.length === 0 && selectedRegions.length === 0) return;
-    const byScope = new Map<string, ClipboardGroup>();
+    const byScope = new Map<string, CopiedGroup>();
     for (const node of selection) {
       const owner = options.ownerOf(node);
       const scope = FlowDoc.containingGraphBlockName(owner.doc, node);
-      groupFor(byScope, owner.path, scope).nodes.push(node);
+      groupFor(byScope, owner, scope).nodes.push(node);
     }
     for (const region of selectedRegions) {
       const owner = options.ownerOfRegion(region);
       const scope = FlowDoc.containingGraphBlockNameForContext(owner.doc, region.block);
-      groupFor(byScope, owner.path, scope).regions.push(structuredClone(region.block));
+      groupFor(byScope, owner, scope).regions.push(structuredClone(region.block));
     }
     groups = [...byScope.values()].map((group) => ({
       path: group.path,
       scope: group.scope,
       nodes: FlowDoc.cloneNodesDetached(group.nodes),
       regions: group.regions,
+      visuals: options.captureVisuals(group.owner, group.nodes),
     }));
   }
 
@@ -107,7 +119,9 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
     for (const { owner, itemGroups } of FlowDoc.groupNodesByOwner(nodes, options.ownerOf)) {
       options.applyToDoc(owner, () => {
         for (const { items, nodes: group } of itemGroups) {
+          const visuals = options.captureVisuals(owner, group);
           const groupCopies = FlowDoc.duplicateNodes(items, group, offset);
+          options.applyCapturedVisuals(owner, groupCopies, visuals);
           copies.push(...groupCopies);
           let renamed = renamedByPath.get(owner.path);
           if (!renamed) {
@@ -173,6 +187,7 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
       const items = FlowDoc.scopeItems(owner.doc, scope);
       options.applyToDoc(owner, () => {
         const copies = FlowDoc.duplicateNodes(items, group.nodes, offset);
+        options.applyCapturedVisuals(owner, copies, group.visuals);
         pastedNodes.push(...copies);
         const renamedMembers = new Map(group.nodes.map((source, index) => [source.name, copies[index].name]));
         const nested = items !== owner.doc.items;

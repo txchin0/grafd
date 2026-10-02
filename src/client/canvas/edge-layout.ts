@@ -4,6 +4,7 @@
 // all read back. Nothing here touches a canvas context — the shape of an edge is settled
 // before anything is drawn, so it can be computed and tested without a renderer.
 
+import { DEFAULT_NODE_SHAPE, type NodeShape } from '../../shared/canvas-layer.js';
 import type { FlowNode, Rect } from '../../shared/flow-format.js';
 import { displayRectOf, type FlowModel, type GhostNode, type ModelEdge } from '../flow-doc.js';
 import {
@@ -11,13 +12,13 @@ import {
   midpointOf,
   offsetAlong,
   perpendicular,
-  rectBorderPointFrom,
   rectCenter,
   unitVectorBetween,
   type Point,
 } from '../geometry.js';
 import { createEdgeGeometry, type EdgeGeometry } from './edge-path.js';
 import { transformRect } from './expansion.js';
+import { shapeBorderPointFrom, shapeBorderPointToward } from './node-shapes.js';
 
 export type EdgeGeometryMap = Map<ModelEdge, EdgeGeometry>;
 
@@ -40,6 +41,12 @@ const SELF_LOOP_START_INSET = 30;
 const SELF_LOOP_END_DROP = 24;
 const SELF_LOOP_APEX_OFFSET = { x: 42, y: -40 };
 const SELF_LOOP_NEST_STEP = 16;
+
+// The outline an edge end meets: where it is, and what shape is drawn there.
+interface Endpoint {
+  rect: Rect;
+  shape: NodeShape;
+}
 
 interface Lane {
   /** Signed position across the bundle, in the node pair's canonical orientation. */
@@ -99,34 +106,44 @@ function inCanonicalOrientation(lane: Lane, from: FlowNode, to: FlowNode | Ghost
 function geometryOfEdge(model: FlowModel, edge: ModelEdge, lane: Lane, occurrence: number): EdgeGeometry {
   const target = edge.to!;
   if (target === edge.from) return selfLoopGeometry(model, edge.from, occurrence);
-  return lanedGeometry(endpointRects(model, edge, target), inCanonicalOrientation(lane, edge.from, target));
+  return lanedGeometry(endpointsOf(model, edge, target), inCanonicalOrientation(lane, edge.from, target));
 }
 
 // An edge normally spans its two nodes' borders, but either end is redirected onto a named
 // node inside an unfolded frame when the `{Inner}` form names one (spec §5.7, §5.8).
-function endpointRects(model: FlowModel, edge: ModelEdge, target: FlowNode | GhostNode): { from: Rect; to: Rect } {
+function endpointsOf(model: FlowModel, edge: ModelEdge, target: FlowNode | GhostNode): { from: Endpoint; to: Endpoint } {
   const innerFrom = edge.kind === 'flow' && edge.spec.innerSource
-    ? innerNodeRect(model, edge.from, edge.spec.innerSource)
+    ? innerNodeEndpoint(model, edge.from, edge.spec.innerSource)
     : null;
   const innerTo = edge.kind === 'flow' && edge.spec.innerTarget && !isGhost(target)
-    ? innerNodeRect(model, target, edge.spec.innerTarget)
+    ? innerNodeEndpoint(model, target, edge.spec.innerTarget)
     : null;
   return {
-    from: innerFrom ?? displayRectOf(model, edge.from),
-    to: innerTo ?? (isGhost(target) ? target.pos : displayRectOf(model, target)),
+    from: innerFrom ?? nodeEndpoint(model, edge.from),
+    to: innerTo ?? (isGhost(target) ? { rect: target.pos, shape: DEFAULT_NODE_SHAPE } : nodeEndpoint(model, target)),
   };
 }
 
-function lanedGeometry(rects: { from: Rect; to: Rect }, lane: Lane): EdgeGeometry {
-  const fromCenter = rectCenter(rects.from);
-  const toCenter = rectCenter(rects.to);
+function nodeEndpoint(model: FlowModel, node: FlowNode): Endpoint {
+  return { rect: displayRectOf(model, node), shape: drawnShapeOf(model, node) };
+}
+
+// An unfolded node is drawn as its frame, a plain rectangle, whatever shape it has collapsed.
+export function drawnShapeOf(model: FlowModel, node: FlowNode): NodeShape {
+  if (model.display?.expansions.has(node)) return DEFAULT_NODE_SHAPE;
+  return model.visuals?.shapeOf(node) ?? DEFAULT_NODE_SHAPE;
+}
+
+function lanedGeometry(ends: { from: Endpoint; to: Endpoint }, lane: Lane): EdgeGeometry {
+  const fromCenter = rectCenter(ends.from.rect);
+  const toCenter = rectCenter(ends.to.rect);
   const towardTarget = unitVectorBetween(fromCenter, toCenter);
   const towardSource = unitVectorBetween(toCenter, fromCenter);
   const across = perpendicular(towardTarget);
-  const offset = laneOffset(lane, rects, across);
+  const offset = laneOffset(lane, { from: ends.from.rect, to: ends.to.rect }, across);
 
-  const start = rectBorderPointFrom(rects.from, offsetAlong(fromCenter, across, offset), towardTarget);
-  const end = rectBorderPointFrom(rects.to, offsetAlong(toCenter, across, offset), towardSource);
+  const start = shapeBorderPointFrom(ends.from.shape, ends.from.rect, offsetAlong(fromCenter, across, offset), towardTarget);
+  const end = shapeBorderPointFrom(ends.to.shape, ends.to.rect, offsetAlong(toCenter, across, offset), towardSource);
   const mid = offsetAlong(midpointOf(start, end), across, outwardBow(start, end, lane));
   return createEdgeGeometry([start, mid, end]);
 }
@@ -149,11 +166,14 @@ function outwardBow(start: Point, end: Point, lane: Lane): number {
 }
 
 // Repeated self-loops nest rather than share a lane: each one clears the loop drawn inside it.
+// The loop is aimed at the rectangle's upper-right corner and lands where those aims cross the
+// node's outline, so on a rounded or pointed shape it still leaves and returns on the ink.
 function selfLoopGeometry(model: FlowModel, node: FlowNode, occurrence: number): EdgeGeometry {
-  const { x, y, w } = displayRectOf(model, node);
+  const { rect, shape } = nodeEndpoint(model, node);
+  const { x, y, w } = rect;
   const nesting = occurrence * SELF_LOOP_NEST_STEP;
-  const start = { x: x + w - SELF_LOOP_START_INSET - nesting, y };
-  const end = { x: x + w, y: y + SELF_LOOP_END_DROP + nesting };
+  const start = shapeBorderPointToward(shape, rect, { x: x + w - SELF_LOOP_START_INSET - nesting, y });
+  const end = shapeBorderPointToward(shape, rect, { x: x + w, y: y + SELF_LOOP_END_DROP + nesting });
   const apex = { x: x + w + SELF_LOOP_APEX_OFFSET.x + nesting, y: y + SELF_LOOP_APEX_OFFSET.y - nesting };
   return createEdgeGeometry([start, apex, end]);
 }
@@ -162,11 +182,18 @@ function selfLoopGeometry(model: FlowModel, node: FlowNode, occurrence: number):
 // or end on it. Null when the frame is collapsed, still opening, or holds no such name — in
 // which case the edge meets the host's own border instead.
 export function innerNodeRect(model: FlowModel, host: FlowNode, innerName: string): Rect | null {
+  return innerNodeEndpoint(model, host, innerName)?.rect ?? null;
+}
+
+function innerNodeEndpoint(model: FlowModel, host: FlowNode, innerName: string): Endpoint | null {
   const expansion = model.display?.expansions.get(host);
   if (!expansion || expansion.alpha <= MIN_INNER_TARGET_ALPHA) return null;
   const innerNode = expansion.subModel.nodesByName.get(innerName);
   if (!innerNode) return null;
-  return transformRect(displayRectOf(expansion.subModel, innerNode), expansion.transform);
+  return {
+    rect: transformRect(displayRectOf(expansion.subModel, innerNode), expansion.transform),
+    shape: drawnShapeOf(expansion.subModel, innerNode),
+  };
 }
 
 // Edges with an end inside an unfolded frame are painted after the nodes, so the frame's own

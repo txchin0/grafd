@@ -7,7 +7,11 @@
 
    The canvas is drawn on a <canvas> and cannot read custom properties itself; the tokens
    prefixed `--canvas-` are resolved to concrete colours by resolveCanvasPalette whenever the
-   theme changes. They are declared here so that adding a theme means editing one file. */
+   theme changes. They are declared here so that adding a theme means editing one file.
+
+   The `--canvas-slot-*` tokens are the colours a user can give an edge in its canvas layer.
+   A layer names the slot, never the colour, so each theme picks values that read on its own
+   canvas. */
 
 :root,
 :root[data-theme="grafd-dark"] {
@@ -49,6 +53,14 @@
   --canvas-select: #6aa9e9;
   --canvas-marquee-fill: rgba(106, 169, 233, 0.08);
   --canvas-port-fill: #1b1e24;
+  --canvas-slot-red: #e07a7a;
+  --canvas-slot-orange: #e39a5b;
+  --canvas-slot-yellow: #d9c06a;
+  --canvas-slot-green: #7fc48a;
+  --canvas-slot-cyan: #6cc4cf;
+  --canvas-slot-blue: #6aa9e9;
+  --canvas-slot-purple: #b48ad9;
+  --canvas-slot-gray: #8a939e;
 }
 
 /* Ink on white paper: the canvas is pure #fff and the default node borders, arrows and text
@@ -96,6 +108,14 @@
   --canvas-select: #005fb8;
   --canvas-marquee-fill: rgba(0, 95, 184, 0.1);
   --canvas-port-fill: #ffffff;
+  --canvas-slot-red: #cd3131;
+  --canvas-slot-orange: #d0701c;
+  --canvas-slot-yellow: #b8930f;
+  --canvas-slot-green: #2f8a3f;
+  --canvas-slot-cyan: #0f8b99;
+  --canvas-slot-blue: #005fb8;
+  --canvas-slot-purple: #8250df;
+  --canvas-slot-gray: #6e7781;
 }
 
 :root[data-theme="monokai-night"] {
@@ -134,4 +154,12 @@
   --canvas-select: #007acc;
   --canvas-marquee-fill: rgba(0, 122, 204, 0.08);
   --canvas-port-fill: #1f1f1f;
+  --canvas-slot-red: #F92672;
+  --canvas-slot-orange: #FD971F;
+  --canvas-slot-yellow: #E6DB74;
+  --canvas-slot-green: #A6E22E;
+  --canvas-slot-cyan: #66D9EF;
+  --canvas-slot-blue: #57A6FF;
+  --canvas-slot-purple: #AE81FF;
+  --canvas-slot-gray: #75715E;
 }

@@ -69,6 +69,15 @@ import {
 import { createEditors, type Editors } from './editors.js';
 import { EditSession, type CommitTiming } from './edit-session.js';
 import { MANIFEST_FILE_NAME } from '../shared/manifest.js';
+import {
+  canvasLayerPathOf,
+  isCanvasLayerPath,
+  parseCanvasLayer,
+  serializeCanvasLayer,
+} from '../shared/canvas-layer.js';
+import { CanvasLayerStore } from './canvas-layer-store.js';
+import { createCanvasLayerSync } from './canvas-layer-sync.js';
+import { dressModel } from './model-visuals.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
 import { ServerWorkspace, serverIsAvailable } from './workspace-server.js';
 import { BrowserWorkspace } from './workspace-browser.js';
@@ -104,13 +113,27 @@ let workspaceFiles: string[] = [];
 
 const navigation = { trail: [] as TrailEntry[], inProgress: false };
 
+// Each .flow's canvas layer — the cosmetic sidecar holding node shapes and edge colours —
+// loaded beside the document it dresses.
+const layers = new CanvasLayerStore({
+  readFile: (path) => workspace?.readFile(path) ?? Promise.resolve(null),
+  onLoaded: () => refresh(),
+});
+const layerSync = createCanvasLayerSync(() => session, layers);
+
 // Every document an edit can reach — the open file and any external file unfolded inside a
-// frame — is tracked by one session, which owns their committed texts, their debounced
-// writes, and the undo history spanning all of them (edit-session.ts).
+// frame, and their canvas layers — is tracked by one session, which owns their committed
+// texts, their debounced writes, and the undo history spanning all of them (edit-session.ts).
 const session = new EditSession({
   writeFile: sendWrite,
+  deleteFile: (path) => workspace?.deleteFile(path),
   adoptDocument: (path, doc) => expansions.adoptDocument(path, doc),
-  retargetDocument: (from, to) => expansions.retargetPath(from, to),
+  adoptLayer: (flowPath, layer) => layers.adopt(flowPath, layer),
+  retargetDocument: (from, to) => {
+    expansions.retargetPath(from, to);
+    layers.retarget(from, to);
+  },
+  observer: layerSync.observer,
 });
 
 let currentPreferences: Preferences = loadPreferences();
@@ -191,6 +214,8 @@ const clipboard = createClipboard({
   // Every clipboard mutation is a structural edit, so none of them wait on the typing debounce.
   applyToDoc: (owner, mutation) => applyToDoc(owner, mutation, { commit: 'now' }),
   deleteSelection: () => deleteSelection(),
+  captureVisuals: (owner, nodes) => layerSync.captureVisuals(owner, nodes),
+  applyCapturedVisuals: (owner, copies, visuals) => layerSync.applyCapturedVisuals(owner, copies, visuals),
 });
 
 
@@ -234,7 +259,7 @@ const sidebarFiles = createSidebarFiles({
 function modelFor(flow: Omit<OpenFlow, 'model'>): FlowModel {
   const model = FlowDoc.buildModel(flow.doc, flow.scope);
   model.sourcePath = flow.path;
-  return model;
+  return dressModel(model, layers.layerFor(flow.path));
 }
 
 function refresh(): void {
@@ -307,6 +332,10 @@ const workspaceDelegate: WorkspaceDelegate = {
     // Manifest changes from other clients are UI state, not content — adopting them
     // mid-session would fight the local camera and selection.
     if (path === MANIFEST_FILE_NAME) return;
+    if (isCanvasLayerPath(path)) {
+      if (layerSync.adoptWatchedLayer(path, text)) refresh();
+      return;
+    }
     if (!workspaceFiles.includes(path)) {
       workspaceFiles.push(path);
       workspaceFiles.sort();
@@ -315,6 +344,9 @@ const workspaceDelegate: WorkspaceDelegate = {
     if (path !== openFlow?.path && !expansions.watchesPath(path)) return;
     if (session.committedTextAt(path) === text) return;
     adoptWatchedText(path, text);
+  },
+  fileDeleted(path) {
+    if (isCanvasLayerPath(path) && layerSync.adoptWatchedLayer(path, null)) refresh();
   },
   connectionChanged(connected) {
     elements.connectionDot.classList.toggle('connected', connected);
@@ -363,6 +395,8 @@ async function openFile(
       return false;
     }
   }
+  // Loaded before the document is shown, so the first frame already draws its visuals.
+  await layers.ensure(path);
   // Flush before switching so a commit still debouncing against the outgoing file lands in it
   // rather than being evaluated later against whatever is open by then; reset then drops the
   // outgoing documents and their history, which no longer describe anything reachable.
@@ -397,6 +431,7 @@ function deleteFlowFile(path: string): void {
   // Untrack before anything else: a commit still pending against this path would re-create the
   // file moments after it was deleted.
   session.forget(path);
+  layers.forget(path);
   dropFromFileList(path);
   uiState.forgetFlow(path, workspaceFiles);
   if (openFlow?.path === path) closeCurrentFlow();
@@ -433,10 +468,14 @@ function setScope(scopeName: string | null, { fit = true }: { fit?: boolean } = 
   if (fit) view.fitToContent();
 }
 
+// The copy keeps every node id, which are unique per file, so the source's layer applies to it
+// unchanged.
 async function duplicateFlowFile(path: string): Promise<void> {
   const text = session.committedTextAt(path) ?? (await workspace?.readFile(path));
   if (text == null) return;
-  registerCreatedFlowFile(copyFlowPath(workspaceFiles, path), text);
+  const layer = await layers.ensure(path);
+  const layerText = layer ? serializeCanvasLayer(layer) : null;
+  registerCreatedFlowFile(copyFlowPath(workspaceFiles, path), text, layerText);
 }
 
 // Renames a file in place (same folder), then moves every handle that knows the old path —
@@ -695,8 +734,14 @@ function extractableBlockNameFor(node: FlowNode): string | null {
   return expandValue;
 }
 
-function registerCreatedFlowFile(path: string, text: string): void {
+// A layer left at a new file's path belongs to a .flow that was deleted outside the editor; it
+// is replaced (or removed) rather than inherited by an unrelated graph.
+function registerCreatedFlowFile(path: string, text: string, layerText: string | null = null): void {
   sendWrite(path, text);
+  const layerPath = canvasLayerPathOf(path);
+  if (layerText != null) sendWrite(layerPath, layerText);
+  else workspace?.deleteFile(layerPath);
+  layers.adopt(path, parseCanvasLayer(layerText));
   if (!workspaceFiles.includes(path)) {
     workspaceFiles.push(path);
     workspaceFiles.sort();
@@ -721,6 +766,11 @@ function extractSubgraphIntoFile(node: FlowNode): void {
   const path = extractedFlowPath(workspaceFiles, owner.path, graphName);
   const linkPath = path.split('/').pop()!;
 
+  // Captured before the block leaves the parent: the parent's commit drops the visuals of the
+  // nodes that moved out, and the new file is written from a re-parse with no link to them.
+  const blockNodes = FlowDoc.nodesIn(FlowDoc.scopeItems(owner.doc, blockName));
+  const blockVisuals = layerSync.captureVisuals(owner, blockNodes);
+
   // The extracted file is new, so it has no prior text to restore and takes no part in the undo
   // step: the parent document's rewrite is the whole of what this action can put back.
   let extracted: FlowDocument | null = null;
@@ -733,7 +783,11 @@ function extractSubgraphIntoFile(node: FlowNode): void {
 
   FlowDoc.ensureLayoutEverywhere(extracted);
   const text = serializeFlow(extracted);
-  registerCreatedFlowFile(path, text);
+  // Moved or copied (the block stays when the parent still uses it), each extracted node keeps
+  // its name, which is what pairs it with the node it came from.
+  const extractedByName = new Map(FlowDoc.nodesIn((extracted as FlowDocument).items).map((node) => [node.name, node]));
+  const copies = blockNodes.map((node) => extractedByName.get(node.name) ?? null);
+  registerCreatedFlowFile(path, text, layerSync.layerTextForNewDocument(extracted, copies, blockVisuals));
   session.adoptText(path, text);
   // Extraction moves the block out of the owning document, so a scope naming it is now stale.
   if (owner.path === openFlow?.path) dropScopeIfMissing();
@@ -883,9 +937,7 @@ async function openDiveDocument(target: DiveTarget): Promise<boolean> {
   if (!target.link) return false;
   const graphName = sanitizeName(target.link.label) || target.path.split('/').pop()!.replace(/\.flow$/, '');
   const text = `---\nname: ${graphName}\n---\n`;
-  sendWrite(target.path, text);
-  workspaceFiles.push(target.path);
-  workspaceFiles.sort();
+  registerCreatedFlowFile(target.path, text);
   return openFile(target.path, { presetText: text, restoreSavedView: false });
 }
 
@@ -965,12 +1017,7 @@ function applyToDoc(owner: DocumentOwner, mutation: () => void, { commit = 'debo
   // pre-edit text is recorded here — the baseline the first undo of this edit restores.
   session.trackWithBaseline(owner.path, owner.doc);
   mutation();
-  if (owner.doc === openFlow?.doc) {
-    refresh();
-  } else {
-    expansions.invalidateSubModels();
-    view.requestRender();
-  }
+  rerenderAfterEditTo(owner);
   session.commitAfter(owner.path, commit);
 }
 
@@ -981,13 +1028,25 @@ function applyToDoc(owner: DocumentOwner, mutation: () => void, { commit = 'debo
 function applyRippleToDoc(owner: DocumentOwner, mutation: () => boolean): void {
   session.trackWithBaseline(owner.path, owner.doc);
   if (!mutation()) return;
+  rerenderAfterEditTo(owner);
+  session.commitWithoutUndo(owner.path);
+}
+
+// The open flow rebuilds its whole model; a frame's document only invalidates the sub-models
+// drawn from it.
+function rerenderAfterEditTo(owner: DocumentOwner): void {
   if (owner.doc === openFlow?.doc) {
     refresh();
   } else {
     expansions.invalidateSubModels();
     view.requestRender();
   }
-  session.commitWithoutUndo(owner.path);
+}
+
+// A shape or colour lives in the owning file's canvas layer, so only the layer is written; the
+// .flow is untouched.
+function applyLayerEdit(owner: DocumentOwner, edit: () => boolean): void {
+  if (edit()) rerenderAfterEditTo(owner);
 }
 
 function applyEdit(node: FlowNode, mutation: () => void, options?: { commit?: CommitTiming }): void {
@@ -1446,6 +1505,8 @@ const expansions = new ExpansionLayer({
     editors.refreshFromDoc();
   },
   readExternalFile: (path) => workspace?.readFile(path) ?? Promise.resolve(null),
+  layerFor: (path) => layers.layerFor(path),
+  loadCanvasLayer: (path) => layers.ensure(path),
 });
 
 const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
@@ -1524,6 +1585,16 @@ const editors: Editors = createEditors({
   innerTargetOptions: (edge) => innerOptions(edge, 'target'),
   innerSourceOptions: (edge) => innerOptions(edge, 'source'),
   renameRegion: (region, name) => contextOps.renameRegion(region, name),
+  shapeOf: (node) => layerSync.shapeOf(ownerOf(node), node),
+  applyShapeEdit: (node, shape) => {
+    const owner = ownerOf(node);
+    applyLayerEdit(owner, () => layerSync.setShape(owner, node, shape));
+  },
+  edgeColorOf: (edge) => layerSync.edgeColorOf(ownerOf(edge.from), edge),
+  applyEdgeColorEdit: (edge, color) => {
+    const owner = ownerOf(edge.from);
+    applyLayerEdit(owner, () => layerSync.setEdgeColor(owner, edge, color));
+  },
 });
 
 contextOps = createContextOrchestration({
@@ -1718,9 +1789,7 @@ function createFlowFile(path: string): string | null {
   if (existing) return `${existing} already exists — pick another name.`;
   const graphName = path.split('/').pop()!.replace(/\.flow$/, '');
   const text = `---\nname: ${graphName}\n---\n`;
-  sendWrite(path, text);
-  workspaceFiles.push(path);
-  workspaceFiles.sort();
+  registerCreatedFlowFile(path, text);
   uiState.adoptEntrypointIfUnset(path);
   openFlowFromSidebar(path, text);
   return null;
@@ -1848,6 +1917,7 @@ function resetSessionState(): void {
   editors.closeAll();
   view.clearSelection();
   expansions.reset();
+  layers.reset();
   navigation.trail.length = 0;
   session.reset();
   workspaceFiles = [];

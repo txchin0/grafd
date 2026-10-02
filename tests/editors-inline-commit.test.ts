@@ -38,7 +38,9 @@ function createElementHarness(): ElementHarness {
       value: '',
       checked: false,
       textContent: '',
-      style: {},
+      style: { setProperty: vi.fn() },
+      dataset: {},
+      setAttribute: vi.fn(),
       classList: { add: vi.fn(), remove: vi.fn(), toggle: vi.fn() },
       addEventListener: vi.fn((type: string, handler: (event: any) => void) => {
         listeners[type] = handler;
@@ -99,6 +101,8 @@ const ELEMENT_IDS = [
   'ee-data-rows',
   'ee-add-field',
   'ee-delete',
+  'ne-shape',
+  'ee-color',
   'title-editor',
   'region-name-editor',
   'region-name-input',
@@ -148,6 +152,10 @@ function createContextStub() {
     applyRegionDescriptionEdit: vi.fn(),
     regionReferencesOf: vi.fn(() => []),
     applyRegionReferencesEdit: vi.fn(),
+    shapeOf: vi.fn(() => 'rectangle'),
+    applyShapeEdit: vi.fn(),
+    edgeColorOf: vi.fn(() => null),
+    applyEdgeColorEdit: vi.fn(),
   } as unknown as EditorContext;
 }
 
@@ -155,6 +163,8 @@ beforeEach(() => {
   harnesses = new Map(ELEMENT_IDS.map((id) => [id, createElementHarness()]));
   vi.stubGlobal('document', {
     getElementById: (id: string) => harnesses.get(id)?.element ?? null,
+    createElement: () => createElementHarness().element,
+    createElementNS: () => createElementHarness().element,
   });
   context = createContextStub();
   editors = createEditors(context);

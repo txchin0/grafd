@@ -578,6 +578,34 @@ html, body {
 
 .field-caption { font-size: var(--text-caption); color: var(--muted); }
 
+/* Canvas-layer choices: shape buttons and edge colour swatches. */
+#ne-shape-field,
+#ee-color-field { display: flex; flex-direction: column; gap: 4px; }
+.choice-row { display: flex; flex-wrap: wrap; gap: 4px; }
+.choice {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  color: var(--muted);
+  padding: 3px;
+  cursor: pointer;
+}
+.choice svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.3; }
+.choice:hover { color: var(--accent); border-color: var(--accent); }
+.choice.chosen { color: var(--accent); border-color: var(--accent); background: var(--row-active); }
+.swatch { width: 22px; height: 22px; padding: 0; border-radius: 50%; }
+.swatch::after {
+  content: '';
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--swatch-color, var(--canvas-edge));
+}
+.swatch.chosen { background: transparent; border-width: 2px; }
+
 /* Read-only lines in an editor: what the file already says, and why an edit was refused. */
 .field-note { font-size: var(--text-caption); color: var(--muted); margin: 0; }
 .field-error { font-size: var(--text-caption); color: var(--danger); margin: 0; }

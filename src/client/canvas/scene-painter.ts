@@ -20,12 +20,13 @@ import {
 } from '../flow-doc.js';
 import type { Point } from '../geometry.js';
 import { unionRect } from '../../shared/rect-math.js';
-import { canvasPalette } from '../theme.js';
+import { canvasPalette, resolveLayerColor } from '../theme.js';
 import type { HiddenCanvasTitles } from './canvas-view.js';
 import { edgeEnd, edgePathApproach, edgePathMidpoint } from './edge-path.js';
-import { edgeReachesInsideOpenFrame, layOutModelEdges, type EdgeGeometryMap } from './edge-layout.js';
+import { drawnShapeOf, edgeReachesInsideOpenFrame, layOutModelEdges, type EdgeGeometryMap } from './edge-layout.js';
 import type { ExpansionLayer, FrameExpansion } from './expansion.js';
 import { BADGE_DIAMETER, BADGE_SYMBOLS, nodeBadges } from './node-badges.js';
+import { outlinePathData, shapeOutline, shapeTextBox, type ShapeOutline } from './node-shapes.js';
 import {
   DESCRIPTION_FIRST_LINE_NUDGE,
   DESCRIPTION_LINE_HEIGHT,
@@ -126,10 +127,10 @@ export class ScenePainter {
     const redirected: ModelEdge[] = [];
     for (const edge of model.edges) {
       if (edgeReachesInsideOpenFrame(model, edge)) redirected.push(edge);
-      else this.drawEdge(edge);
+      else this.drawEdge(model, edge);
     }
     for (const node of model.nodes) this.drawNode(model, node);
-    for (const edge of redirected) this.drawEdge(edge);
+    for (const edge of redirected) this.drawEdge(model, edge);
     for (const edge of model.edges) this.drawEdgeLabel(edge);
     for (const ghost of model.ghosts) this.drawGhost(ghost, { clickable: !model.embedded });
   }
@@ -198,15 +199,18 @@ export class ScenePainter {
     return node.id != null && node.id === this.hiddenTitles.nodeId;
   }
 
-  private edgeColor(edge: ModelEdge): string {
+  // Selection outranks the canvas layer's colour, which outranks the edge kind's default.
+  private edgeColor(model: FlowModel, edge: ModelEdge): string {
     if (edge === this.selectedEdge) return canvasPalette.select;
+    const layerColor = model.visuals?.edgeColorOf(edge);
+    if (layerColor) return resolveLayerColor(layerColor);
     return edge.kind === 'error' ? canvasPalette.error : canvasPalette.edge;
   }
 
-  private drawEdge(edge: ModelEdge): void {
+  private drawEdge(model: FlowModel, edge: ModelEdge): void {
     const geometry = this.edgeGeometry.get(edge);
     if (!geometry) return;
-    const color = this.edgeColor(edge);
+    const color = this.edgeColor(model, edge);
     const options: RoughOptions = {
       seed: seedFrom(`${edge.from.name}->${edge.spec.target}:${edge.spec.label ?? ''}`),
       stroke: color,
@@ -315,8 +319,9 @@ export class ScenePainter {
 
     const traits = model.traits.get(node);
     const rect = displayRectOf(model, node);
+    const shape = drawnShapeOf(model, node);
 
-    this.rough.rectangle(rect.x, rect.y, rect.w, rect.h, {
+    this.drawOutline(shapeOutline(shape, rect), {
       seed: seedFrom(node.id ?? node.name),
       roughness: this.roughnessFor(NODE_ROUGHNESS),
       bowing: 0.7,
@@ -326,9 +331,24 @@ export class ScenePainter {
       fillStyle: 'solid',
     });
 
-    this.drawNodeText(model, node, rect);
-    this.drawTraitBadges(traits, rect);
+    const textBox = shapeTextBox(shape, rect);
+    this.drawNodeText(model, node, textBox);
+    this.drawTraitBadges(traits, textBox);
     this.drawExpandBadges(model, node);
+  }
+
+  // rough.js's own primitives where it has one; the rounded rectangle and the cylinder go
+  // through their SVG path data.
+  private drawOutline(outline: ShapeOutline, options: RoughOptions): void {
+    if (outline.kind === 'ellipse') {
+      this.rough.ellipse(outline.center.x, outline.center.y, outline.width, outline.height, options);
+    } else if (outline.kind === 'polygon') {
+      this.rough.polygon(outline.points.map((point) => [point.x, point.y] as [number, number]), options);
+    } else if (outline.kind === 'rect' && outline.radius === 0) {
+      this.rough.rectangle(outline.rect.x, outline.rect.y, outline.rect.w, outline.rect.h, options);
+    } else {
+      for (const path of outlinePathData(outline)) this.rough.path(path, options);
+    }
   }
 
   private drawExpandedNode(model: FlowModel, node: FlowNode, expansion: FrameExpansion): void {

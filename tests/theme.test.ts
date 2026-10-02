@@ -8,9 +8,11 @@ import {
   PAGE_BACKGROUND_TOKEN,
   THEMES,
   isThemeId,
+  edgeColorSlotToken,
   resolveCanvasPalette,
-  type CanvasPalette,
+  type CanvasColorField,
 } from '../src/client/theme.js';
+import { EDGE_COLOR_SLOTS } from '../src/shared/canvas-layer.js';
 
 const themesCss = readFileSync(new URL('../public/themes.css', import.meta.url), 'utf8');
 
@@ -57,14 +59,17 @@ describe('themes.css', () => {
   });
 
   it('declares every canvas token the palette resolves', () => {
-    for (const token of Object.values(CANVAS_COLOR_TOKENS)) {
+    for (const token of [...Object.values(CANVAS_COLOR_TOKENS), ...EDGE_COLOR_SLOTS.map(edgeColorSlotToken)]) {
       expect(fallbackBlock.tokens.has(token), token).toBe(true);
     }
   });
 
   it('matches the fallback palette mirrored in theme.ts', () => {
-    for (const field of Object.keys(CANVAS_COLOR_TOKENS) as (keyof CanvasPalette)[]) {
+    for (const field of Object.keys(CANVAS_COLOR_TOKENS) as CanvasColorField[]) {
       expect(fallbackBlock.tokens.get(CANVAS_COLOR_TOKENS[field]), field).toBe(DEFAULT_CANVAS_PALETTE[field]);
+    }
+    for (const slot of EDGE_COLOR_SLOTS) {
+      expect(fallbackBlock.tokens.get(edgeColorSlotToken(slot)), slot).toBe(DEFAULT_CANVAS_PALETTE.slots[slot]);
     }
     expect(fallbackBlock.tokens.get(PAGE_BACKGROUND_TOKEN)).toBe(DEFAULT_PAGE_BACKGROUND);
   });
@@ -74,9 +79,15 @@ describe('resolveCanvasPalette', () => {
   it('reads every field from its token', () => {
     const tokens = Object.fromEntries(Object.values(CANVAS_COLOR_TOKENS).map((token) => [token, `color(${token})`]));
     const resolved = resolveCanvasPalette(stubbedStyle(tokens));
-    for (const field of Object.keys(CANVAS_COLOR_TOKENS) as (keyof CanvasPalette)[]) {
+    for (const field of Object.keys(CANVAS_COLOR_TOKENS) as CanvasColorField[]) {
       expect(resolved[field]).toBe(`color(${CANVAS_COLOR_TOKENS[field]})`);
     }
+  });
+
+  it('reads every colour slot from its token', () => {
+    const tokens = Object.fromEntries(EDGE_COLOR_SLOTS.map((slot) => [edgeColorSlotToken(slot), `slot(${slot})`]));
+    const resolved = resolveCanvasPalette(stubbedStyle(tokens));
+    for (const slot of EDGE_COLOR_SLOTS) expect(resolved.slots[slot]).toBe(`slot(${slot})`);
   });
 
   it('trims the surrounding whitespace a declaration may carry', () => {

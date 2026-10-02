@@ -8,6 +8,16 @@ import type { DocumentOwner } from '../src/client/canvas/expansion.js';
 import type { RegionTarget } from '../src/client/canvas/canvas-view.js';
 import type { OpenFlow } from '../src/client/open-flow.js';
 import { createClipboard, type Clipboard, type ClipboardOptions } from '../src/client/clipboard.js';
+import {
+  applyCapturedVisuals,
+  captureVisuals,
+  documentIdentities,
+  edgeColorOf,
+  emptyCanvasLayer,
+  nodeShapeOf,
+  setEdgeColor,
+  setNodeShape,
+} from '../src/shared/canvas-layer.js';
 
 const MAIN = `---
 name: Main
@@ -87,6 +97,8 @@ function harnessFor(text: string, flowOverride?: Partial<OpenFlow>, documentReso
     documentAt: (path) => (documentResolvable && path === 'main.flow' ? owner : null),
     applyToDoc: (target, mutation) => options.applyToDoc(target, mutation),
     deleteSelection: () => options.deleteSelection(),
+    captureVisuals: () => null,
+    applyCapturedVisuals: () => {},
   } satisfies ClipboardOptions);
   const setSelection = (nodes: FlowNode[], regions: ContextBlock[]) => {
     selection = nodes;
@@ -202,5 +214,67 @@ describe('clipboard with regions', () => {
     const reparsed = parseFlow(textOf(harness.doc));
     expect(contextBlockNamed(reparsed, 'Auth 2')).toBeTruthy();
     expect(nodesIn(reparsed.items).map((node) => node.name)).toContain('Login 2');
+  });
+});
+
+describe('clipboard and the canvas layer', () => {
+  const SOURCE = `---\nname: Main\n---\n\nAsk\n  id: ask-1\n  pos: 0, 0, 200, 88\n  -> Answer : "yes"\n\nAnswer\n  id: answer-1\n  pos: 300, 0, 200, 88\n`;
+
+  function visualHarness() {
+    const doc = parseFlow(SOURCE);
+    const owner: DocumentOwner = { doc, path: 'main.flow' };
+    const layer = emptyCanvasLayer();
+    setNodeShape(layer, 'ask-1', 'diamond');
+    setEdgeColor(layer, documentIdentities(doc).edgeKeys.get(allNodes(doc)[0].edges[0])!, 'green');
+    let selection: FlowNode[] = [];
+    const flow = {
+      doc,
+      path: 'main.flow',
+      scope: null,
+      model: { nodes: [], edges: [], ghosts: [], contexts: [], nodesByName: new Map(), traits: new Map(), sourceDoc: doc, sourcePath: 'main.flow', sourceScope: null },
+    } as OpenFlow;
+    const clipboard = createClipboard({
+      openFlow: () => flow,
+      selection: () => selection,
+      selectedRegions: () => [],
+      select: () => {},
+      ownerOf: () => owner,
+      ownerOfRegion: () => owner,
+      documentAt: () => owner,
+      applyToDoc: (_owner, mutation) => mutation(),
+      deleteSelection: () => {},
+      captureVisuals: (from, nodes) => captureVisuals(layer, documentIdentities(from.doc), nodes),
+      applyCapturedVisuals: (to, copies, visuals) => {
+        if (visuals) applyCapturedVisuals(layer, documentIdentities(to.doc), copies, visuals);
+      },
+    } satisfies ClipboardOptions);
+    const select = (names: string[]) => {
+      selection = names.map((name) => allNodes(doc).find((node) => node.name === name)!);
+    };
+    return { doc, layer, clipboard, select };
+  }
+
+  function copiesOf(doc: FlowDocument, sourceName: string): FlowNode[] {
+    return allNodes(doc).filter((node) => node.name !== sourceName && node.name.startsWith(sourceName));
+  }
+
+  it('pastes copies wearing their sources\' shapes and edge colours', () => {
+    const { doc, layer, clipboard, select } = visualHarness();
+    select(['Ask', 'Answer']);
+    clipboard.copy();
+    clipboard.paste();
+    const [askCopy] = copiesOf(doc, 'Ask');
+    expect(nodeShapeOf(layer, askCopy.id)).toBe('diamond');
+    expect(edgeColorOf(layer, documentIdentities(doc).edgeKeys.get(askCopy.edges[0])!)).toBe('green');
+  });
+
+  it('carries visuals through a duplicate', () => {
+    const { doc, layer, clipboard, select } = visualHarness();
+    select(['Ask']);
+    clipboard.duplicateSelection();
+    const [askCopy] = copiesOf(doc, 'Ask');
+    expect(nodeShapeOf(layer, askCopy.id)).toBe('diamond');
+    // The copy's edge still points at the original Answer, under its own key.
+    expect(edgeColorOf(layer, documentIdentities(doc).edgeKeys.get(askCopy.edges[0])!)).toBe('green');
   });
 });

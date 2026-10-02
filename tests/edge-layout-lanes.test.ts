@@ -10,6 +10,8 @@ import { assignMissingIds, buildModel, type ModelEdge } from '../src/client/flow
 import { distanceToEdgePath } from '../src/client/canvas/edge-path.js';
 import { rectCenter, unitVectorBetween, type Point } from '../src/client/geometry.js';
 import { parseFlow, type Rect } from '../src/shared/flow-format.js';
+import { parseCanvasLayer } from '../src/shared/canvas-layer.js';
+import { dressModel } from '../src/client/model-visuals.js';
 
 const NODE_SIZE = '200, 88';
 
@@ -188,5 +190,43 @@ describe('repeated self-loops', () => {
     const [inner, outer] = edges.map((edge) => geometry.get(edge)!.through[1]);
     expect(outer.x).toBeGreaterThan(inner.x);
     expect(outer.y).toBeLessThan(inner.y);
+  });
+});
+
+describe('edges meeting shaped nodes', () => {
+  function layOutWithLayer(flowText: string, layerText: string) {
+    const doc = parseFlow(flowText);
+    assignMissingIds(doc);
+    const model = dressModel(buildModel(doc, null), parseCanvasLayer(layerText));
+    const geometry: EdgeGeometryMap = new Map();
+    layOutModelEdges(model, geometry);
+    return { model, geometry };
+  }
+
+  it('ends an edge on a diamond outline rather than on its bounding box', () => {
+    const flow = [
+      '---', 'name: Shapes', '---', '',
+      'A', '  id: a-1', '  pos: 0, 300, 200, 88', '  -> B', '',
+      'B', '  id: b-1', '  pos: 800, 0, 200, 88', '',
+    ].join('\n');
+    const plain = layOutWithLayer(flow, '{}');
+    const shaped = layOutWithLayer(flow, JSON.stringify({ nodes: { 'b-1': { shape: 'diamond' } } }));
+    const plainEnd = edgeEnd(plain.geometry.get(plain.model.edges[0])!);
+    const shapedEnd = edgeEnd(shaped.geometry.get(shaped.model.edges[0])!);
+
+    // On the rectangle the edge stops on its left border; on the diamond it runs on into the
+    // lower-left facet, |dx|/100 + |dy|/44 = 1 about B's centre.
+    expect(plainEnd.x).toBeCloseTo(800, 6);
+    expect(Math.abs(shapedEnd.x - 900) / 100 + Math.abs(shapedEnd.y - 44) / 44).toBeCloseTo(1, 6);
+    expect(shapedEnd.x).toBeGreaterThan(plainEnd.x);
+  });
+
+  it('starts and ends a self-loop on an ellipse outline', () => {
+    const flow = ['---', 'name: Loop', '---', '', 'A', '  id: a-1', '  pos: 0, 0, 200, 100', '  -> A', ''].join('\n');
+    const { model, geometry } = layOutWithLayer(flow, JSON.stringify({ nodes: { 'a-1': { shape: 'ellipse' } } }));
+    const loop = geometry.get(model.edges[0])!;
+    for (const point of [edgeStart(loop), edgeEnd(loop)]) {
+      expect(((point.x - 100) / 100) ** 2 + ((point.y - 50) / 50) ** 2).toBeCloseTo(1, 6);
+    }
   });
 });

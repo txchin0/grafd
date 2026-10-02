@@ -28,7 +28,20 @@
 // each one is first written rather than snapshotted up front. An action that loads a file it
 // has never seen — the workspace-wide rename does — would otherwise leave that file out of the
 // step that has to restore it.
+//
+// Each .flow's canvas layer (`<file>.flow.canvas.json`) is tracked here too, under its own path,
+// so an action that edits a graph and its visuals is one undo step. A layer is the one document
+// whose file may legitimately not exist — an empty layer is deleted, not written — so "no file"
+// is a state history records and undo restores by deleting the file again.
 
+import {
+  canvasLayerPathOf,
+  flowPathOfCanvasLayer,
+  isCanvasLayerPath,
+  parseCanvasLayer,
+  serializeCanvasLayer,
+  type CanvasLayer,
+} from '../shared/canvas-layer.js';
 import { parseFlow, serializeFlow, type FlowDocument } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 
@@ -39,10 +52,14 @@ const UNDO_LIMIT = 100;
 
 type ActionId = number;
 
-// One undo step: the text each document the action changed had before it ran.
+// What a document's file held: its text, or no file at all (a canvas layer with nothing in it).
+export const ABSENT_FILE = Symbol('absent file');
+type FileState = string | typeof ABSENT_FILE;
+
+// One undo step: the state each document the action changed had before it ran.
 interface HistoryStep {
   action: ActionId;
-  before: Map<string, string>;
+  before: Map<string, FileState>;
 }
 
 // The rest of an action, carried across an await. A ripple resolves in a later turn, by which
@@ -53,26 +70,45 @@ export interface ActionContinuation {
   resume<T>(body: () => T): T | undefined;
 }
 
+type TrackedContent = { kind: 'flow'; doc: FlowDocument } | { kind: 'layer'; layer: CanvasLayer };
+
 interface TrackedDocument {
-  doc: FlowDocument;
-  // Null while no pre-edit text is known. A drag mutates `pos` in place and only reports the
+  content: TrackedContent;
+  // Null while no pre-edit state is known. A drag mutates `pos` in place and only reports the
   // move once it is over, so a document first registered at that point has nothing to diff
-  // against and its next commit must write unconditionally.
-  committedText: string | null;
+  // against and its next commit must write unconditionally. A layer's state is always known.
+  committed: FileState | null;
+  // The file still holds what was read, which says the same as `committed` in another form —
+  // other line endings, or without the ids and layout the editor assigns on load. The next
+  // commit writes the canonical text, but records no undo step for it: undoing it would only
+  // restore the old form, which the following commit writes again.
+  fileUnnormalized?: boolean;
   timer?: ReturnType<typeof setTimeout>;
   // The action a debounced commit was scheduled by, so the write it makes 300ms later still
   // lands in that action's step rather than in one of its own.
   pendingAction?: ActionId | null;
 }
 
+// The canvas layer keys visuals by node ids and edge keys, which an edit to the .flow can change.
+// The session reports when a flow document starts being tracked — the identities it holds then
+// are the baseline — and just before each of its commits, so the layer can follow the edit.
+export interface FlowCommitObserver {
+  tracked(path: string, doc: FlowDocument): void;
+  committing(path: string, doc: FlowDocument, undoable: boolean): void;
+}
+
 export interface EditSessionOptions {
   writeFile(path: string, text: string): void;
+  deleteFile(path: string): void;
   // Publishes a freshly parsed document to the expansion cache by identity. See the parse
   // identity note above.
   adoptDocument(path: string, doc: FlowDocument): void;
-  // Re-keys a document entry in the expansion cache after its file was renamed, so the cache
-  // and the tracked-document map stay the same object under the new path.
+  // The same for a canvas layer, keyed by the .flow it belongs to.
+  adoptLayer(flowPath: string, layer: CanvasLayer): void;
+  // Re-keys a document entry in the expansion cache (and its layer) after its file was renamed,
+  // so the caches and the tracked-document map stay the same objects under the new path.
   retargetDocument(from: string, to: string): void;
+  observer?: FlowCommitObserver;
   debounceMs?: number;
 }
 
@@ -81,8 +117,11 @@ export class EditSession {
   private readonly undoStack: HistoryStep[] = [];
   private readonly redoStack: HistoryStep[] = [];
   private readonly writeFile: (path: string, text: string) => void;
+  private readonly deleteFile: (path: string) => void;
   private readonly adoptDocument: (path: string, doc: FlowDocument) => void;
+  private readonly adoptLayer: (flowPath: string, layer: CanvasLayer) => void;
   private readonly retargetDocument: (from: string, to: string) => void;
+  private readonly observer: FlowCommitObserver | null;
   private readonly debounceMs: number;
   // Every wholesale replacement of a tracked document bumps this, so a continuation that finds
   // it moved knows the documents it described are gone.
@@ -92,13 +131,19 @@ export class EditSession {
 
   constructor({
     writeFile,
+    deleteFile,
     adoptDocument,
+    adoptLayer,
     retargetDocument,
+    observer,
     debounceMs = COMMIT_DEBOUNCE_MS,
   }: EditSessionOptions) {
     this.writeFile = writeFile;
+    this.deleteFile = deleteFile;
     this.adoptDocument = adoptDocument;
+    this.adoptLayer = adoptLayer;
     this.retargetDocument = retargetDocument;
+    this.observer = observer ?? null;
     this.debounceMs = debounceMs;
   }
 
@@ -124,31 +169,65 @@ export class EditSession {
   }
 
   documentAt(path: string): FlowDocument | null {
-    return this.tracked.get(path)?.doc ?? null;
+    const content = this.tracked.get(path)?.content;
+    return content?.kind === 'flow' ? content.doc : null;
   }
 
+  layerAt(flowPath: string): CanvasLayer | null {
+    const content = this.tracked.get(canvasLayerPathOf(flowPath))?.content;
+    return content?.kind === 'layer' ? content.layer : null;
+  }
+
+  // Null for an untracked path, an unknown baseline, and a layer with no file alike.
   committedTextAt(path: string): string | null {
-    return this.tracked.get(path)?.committedText ?? null;
+    const committed = this.tracked.get(path)?.committed;
+    return typeof committed === 'string' ? committed : null;
   }
 
   isTracking(path: string): boolean {
     return this.tracked.has(path);
   }
 
-  // Parse `text` and install it as the document at `path`, replacing whatever was there.
+  // Parse `text` and install it as the document at `path`, replacing whatever was there. As with
+  // a layer, the committed state is the canonical serialization rather than the text read.
   adoptText(path: string, text: string): FlowDocument {
     const doc = parseFlow(text);
     FlowDoc.assignMissingIds(doc);
-    this.replace(path, { doc, committedText: text });
+    FlowDoc.ensureLayoutEverywhere(doc);
+    const committed = serializeFlow(doc);
+    this.replace(path, { content: { kind: 'flow', doc }, committed, fileUnnormalized: committed !== text });
     this.adoptDocument(path, doc);
+    this.observer?.tracked(path, doc);
     return doc;
+  }
+
+  // Parse a canvas layer's file text — null when there is no file — and install it as the layer
+  // of `flowPath`, replacing whatever was there. The committed state is the layer's canonical
+  // serialization rather than the text read: a hand-written or older layer would otherwise
+  // compare as changed at the next flush and be rewritten as an edit of its own — one that
+  // lands on the undo stack and clears redo.
+  adoptLayerText(flowPath: string, text: string | null): CanvasLayer {
+    const layer = parseCanvasLayer(text);
+    const committed = serializeCanvasLayer(layer) ?? ABSENT_FILE;
+    this.replace(canvasLayerPathOf(flowPath), { content: { kind: 'layer', layer }, committed });
+    this.adoptLayer(flowPath, layer);
+    return layer;
   }
 
   // Register a document loaded by someone else (the expansion layer's lazy fetch) ahead of
   // mutating it, so its pre-edit text becomes the baseline the first undo restores.
   trackWithBaseline(path: string, doc: FlowDocument): void {
     if (this.tracked.has(path)) return;
-    this.tracked.set(path, { doc, committedText: serializeFlow(doc) });
+    this.tracked.set(path, { content: { kind: 'flow', doc }, committed: serializeFlow(doc) });
+    this.observer?.tracked(path, doc);
+  }
+
+  // The layer counterpart of trackWithBaseline: called before the layer is mutated, so its
+  // current content — no file at all, when it is empty — is what the first undo restores.
+  trackLayerWithBaseline(flowPath: string, layer: CanvasLayer): void {
+    const path = canvasLayerPathOf(flowPath);
+    if (this.tracked.has(path)) return;
+    this.tracked.set(path, { content: { kind: 'layer', layer }, committed: serializeCanvasLayer(layer) ?? ABSENT_FILE });
   }
 
   // Register a document that has already been mutated in place, where no pre-edit text can be
@@ -157,16 +236,20 @@ export class EditSession {
   // on a frame document the session has not tracked yet (commitMovesFor).
   trackWithoutBaseline(path: string, doc: FlowDocument): void {
     if (this.tracked.has(path)) return;
-    this.tracked.set(path, { doc, committedText: null });
+    this.tracked.set(path, { content: { kind: 'flow', doc }, committed: null });
+    this.observer?.tracked(path, doc);
   }
 
-  // Stop tracking a path whose file is gone, cancelling anything pending against it.
+  // Stop tracking a path whose file is gone — and its canvas layer, which went with it —
+  // cancelling anything pending against either.
   forget(path: string): void {
-    const entry = this.tracked.get(path);
-    if (!entry) return;
-    clearTimeout(entry.timer);
-    this.tracked.delete(path);
-    this.replacements += 1;
+    for (const trackedPath of [path, canvasLayerPathOf(path)]) {
+      const entry = this.tracked.get(trackedPath);
+      if (!entry) continue;
+      clearTimeout(entry.timer);
+      this.tracked.delete(trackedPath);
+      this.replacements += 1;
+    }
   }
 
   // Moves a tracked document to a new path after its file was renamed. Pending commits follow
@@ -179,19 +262,26 @@ export class EditSession {
   // the old path, and the move itself is not undoable, so those steps can no longer describe
   // a real state. This holds even when the renamed file was never tracked — steps for other
   // documents name the old path too.
+  //
+  // The file's canvas layer moved with it and is re-keyed the same way: a layer commit still
+  // pending against the old path would otherwise re-create the layer there.
   retarget(from: string, to: string): void {
-    const entry = this.tracked.get(from);
-    if (entry) {
-      if (entry.timer) {
-        clearTimeout(entry.timer);
-        entry.timer = setTimeout(() => this.commitPending(to), this.debounceMs);
-      }
-      this.tracked.delete(from);
-      this.tracked.set(to, entry);
-    }
+    this.moveEntry(from, to);
+    this.moveEntry(canvasLayerPathOf(from), canvasLayerPathOf(to));
     this.retargetDocument(from, to);
     this.undoStack.length = 0;
     this.redoStack.length = 0;
+  }
+
+  private moveEntry(from: string, to: string): void {
+    const entry = this.tracked.get(from);
+    if (!entry) return;
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = setTimeout(() => this.commitPending(to), this.debounceMs);
+    }
+    this.tracked.delete(from);
+    this.tracked.set(to, entry);
   }
 
   // Writes a document's current serialized text without recording an undo step — the
@@ -204,11 +294,9 @@ export class EditSession {
     clearTimeout(entry.timer);
     entry.timer = undefined;
     entry.pendingAction = null;
-    FlowDoc.ensureLayoutEverywhere(entry.doc);
-    const text = serializeFlow(entry.doc);
-    if (text === entry.committedText) return;
-    entry.committedText = text;
-    this.writeFile(path, text);
+    const state = this.serializeForCommit(path, entry, false);
+    if (state === entry.committed && !entry.fileUnnormalized) return;
+    this.writeCommitted(path, entry, state);
   }
 
   commitAfter(path: string, timing: CommitTiming): void {
@@ -224,18 +312,42 @@ export class EditSession {
     entry.timer = setTimeout(() => this.commitPending(path), this.debounceMs);
   }
 
+  // Runs as an action of its own when none is open, so the layer writes the observer makes for
+  // this commit land in the same undo step as the write itself.
   commit(path: string): void {
-    const entry = this.tracked.get(path);
-    if (!entry) return;
-    clearTimeout(entry.timer);
-    entry.timer = undefined;
-    entry.pendingAction = null;
-    FlowDoc.ensureLayoutEverywhere(entry.doc);
-    const text = serializeFlow(entry.doc);
-    if (text === entry.committedText) return;
-    if (entry.committedText != null) this.recordPreActionText(path, entry.committedText);
-    entry.committedText = text;
-    this.writeFile(path, text);
+    this.runAction(() => {
+      const entry = this.tracked.get(path);
+      if (!entry) return;
+      clearTimeout(entry.timer);
+      entry.timer = undefined;
+      entry.pendingAction = null;
+      const state = this.serializeForCommit(path, entry, true);
+      if (state === entry.committed) {
+        if (entry.fileUnnormalized) this.writeCommitted(path, entry, state);
+        return;
+      }
+      if (entry.committed != null) this.recordPreActionState(path, entry.committed);
+      this.writeCommitted(path, entry, state);
+    });
+  }
+
+  private writeCommitted(path: string, entry: TrackedDocument, state: FileState): void {
+    entry.committed = state;
+    entry.fileUnnormalized = false;
+    this.writeState(path, state);
+  }
+
+  private serializeForCommit(path: string, entry: TrackedDocument, undoable: boolean): FileState {
+    const { content } = entry;
+    if (content.kind === 'layer') return serializeCanvasLayer(content.layer) ?? ABSENT_FILE;
+    FlowDoc.ensureLayoutEverywhere(content.doc);
+    this.observer?.committing(path, content.doc, undoable);
+    return serializeFlow(content.doc);
+  }
+
+  private writeState(path: string, state: FileState): void {
+    if (state === ABSENT_FILE) this.deleteFile(path);
+    else this.writeFile(path, state);
   }
 
   // A commit that was scheduled belongs to the action that scheduled it whatever makes it land —
@@ -253,17 +365,22 @@ export class EditSession {
     for (const path of [...this.tracked.keys()]) this.commitPending(path);
   }
 
-  // Reinstate each document in a step that differs from its current text, writing every one
-  // back so other tools see the reverted state. Returns the paths that changed.
+  // Reinstate each document in a step that differs from its current state, writing every one
+  // back (or deleting it) so other tools see the reverted state. Returns the paths that changed.
   private restore(step: HistoryStep): string[] {
     const changed: string[] = [];
-    for (const [path, text] of step.before) {
-      if (this.committedTextAt(path) === text) continue;
-      this.adoptText(path, text);
-      this.writeFile(path, text);
+    for (const [path, state] of step.before) {
+      if (this.tracked.get(path)?.committed === state) continue;
+      this.adoptState(path, state);
+      this.writeState(path, state);
       changed.push(path);
     }
     return changed;
+  }
+
+  private adoptState(path: string, state: FileState): void {
+    if (isCanvasLayerPath(path)) this.adoptLayerText(flowPathOfCanvasLayer(path), state === ABSENT_FILE ? null : state);
+    else if (state !== ABSENT_FILE) this.adoptText(path, state);
   }
 
   undo(): string[] {
@@ -282,14 +399,15 @@ export class EditSession {
     return this.restore(step);
   }
 
-  // The step that undoes the one about to be restored: the same documents, at the text they
-  // currently hold. Built before restoring, and only from documents still tracked — a path
-  // whose file is gone has no state to come back to.
+  // The step that undoes the one about to be restored: the same documents, at the state they
+  // currently hold — "no file" included, which is how redo deletes a layer again. Built before
+  // restoring, and only from documents still tracked — a path whose file is gone has no state
+  // to come back to.
   private counterStep(step: HistoryStep): HistoryStep {
-    const before = new Map<string, string>();
+    const before = new Map<string, FileState>();
     for (const path of step.before.keys()) {
-      const text = this.committedTextAt(path);
-      if (text != null) before.set(path, text);
+      const committed = this.tracked.get(path)?.committed;
+      if (committed != null) before.set(path, committed);
     }
     return { action: step.action, before };
   }
@@ -323,11 +441,11 @@ export class EditSession {
     }
   }
 
-  // Only the first write to a document within an action is its pre-action text; later ones in
+  // Only the first write to a document within an action is its pre-action state; later ones in
   // the same action would record what the action itself put there.
-  private recordPreActionText(path: string, text: string): void {
+  private recordPreActionState(path: string, state: FileState): void {
     const step = this.stepForCurrentAction();
-    if (!step.before.has(path)) step.before.set(path, text);
+    if (!step.before.has(path)) step.before.set(path, state);
   }
 
   // An action extends the step it is already building. A step left on top by some other action

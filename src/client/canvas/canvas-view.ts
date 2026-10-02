@@ -30,7 +30,6 @@ import {
 import {
   easeInOutCubic,
   normalizedRect,
-  rectBorderPointToward,
   rectCenter,
   rectContains,
   rectsIntersect,
@@ -42,7 +41,8 @@ import {
   type EdgeGeometry,
   edgePathMidpoint,
 } from './edge-path.js';
-import type { EdgeGeometryMap } from './edge-layout.js';
+import { drawnShapeOf, type EdgeGeometryMap } from './edge-layout.js';
+import { shapeBorderPointToward, shapeTextBox } from './node-shapes.js';
 import { BADGE_HIT_RADIUS, nodeBadges, type BadgeHit } from './node-badges.js';
 import { ScenePainter } from './scene-painter.js';
 import {
@@ -1518,14 +1518,26 @@ export class CanvasView {
     return this.model.ghosts.find((ghost) => rectContains(ghost.pos, world)) ?? null;
   }
 
+  // Ports sit where the node's outline crosses the lines from its centre to the midpoints of
+  // its sides, so on a slanted or pointed shape they stay on the ink. Their hit radius is the
+  // same as on a rectangle; only where they are drawn moves.
   private portPositions(node: FlowNode): Point[] {
     const { x, y, w, h } = this.rect(node);
-    return [
+    const sideMidpoints = [
       { x: x + w / 2, y },
       { x: x + w, y: y + h / 2 },
       { x: x + w / 2, y: y + h },
       { x, y: y + h / 2 },
     ];
+    return sideMidpoints.map((midpoint) => this.outlinePointToward(node, midpoint));
+  }
+
+  private outlinePointToward(node: FlowNode, toward: Point): Point {
+    return shapeBorderPointToward(this.drawnShapeOf(node), this.rect(node), toward);
+  }
+
+  private drawnShapeOf(node: FlowNode): ReturnType<typeof drawnShapeOf> {
+    return drawnShapeOf(this.expansionLayer.modelOf(node) ?? this.model, node);
   }
 
   private portOfNodeNear(node: FlowNode, world: Point): Point | null {
@@ -1819,9 +1831,11 @@ export class CanvasView {
     const model = locus?.model ?? this.model;
     const expansion = model.display?.expansions.get(node);
     const localRect = displayRectOf(model, node);
+    // The painter lays the title out in the shape's text box; the overlay has to use the same.
+    const textBox = shapeTextBox(drawnShapeOf(model, node), localRect);
     const band = expansion
       ? frameTitleBand(this.ctx, node, expansion.frame)
-      : titleBandOf(localRect, this.layOutNodeText(model, node, localRect));
+      : titleBandOf(textBox, this.layOutNodeText(model, node, textBox));
 
     return {
       rect: locus ? transformRect(band, locus.transform) : band,
@@ -1944,9 +1958,9 @@ export class CanvasView {
       ctx.lineWidth = 1 / this.view.scale;
       ctx.strokeRect(gesture.rect.x, gesture.rect.y, gesture.rect.w, gesture.rect.h);
     } else if (gesture.type === 'edge') {
-      const start = rectBorderPointToward(this.rect(gesture.from), gesture.toWorld);
+      const start = this.outlinePointToward(gesture.from, gesture.toWorld);
       const end = gesture.hoverTarget
-        ? rectBorderPointToward(this.rect(gesture.hoverTarget), rectCenter(this.rect(gesture.from)))
+        ? this.outlinePointToward(gesture.hoverTarget, rectCenter(this.rect(gesture.from)))
         : gesture.toWorld;
       ctx.save();
       ctx.strokeStyle = canvasPalette.select;

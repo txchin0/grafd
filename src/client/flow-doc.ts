@@ -33,6 +33,7 @@ import {
   type Rect,
   type Reference,
 } from '../shared/flow-format.js';
+import type { NodeShape } from '../shared/canvas-layer.js';
 import type { DisplayGeometry } from './canvas/expansion.js';
 import type { Point } from './geometry.js';
 import { DEFAULT_NODE_SIZE, autoLayout } from '../shared/auto-layout.js';
@@ -97,6 +98,14 @@ export interface FlowModel {
   sourceScope: string | null;
   display?: DisplayGeometry;
   embedded?: boolean;
+  // How the source file's canvas layer dresses this model. Absent, everything draws in its
+  // default look.
+  visuals?: ModelVisuals;
+}
+
+export interface ModelVisuals {
+  shapeOf(node: FlowNode): NodeShape;
+  edgeColorOf(edge: ModelEdge): string | null;
 }
 
 // The rects a model currently occupies on screen: each node's display rect once a geometry

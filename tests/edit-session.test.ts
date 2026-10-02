@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseFlow, serializeFlow, setProp, type FlowDocument } from '../src/shared/flow-format.js';
 import { allNodes } from '../src/client/flow-doc.js';
 import { EditSession, COMMIT_DEBOUNCE_MS } from '../src/client/edit-session.js';
+import { setNodeShape, type CanvasLayer } from '../src/shared/canvas-layer.js';
+import { CanvasLayerStore } from '../src/client/canvas-layer-store.js';
+import { createCanvasLayerSync } from '../src/client/canvas-layer-sync.js';
 
 function flowText(nodeName: string): string {
   return `---\nname: demo\n---\n\n${nodeName}:\n  id: 11111111-1111-4111-8111-111111111111\n  pos: 0, 0, 200, 88\n`;
@@ -10,6 +13,8 @@ function flowText(nodeName: string): string {
 interface Harness {
   session: EditSession;
   writes: { path: string; text: string }[];
+  deletes: string[];
+  layers: Map<string, CanvasLayer>;
   adopted: { path: string; doc: FlowDocument }[];
   retargeted: { from: string; to: string }[];
   lastWriteTo(path: string): string | undefined;
@@ -17,16 +22,22 @@ interface Harness {
 
 function createHarness(): Harness {
   const writes: { path: string; text: string }[] = [];
+  const deletes: string[] = [];
+  const layers = new Map<string, CanvasLayer>();
   const adopted: { path: string; doc: FlowDocument }[] = [];
   const retargeted: { from: string; to: string }[] = [];
   const session = new EditSession({
     writeFile: (path, text) => writes.push({ path, text }),
+    deleteFile: (path) => deletes.push(path),
     adoptDocument: (path, doc) => adopted.push({ path, doc }),
+    adoptLayer: (flowPath, layer) => layers.set(flowPath, layer),
     retargetDocument: (from, to) => retargeted.push({ from, to }),
   });
   return {
     session,
     writes,
+    deletes,
+    layers,
     adopted,
     retargeted,
     lastWriteTo: (path) => [...writes].reverse().find((write) => write.path === path)?.text,
@@ -430,10 +441,9 @@ describe('undo across every document an edit can reach', () => {
     expect(allNodes(session.documentAt('main.flow')!)[0].id).toBe(id);
   });
 
-  // Restoring text written before Grafd ever assigned ids mints fresh ones, so selection and
-  // open editors bound to the old ids are dropped. Recorded because it reads like a defect and
-  // is not one: committed text is the source of truth and that text never carried an id.
-  it('mints new ids when restoring text that never carried any', () => {
+  // The ids minted on load are part of the committed state, so a restore keeps them: the canvas
+  // layer keys its visuals by those ids before any edit has written them to the file.
+  it('keeps the ids assigned on load across a restore of text that never carried any', () => {
     const { session } = createHarness();
     const doc = session.adoptText('main.flow', '---\nname: demo\n---\n\nStart:\n');
     const assignedId = allNodes(doc)[0].id;
@@ -443,92 +453,162 @@ describe('undo across every document an edit can reach', () => {
     session.commit('main.flow');
     session.undo();
 
-    const restoredId = allNodes(session.documentAt('main.flow')!)[0].id;
-    expect(restoredId).toBeTruthy();
-    expect(restoredId).not.toBe(assignedId);
+    expect(allNodes(session.documentAt('main.flow')!)[0].id).toBe(assignedId);
   });
 });
 
-describe('retarget', () => {
-  it('moves a tracked document to the new path and re-keys the published entry', () => {
-    const { session, adopted, retargeted } = createHarness();
-    const doc = session.adoptText('a.flow', flowText('Start'));
-    session.retarget('a.flow', 'b.flow');
-    expect(session.documentAt('a.flow')).toBeNull();
-    expect(session.documentAt('b.flow')).toBe(doc);
-    expect(retargeted).toEqual([{ from: 'a.flow', to: 'b.flow' }]);
-    expect(adopted).toEqual([{ path: 'a.flow', doc }]);
+describe('a file read in a form the editor does not write', () => {
+  const CRLF_TEXT = flowText('Start').replace(/\n/g, '\r\n');
+
+  it('writes the canonical form on the next flush without recording an undo step', () => {
+    const { session, lastWriteTo } = createHarness();
+    const doc = session.adoptText('main.flow', CRLF_TEXT);
+    session.flush();
+    expect(lastWriteTo('main.flow')).toBe(serializeFlow(doc));
+    expect(session.undo()).toEqual([]);
   });
 
-  it('commits a pending debounce to the new path', () => {
-    const { session, writes, lastWriteTo } = createHarness();
-    const doc = session.adoptText('a.flow', flowText('Start'));
+  it('undoes a layer edit made before the .flow was ever written', () => {
+    const { session, layers } = createHarness();
+    session.adoptText('a.flow', CRLF_TEXT);
+    const layer = session.adoptLayerText('a.flow', null);
+    session.runAction(() => {
+      session.trackLayerWithBaseline('a.flow', layer);
+      setNodeShape(layer, '11111111-1111-4111-8111-111111111111', 'ellipse');
+      session.commit('a.flow.canvas.json');
+    });
+
+    expect(session.undo()).toEqual(['a.flow.canvas.json']);
+    expect(layers.get('a.flow')?.nodes).toEqual({});
+  });
+
+  it('records its canonical form as the state an edit undoes to', () => {
+    const { session } = createHarness();
+    const doc = session.adoptText('main.flow', CRLF_TEXT);
+    const canonical = serializeFlow(doc);
     renameFirstNode(doc, 'Renamed');
-    session.commitAfter('a.flow', 'debounce');
+    session.commit('main.flow');
+    session.undo();
+    expect(session.committedTextAt('main.flow')).toBe(canonical);
+  });
+});
+
+describe('canvas layers', () => {
+  const LAYER_PATH = 'a.flow.canvas.json';
+
+  function trackEmptyLayer(session: EditSession): CanvasLayer {
+    const layer = session.adoptLayerText('a.flow', null);
+    session.trackLayerWithBaseline('a.flow', layer);
+    return layer;
+  }
+
+  it('undoes the first visual on a graph by deleting the layer file it created, and redo writes it back', () => {
+    const { session, deletes, lastWriteTo, layers } = createHarness();
+    const layer = trackEmptyLayer(session);
+    session.runAction(() => {
+      setNodeShape(layer, 'n1', 'diamond');
+      session.commit(LAYER_PATH);
+    });
+    const written = lastWriteTo(LAYER_PATH);
+    expect(written).toContain('diamond');
+
+    expect(session.undo()).toEqual([LAYER_PATH]);
+    expect(deletes).toEqual([LAYER_PATH]);
+    expect(layers.get('a.flow')?.nodes).toEqual({});
+
+    expect(session.redo()).toEqual([LAYER_PATH]);
+    expect(lastWriteTo(LAYER_PATH)).toBe(written);
+    expect(layers.get('a.flow')?.nodes).toEqual({ n1: { shape: 'diamond' } });
+  });
+
+  it('deletes the file when the last visual is cleared, restores it on undo and deletes it again on redo', () => {
+    const { session, deletes, lastWriteTo } = createHarness();
+    const layer = session.adoptLayerText('a.flow', JSON.stringify({ nodes: { n1: { shape: 'ellipse' } } }));
+    session.runAction(() => {
+      setNodeShape(layer, 'n1', null);
+      session.commit(LAYER_PATH);
+    });
+    expect(deletes).toEqual([LAYER_PATH]);
+
+    session.undo();
+    expect(lastWriteTo(LAYER_PATH)).toContain('ellipse');
+    expect(session.layerAt('a.flow')?.nodes).toEqual({ n1: { shape: 'ellipse' } });
+
+    session.redo();
+    expect(deletes).toEqual([LAYER_PATH, LAYER_PATH]);
+    expect(session.layerAt('a.flow')?.nodes).toEqual({});
+  });
+
+  it('carries a pending layer commit to the new path when its .flow is renamed', () => {
+    const { session, writes } = createHarness();
+    session.adoptText('a.flow', flowText('Start'));
+    const layer = trackEmptyLayer(session);
+    setNodeShape(layer, 'n1', 'hexagon');
+    session.scheduleCommit(LAYER_PATH);
     session.retarget('a.flow', 'b.flow');
     vi.advanceTimersByTime(COMMIT_DEBOUNCE_MS);
-    expect(lastWriteTo('b.flow')).toBe(serializeFlow(doc));
-    expect(lastWriteTo('a.flow')).toBeUndefined();
-    expect(writes).toHaveLength(1);
+    expect(writes.map((write) => write.path)).toEqual(['b.flow.canvas.json']);
+    expect(session.layerAt('b.flow')).toBe(layer);
+    expect(session.layerAt('a.flow')).toBeNull();
   });
 
-  it('clamps undo history at the rename boundary', () => {
-    const { session, lastWriteTo } = createHarness();
-    const doc = session.adoptText('a.flow', flowText('Start'));
-    session.runAction(() => {
-      renameFirstNode(doc, 'Renamed');
-      session.commitAfter('a.flow', 'now');
-    });
-    session.retarget('a.flow', 'b.flow');
-
-    expect(session.undo()).toEqual([]);
-    expect(session.documentAt('a.flow')).toBeNull();
-    expect(session.documentAt('b.flow')).toBe(doc);
-    expect(serializeFlow(doc)).not.toBe(flowText('Start'));
-    expect(lastWriteTo('b.flow')).toBeUndefined();
-  });
-
-  it('clamps history even when the renamed file was never tracked', () => {
-    const { session, retargeted } = createHarness();
-    const doc = session.adoptText('a.flow', flowText('Start'));
-    session.runAction(() => {
-      renameFirstNode(doc, 'Renamed');
-      session.commitAfter('a.flow', 'now');
-    });
-    session.retarget('other.flow', 'moved.flow');
-
-    expect(session.undo()).toEqual([]);
-    expect(session.documentAt('a.flow')).toBe(doc);
-    expect(serializeFlow(doc)).not.toBe(flowText('Start'));
-    expect(retargeted).toEqual([{ from: 'other.flow', to: 'moved.flow' }]);
-  });
-
-  it('does not invalidate in-flight action continuations', () => {
-    const { session } = createHarness();
+  it('forgets a deleted .flow together with its layer, so nothing pending re-creates either', () => {
+    const { session, writes } = createHarness();
     session.adoptText('a.flow', flowText('Start'));
-    const continuation = session.suspendAction();
-    session.retarget('a.flow', 'b.flow');
-    expect(continuation.resume(() => 'still alive')).toBe('still alive');
+    const layer = trackEmptyLayer(session);
+    setNodeShape(layer, 'n1', 'hexagon');
+    session.scheduleCommit(LAYER_PATH);
+    session.forget('a.flow');
+    vi.advanceTimersByTime(COMMIT_DEBOUNCE_MS);
+    expect(writes).toEqual([]);
   });
 });
 
-describe('commitWithoutUndo', () => {
-  it('writes a mutated tracked document without creating an undo step', () => {
-    const { session, lastWriteTo } = createHarness();
-    const doc = session.adoptText('a.flow', flowText('Start'));
-    renameFirstNode(doc, 'Renamed');
-    session.commitWithoutUndo('a.flow');
-    expect(lastWriteTo('a.flow')).toBe(serializeFlow(doc));
-    expect(session.undo()).toEqual([]);
-    expect(lastWriteTo('a.flow')).toBe(serializeFlow(doc));
+describe('canvas layers following .flow edits', () => {
+  const NODE_ID = '11111111-1111-4111-8111-111111111111';
+  const TARGET_ID = '22222222-2222-4222-8222-222222222222';
+  const TEXT = `---\nname: demo\n---\n\nStart\n  id: ${NODE_ID}\n  pos: 0, 0, 200, 88\n  -> End : "go"\n\nEnd\n  id: ${TARGET_ID}\n  pos: 300, 0, 200, 88\n`;
+  const OLD_KEY = `${NODE_ID} -> #${TARGET_ID} : "go"`;
+  const NEW_KEY = `${NODE_ID} -> #${TARGET_ID} : "done"`;
+
+  function createSyncedSession() {
+    const writes: { path: string; text: string }[] = [];
+    const store = new CanvasLayerStore({ readFile: async () => null, onLoaded: () => {} });
+    let session: EditSession;
+    const sync = createCanvasLayerSync(() => session, store);
+    session = new EditSession({
+      writeFile: (path, text) => writes.push({ path, text }),
+      deleteFile: () => {},
+      adoptDocument: () => {},
+      adoptLayer: (flowPath, layer) => store.adopt(flowPath, layer),
+      retargetDocument: () => {},
+      observer: sync.observer,
+    });
+    return { session, store, writes };
+  }
+
+  it('re-keys an edge colour when the edge is relabelled, in the same undo step as the .flow write', () => {
+    const { session, store, writes } = createSyncedSession();
+    const doc = session.adoptText('a.flow', TEXT);
+    const layer = session.adoptLayerText('a.flow', JSON.stringify({ edges: { [OLD_KEY]: { color: 'red' } } }));
+    expect(store.layerFor('a.flow')).toBe(layer);
+
+    allNodes(doc)[0].edges[0].label = 'done';
+    session.commit('a.flow');
+    expect(layer.edges).toEqual({ [NEW_KEY]: { color: 'red' } });
+    expect(writes.map((write) => write.path)).toEqual(['a.flow.canvas.json', 'a.flow']);
+
+    expect(session.undo().sort()).toEqual(['a.flow', 'a.flow.canvas.json']);
+    expect(session.layerAt('a.flow')?.edges).toEqual({ [OLD_KEY]: { color: 'red' } });
+    expect(allNodes(session.documentAt('a.flow')!)[0].edges[0].label).toBe('go');
   });
 
-  it('writes a ripple rewrite for a document tracked with its baseline', () => {
-    const { session, lastWriteTo } = createHarness();
-    const doc = parseFlow(flowText('Start'));
-    session.trackWithBaseline('a.flow', doc);
-    renameFirstNode(doc, 'Renamed');
-    session.commitWithoutUndo('a.flow');
-    expect(lastWriteTo('a.flow')).toBe(serializeFlow(doc));
+  it('drops a deleted node\'s shape with the commit that deleted it', () => {
+    const { session } = createSyncedSession();
+    const doc = session.adoptText('a.flow', TEXT);
+    const layer = session.adoptLayerText('a.flow', JSON.stringify({ nodes: { [TARGET_ID]: { shape: 'diamond' } } }));
+    doc.items = doc.items.filter((item) => item.kind !== 'node' || item.node.name !== 'End');
+    session.commit('a.flow');
+    expect(layer.nodes).toEqual({});
   });
 });

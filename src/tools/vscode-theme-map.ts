@@ -5,6 +5,9 @@
 // registered id) hold for imported themes without changing the tests. `theme-import.ts` is the
 // CLI that turns the mapped tokens into edits; this module stays pure and file-free.
 
+import { EDGE_COLOR_SLOTS, type EdgeColorSlot } from '../shared/canvas-layer.js';
+import { edgeColorSlotToken } from '../client/theme.js';
+
 export type ThemeScheme = 'dark' | 'light';
 
 export interface VscodeColorTheme {
@@ -55,7 +58,8 @@ export const THEME_TOKEN_ORDER = [
   '--canvas-select',
   '--canvas-marquee-fill',
   '--canvas-port-fill',
-] as const;
+  ...EDGE_COLOR_SLOTS.map(edgeColorSlotToken),
+];
 
 export function deriveThemeId(name: string): string {
   const slug = name
@@ -176,6 +180,7 @@ interface SchemeDefaults {
   edgeLabelAlpha: number;
   regionFillAlpha: number;
   marqueeAlpha: number;
+  slots: Record<EdgeColorSlot, string>;
 }
 
 const DARK_DEFAULTS: SchemeDefaults = {
@@ -203,6 +208,16 @@ const DARK_DEFAULTS: SchemeDefaults = {
   edgeLabelAlpha: 0.75,
   regionFillAlpha: 0.13,
   marqueeAlpha: 0.08,
+  slots: {
+    red: '#e07a7a',
+    orange: '#e39a5b',
+    yellow: '#d9c06a',
+    green: '#7fc48a',
+    cyan: '#6cc4cf',
+    blue: '#6aa9e9',
+    purple: '#b48ad9',
+    gray: '#8a939e',
+  },
 };
 
 const LIGHT_DEFAULTS: SchemeDefaults = {
@@ -230,6 +245,16 @@ const LIGHT_DEFAULTS: SchemeDefaults = {
   edgeLabelAlpha: 0.85,
   regionFillAlpha: 0.13,
   marqueeAlpha: 0.1,
+  slots: {
+    red: '#cd3131',
+    orange: '#d0701c',
+    yellow: '#b8930f',
+    green: '#2f8a3f',
+    cyan: '#0f8b99',
+    blue: '#005fb8',
+    purple: '#8250df',
+    gray: '#6e7781',
+  },
 };
 
 export function mapThemeToTokens(theme: VscodeColorTheme): MappedTheme {
@@ -303,9 +328,26 @@ export function mapThemeToTokens(theme: VscodeColorTheme): MappedTheme {
     ['--canvas-select', accent],
     ['--canvas-marquee-fill', toAlpha(accent, defaults.marqueeAlpha)],
     ['--canvas-port-fill', bg],
+    ...EDGE_COLOR_SLOTS.map((slot): [string, string] => [
+      edgeColorSlotToken(slot),
+      pick(...SLOT_SOURCES[slot]) ?? defaults.slots[slot],
+    ]),
   ]);
   return { scheme, tokens };
 }
+
+// A VS Code theme's terminal palette is the closest thing it has to a named set of hues; slots
+// with no terminal colour of their own (orange) borrow the nearest warning-ish key.
+const SLOT_SOURCES: Record<EdgeColorSlot, string[]> = {
+  red: ['terminal.ansiRed'],
+  orange: ['editorWarning.foreground', 'list.warningForeground'],
+  yellow: ['terminal.ansiYellow'],
+  green: ['terminal.ansiGreen'],
+  cyan: ['terminal.ansiCyan'],
+  blue: ['terminal.ansiBlue'],
+  purple: ['terminal.ansiMagenta'],
+  gray: ['terminal.ansiBrightBlack'],
+};
 
 export function renderThemeBlock(id: string, tokens: Map<string, string>): string {
   const declarations = THEME_TOKEN_ORDER.map((token) => `  ${token}: ${tokens.get(token)};`);

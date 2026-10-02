@@ -1,5 +1,7 @@
-// Floating DOM overlays for editing a node (title, description, advanced properties) and an
-// edge (label, subgraph refinements, data schema). Overlays anchor to canvas geometry and are repositioned after every render.
+// Floating DOM overlays for editing a node (title, description, shape, advanced properties) and
+// an edge (label, subgraph refinements, colour, data schema). Overlays anchor to canvas geometry
+// and are repositioned after every render. Shape and colour live in the file's canvas layer
+// rather than in the .flow, so they go through their own context calls.
 // Field changes mutate the document immediately through the context callbacks; external file
 // updates refresh unfocused fields only, so in-progress typing is never clobbered.
 
@@ -16,6 +18,7 @@ import {
   type Rect,
   type Reference,
 } from '../shared/flow-format.js';
+import type { NodeShape } from '../shared/canvas-layer.js';
 import * as FlowDoc from './flow-doc.js';
 import type { ModelEdge } from './flow-doc.js';
 import type { CanvasView, RegionTarget } from './canvas/canvas-view.js';
@@ -23,6 +26,7 @@ import { createTitleEditor } from './title-editor.js';
 import { createRegionNameEditor, type RenameRegion } from './region-name-editor.js';
 import { createReferenceRows } from './reference-rows.js';
 import type { LinkContext } from './reference-link.js';
+import { createColorSwatches, createShapePicker } from './visual-pickers.js';
 
 export interface EditorContext {
   view: CanvasView;
@@ -59,6 +63,10 @@ export interface EditorContext {
   innerTargetOptions(edge: ModelEdge): string[];
   innerSourceOptions(edge: ModelEdge): string[];
   renameRegion: RenameRegion;
+  shapeOf(node: FlowNode): NodeShape;
+  applyShapeEdit(node: FlowNode, shape: NodeShape): void;
+  edgeColorOf(edge: ModelEdge): string | null;
+  applyEdgeColorEdit(edge: ModelEdge, color: string | null): void;
 }
 
 export interface Editors {
@@ -113,6 +121,8 @@ export function createEditors(context: EditorContext): Editors {
     edgeDataRows: elementById<HTMLDivElement>('ee-data-rows'),
     addDataField: elementById<HTMLButtonElement>('ee-add-field'),
     deleteEdge: elementById<HTMLButtonElement>('ee-delete'),
+    shapeChoices: elementById<HTMLDivElement>('ne-shape'),
+    colorChoices: elementById<HTMLDivElement>('ee-color'),
   };
 
   const titleEditor = createTitleEditor(context);
@@ -137,6 +147,20 @@ export function createEditors(context: EditorContext): Editors {
       if (editingRegion) context.applyRegionReferencesEdit(editingRegion, references);
     },
     afterRowAdded: () => reposition(),
+  });
+
+  const shapePicker = createShapePicker(elements.shapeChoices, (shape) => {
+    const node = editingNode();
+    if (!node) return;
+    context.applyShapeEdit(node, shape);
+    shapePicker.fill(context.shapeOf(node));
+  });
+
+  const colorSwatches = createColorSwatches(elements.colorChoices, (color) => {
+    const edge = editingEdge();
+    if (!edge) return;
+    context.applyEdgeColorEdit(edge, color);
+    colorSwatches.fill(context.edgeColorOf(edge));
   });
 
   let editingNodeId: string | null = null;
@@ -197,6 +221,7 @@ export function createEditors(context: EditorContext): Editors {
     setUnlessFocused(elements.updates, parseListValue(getProp(node, 'updates')).join(', '));
     fillReadableContexts(node);
     elements.entrypoint.checked = getProp(node, 'entrypoint') === 'true';
+    shapePicker.fill(context.shapeOf(node));
     referenceRows.fill(context.referencesOf(node));
     const lacksExpand = !getProp(node, 'expand');
     elements.openExpand.classList.toggle('hidden', lacksExpand);
@@ -311,6 +336,7 @@ export function createEditors(context: EditorContext): Editors {
     elements.edgeLabel.value = edge.spec.label ?? '';
     elements.edgeDataRows.replaceChildren();
     fillRefinementSelects(edge);
+    colorSwatches.fill(context.edgeColorOf(edge));
     fillDataFields(edge);
     elements.edgeEditor.classList.remove('hidden');
     reposition();
@@ -529,6 +555,7 @@ export function createEditors(context: EditorContext): Editors {
       closeEdgeEditor();
     } else if (edge) {
       fillRefinementSelects(edge);
+      colorSwatches.fill(context.edgeColorOf(edge));
       fillDataFields(edge);
     }
     reposition();
@@ -647,10 +674,13 @@ export function createEditors(context: EditorContext): Editors {
     context.applyEditNow(edge.from, () => FlowDoc.deleteEdge(edge));
   });
 
+  // Undo and redo still reach the app: after a click on a shape or colour button, focus stays on
+  // that button, and the edit it just made must be undoable from there. Text fields keep their
+  // own undo — the app's handler ignores keys typed into them.
   for (const editorElement of [elements.nodeEditor, elements.edgeEditor]) {
     editorElement.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') closeAll();
-      event.stopPropagation();
+      if (!isHistoryShortcut(event)) event.stopPropagation();
     });
   }
 
@@ -668,4 +698,9 @@ export function createEditors(context: EditorContext): Editors {
   });
 
   return { openNodeEditor, openEdgeEditor, openRegionEditor, openTitleEditor, openRegionNameEditor, closeAll, reposition, refreshFromDoc, editingNode };
+}
+
+function isHistoryShortcut(event: KeyboardEvent): boolean {
+  const key = event.key.toLowerCase();
+  return (event.ctrlKey || event.metaKey) && (key === 'z' || key === 'y');
 }
