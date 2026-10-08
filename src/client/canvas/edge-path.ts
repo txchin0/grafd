@@ -15,16 +15,30 @@ const CURVE_TIGHTNESS = 0;
 const CARDINAL_TANGENT_DIVISOR = 6;
 const SAMPLES_PER_SEGMENT = 12;
 
+// The segment between an edge's endpoint centres, which a bend is measured against.
+export interface EdgeChord {
+  from: Point;
+  to: Point;
+}
+
 export interface EdgeGeometry {
   /** The points the drawn spline passes through, start to end. At least two. */
   through: Point[];
   /** `through` flattened to the polyline that defines where this edge visually is. */
   path: Point[];
+  /** Where the label sits and a bend is grabbed: the bend point itself once bent, so both follow the pointer. */
+  grip: Point;
+  /** The endpoint centres a bend is measured against; null where the edge cannot be bent (a self-loop). */
+  chord: EdgeChord | null;
   labelRect: Rect | null;
 }
 
-export function createEdgeGeometry(through: Point[]): EdgeGeometry {
-  return { through, path: flattenEdgePath(through), labelRect: null };
+export function createEdgeGeometry(
+  through: Point[],
+  { grip, chord }: { grip?: Point; chord: EdgeChord | null },
+): EdgeGeometry {
+  const path = flattenEdgePath(through);
+  return { through, path, grip: grip ?? edgePathMidpoint(path), chord, labelRect: null };
 }
 
 export function edgeStart(geometry: EdgeGeometry): Point {
@@ -123,4 +137,10 @@ export function edgePathMidpoint(path: Point[]): Point {
 export function edgePathApproach(path: Point[], backoff: number): Point {
   if (path.length < 2) return path[0];
   return pointAtArcLength(path, Math.max(0, totalPathLength(path) - backoff));
+}
+
+/** The start's counterpart of `edgePathApproach`: a point `backoff` along the path from its start. */
+export function edgePathDeparture(path: Point[], backoff: number): Point {
+  if (path.length < 2) return path[0];
+  return pointAtArcLength(path, Math.min(backoff, totalPathLength(path)));
 }

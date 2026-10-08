@@ -37,6 +37,26 @@ describe('lintCanvasLayer', () => {
     expect(text.split('\n')[diagnostics[0].line - 1]).toContain(START);
   });
 
+  it('passes an edge drawn with a line style, heads at both ends and a bend', () => {
+    const edge = { line: 'dotted', startHead: 'dot', endHead: 'triangle', bend: [0.5, -0.2] };
+    expect(rulesOf(layerText({ edges: { [EDGE_KEY]: edge } }))).toEqual([]);
+  });
+
+  it('warns about an unknown line, unknown heads and a malformed bend', () => {
+    const edge = { line: 'wavy', startHead: 'flag', endHead: 'spear', bend: [0.5, 'up'] };
+    expect(rulesOf(layerText({ edges: { [EDGE_KEY]: edge } })).sort()).toEqual([
+      'warning invalid-edge-bend',
+      'warning unknown-arrowhead',
+      'warning unknown-arrowhead',
+      'warning unknown-edge-line',
+    ]);
+  });
+
+  it('says which end of the edge an unknown head is on', () => {
+    const messages = lintCanvasLayer(layerText({ edges: { [EDGE_KEY]: { startHead: 'flag' } } }), FLOW).map((diagnostic) => diagnostic.message);
+    expect(messages).toEqual([expect.stringContaining('start head "flag"')]);
+  });
+
   it('reports entries the graph no longer has as info, which never fails a run', () => {
     const text = layerText({ nodes: { gone: { shape: 'ellipse' } }, edges: { 'gone -> #x': { color: 'red' } } });
     expect(rulesOf(text)).toEqual(['info stale-canvas-entry', 'info stale-canvas-entry']);

@@ -20,6 +20,7 @@ import {
   allNodes,
   assignMissingIds,
   buildModel,
+  isSameEdge,
   containingItems,
   contextBlockNamed,
   contextNamesReadableBy,
@@ -2425,5 +2426,24 @@ inherits: [Session]
       inheritedContextNames(target),
     );
     expect(copies[0].name).toBe('Session 2');
+  });
+});
+
+describe('isSameEdge', () => {
+  const FLOW = ['---', 'name: Same', '---', '', 'A', '  on_error: -> B', '  -> B', '  -> B', '', 'B', ''].join('\n');
+
+  it('recognises an error edge across rebuilds, though its spec is parsed afresh each time', () => {
+    const doc = parseFlow(FLOW);
+    const first = buildModel(doc, null).edges.find((edge) => edge.kind === 'error')!;
+    const second = buildModel(doc, null).edges.find((edge) => edge.kind === 'error')!;
+    expect(first.spec).not.toBe(second.spec);
+    expect(isSameEdge(first, second)).toBe(true);
+  });
+
+  it('tells two identical flow edges apart, and a flow edge from the error edge beside it', () => {
+    const [firstFlow, secondFlow, errorEdge] = buildModel(parseFlow(FLOW), null).edges;
+    expect(isSameEdge(firstFlow, secondFlow)).toBe(false);
+    expect(isSameEdge(firstFlow, errorEdge)).toBe(false);
+    expect(isSameEdge(firstFlow, { ...firstFlow })).toBe(true);
   });
 });

@@ -104,7 +104,11 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   `followIdentityChanges` re-files them when their `graph:` block is renamed and drops them when
   it is removed. `canvas-groups.ts` holds groups: grouping merges rather than nests, a group left
   with fewer than two members dissolves, and members of kinds the editor does not know are kept.
-  `canvas-layer-lint.ts` lints a layer against its .flow.
+  `canvas-layer-lint.ts` lints a layer against its .flow. `canvas-edge-style.ts` owns an edge
+  entry — colour, line style, a head at each end, and a `bend` stored as `[along, across]`
+  fractions of the chord between the endpoint centres, so it keeps its shape as nodes move.
+  Defaults are never written, and an error edge's default line is dashed, so reads and writes
+  are told the edge's kind and a read comes back with every field resolved.
 - `src/shared/flow-scan.ts` — the linter's positioned re-walk of the line grammar: mirrors
   `parseFlow`'s branch structure but keeps line numbers and records every line the parser
   would drop. `flow-diagnostics.ts` (severities), `flow-lint-syntax.ts` (structure),
@@ -129,15 +133,25 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
     animations, and the editing chrome (selection outlines, ports, marquee, in-flight edge).
     Owns the edge-geometry map that hit-testing reads. Nodes and regions share one selection:
     shift-click and marquee multi-select both kinds, a mixed selection moves as one gesture,
-    and resize handles appear only for a lone node or lone region.
+    and resize handles appear only for a lone node or lone region. Dragging an edge's grip (its
+    label, or the handle at its middle) bends it; the bend is painted as an override (keyed by
+    the edge's identity, so a rebuild mid-drag does not lose it) and written to the layer once,
+    on release, and dragging back onto the chord straightens it. What a press on a grip means is
+    `edge-bend-gesture.ts`, pure like the other gesture modules. Zoom-to-fit and exports measure
+    the top-level edges as well as the nodes, since a bend can carry an edge far outside them.
   - `scene-painter.ts` — draws a `FlowModel` in that model's own coordinates. Knows nothing
     about the camera, viewport, selection rectangle or gestures. Built fresh per render pass
     from explicit inputs, which is how an export renders the same scene with different
     settings (no hidden title, its own geometry map) without the view mutating itself.
   - `edge-layout.ts` — where each edge runs: border points (on the node's drawn shape), the
     bow that fans parallel edges apart, self-loops, and redirection onto a node inside an
-    unfolded frame. Pure — the shape of an edge is settled before anything is drawn, so it is
+    unfolded frame. A bent edge leaves its bundle and runs through its bend point
+    (`edge-bend.ts` holds the bend arithmetic); self-loops are never bent. Each geometry carries
+    its `grip` — where the label sits and a bend is grabbed — and the `chord` a bend is measured
+    against. Pure — the shape of an edge is settled before anything is drawn, so it is
     testable without a renderer.
+  - `arrowheads.ts` — the heads an edge can end in, as outlines shared by the painter and the
+    edge editor's picker icons. Every head is filled or drawn in lines, so no line is trimmed.
   - `node-shapes.ts` — a node shape inside its rectangle: the outline (and its SVG path data,
     shared by the painter and the picker icons), where a ray leaves it, and the box its text fits
     in. The rectangle stays the node's layout and hit area; an unfolded frame is always a

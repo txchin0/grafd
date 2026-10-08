@@ -28,6 +28,7 @@ import {
 import {
   displayRectOf,
   displayRects,
+  isSameEdge,
   membershipChangesForCombinedMove,
   membershipChangesForRegion,
   regionRectOf,
@@ -46,12 +47,16 @@ import {
   type Point,
 } from '../geometry.js';
 import { boundsOfRects, padRect, rectContainsRect } from '../../shared/rect-math.js';
+import { distanceToEdgePath, type EdgeGeometry } from './edge-path.js';
+import { drawnShapeOf, edgePathBounds, type EdgeBendOverrides, type EdgeGeometryMap } from './edge-layout.js';
 import {
-  distanceToEdgePath,
-  type EdgeGeometry,
-  edgePathMidpoint,
-} from './edge-path.js';
-import { drawnShapeOf, type EdgeGeometryMap } from './edge-layout.js';
+  beginEdgeBend,
+  bendOverridesOf,
+  extendEdgeBend,
+  gripContains,
+  type EdgeBendGesture,
+} from './edge-bend-gesture.js';
+import type { EdgeBend } from '../../shared/canvas-edge-style.js';
 import { shapeBorderPointToward, shapeTextBox } from './node-shapes.js';
 import { BADGE_HIT_RADIUS, nodeBadges, type BadgeHit } from './node-badges.js';
 import { ScenePainter } from './scene-painter.js';
@@ -215,6 +220,7 @@ type Gesture =
       scale: number;
       transform: StrokeTransform;
     }
+  | EdgeBendGesture
   | { type: 'pinch'; pointers: [number, number]; start: PinchAnchor };
 
 interface HeldScene {
@@ -308,6 +314,8 @@ export interface CanvasActions {
   regionClicked(region: RegionTarget): void;
   completeEdge(fromNode: FlowNode, drop: EdgeDrop): void;
   editEdge(edge: ModelEdge): void;
+  // Null takes the bend away, returning the edge to its automatic route.
+  bendEdge(edge: ModelEdge, bend: EdgeBend | null): void;
   editNodeTitle(node: FlowNode): void;
   editRegionTitle(region: RegionTarget): void;
   openExpand(node: FlowNode): void;
@@ -364,6 +372,10 @@ const PORT_RADIUS = 5;
 const PORT_HIT_RADIUS = 14;
 // Wider than the drawn stroke because rough.js jitters the ink a few pixels off the ideal curve.
 const EDGE_HIT_DISTANCE = 10;
+// Screen pixels: how large the grip is drawn on a selected, unlabelled edge.
+const EDGE_GRIP_DRAWN_RADIUS_PX = 4.5;
+// Screen pixels: the width of the selection outlines and the grip's ring.
+const SELECTION_LINE_WIDTH_PX = 1.4;
 const FIT_PADDING = 80;
 // Where the origin sits relative to the viewport centre when there is nothing to frame.
 const EMPTY_CANVAS_ORIGIN = { x: 200, y: 150 };
@@ -560,7 +572,7 @@ export class CanvasView {
   }
 
   setModel(model: FlowModel): void {
-    const selectedEdgeSpec = this.selectedEdge?.spec ?? null;
+    const previouslySelectedEdge = this.selectedEdge;
 
     this.model = model;
     // Top-level nodes are re-resolved by id; embedded subgraph nodes keep their identity
@@ -572,8 +584,10 @@ export class CanvasView {
           ?? (this.expansionLayer.isEmbedded(node) ? node : null))
         .filter((node): node is FlowNode => node != null),
     );
-    this.selectedEdge = model.edges.find((edge) => edge.spec === selectedEdgeSpec)
-      ?? (this.selectedEdge && this.expansionLayer.isEmbedded(this.selectedEdge.from) ? this.selectedEdge : null);
+    // An embedded edge's frame may not be laid out against the new model yet; the next render
+    // resolves it to its rebuilt counterpart, or drops it.
+    this.selectedEdge = previouslySelectedEdge && (this.currentEdgeMatching(previouslySelectedEdge)
+      ?? (this.expansionLayer.isEmbedded(previouslySelectedEdge.from) ? previouslySelectedEdge : null));
     // By name, not by identity: a region has no id, and rebuilding the model makes a fresh
     // ModelContext for the same block.
     const selectedRegionNames = [...this.selectedRegions].map((context) => context.block.name);
@@ -633,7 +647,7 @@ export class CanvasView {
 
   edgeAnchor(edge: ModelEdge): Point {
     const geometry = this.edgeGeometryOf(edge);
-    const mid = geometry ? edgePathMidpoint(geometry.path) : rectCenter(this.rect(edge.from));
+    const mid = geometry ? geometry.grip : rectCenter(this.rect(edge.from));
     const locus = this.expansionLayer.locusOf(edge.from);
     if (!locus) return mid;
     return transformPoint(mid, locus.transform);
@@ -751,8 +765,9 @@ export class CanvasView {
     this.actions.viewChanged?.();
   }
 
+  // Only the top-level edges are measured: an edge inside an unfolded frame is clipped to it.
   private contentBounds(): Rect | null {
-    return boundsOfRects(displayRects(this.model));
+    return boundsOfRects([...displayRects(this.model), ...edgePathBounds(this.model)]);
   }
 
   private clampedFitView(bounds: Rect, viewport: ViewportSize): View {
@@ -1021,6 +1036,13 @@ export class CanvasView {
       return;
     }
 
+    // A label is drawn over the nodes, so the selected edge's grip answers before they do.
+    const selectedEdgeBend = this.selectedEdge && this.edgeBendGrabbedAt(this.selectedEdge, world, screen);
+    if (selectedEdgeBend) {
+      this.gesture = selectedEdgeBend;
+      return;
+    }
+
     const handle = this.hitResizeHandle(world);
     if (handle) {
       this.gesture = {
@@ -1083,11 +1105,13 @@ export class CanvasView {
 
     const edge = this.hitEdge(world);
     if (edge) {
-      this.selectedEdge = edge;
       this.selection.clear();
       this.selectedRegions.clear();
       this.heldDrawings = [];
+      // Closing an editor can commit its edit, which rebuilds the model under the edge just hit.
       this.actions.canvasClicked();
+      this.selectedEdge = this.currentEdgeMatching(edge) ?? edge;
+      this.gesture = this.edgeBendGrabbedAt(this.selectedEdge, world, screen);
       this.requestRender();
       return;
     }
@@ -1358,6 +1382,10 @@ export class CanvasView {
       this.requestRender();
     } else if (gesture.type === 'draw') {
       if (extendStrokeGesture(gesture, world, screen)) this.requestRender();
+    } else if (gesture.type === 'edge-bend') {
+      const { edge } = gesture;
+      const local = this.pointInEdgeModel(edge, world);
+      if (extendEdgeBend(gesture, local, this.screenScaleOf(edge.from), screen, DRAG_THRESHOLD_PX)) this.requestRender();
     } else if (gesture.type === 'stroke-resize') {
       const localDelta = {
         x: (world.x - gesture.startWorld.x) / gesture.scale,
@@ -1440,6 +1468,8 @@ export class CanvasView {
       this.actions.createStroke(finishedStrokePoints(gesture, this.view.scale), gesture.frameHost, { ...this.drawStyle });
     } else if (gesture.type === 'stroke-resize' && !isIdentityTransform(gesture.transform)) {
       this.actions.resizeDrawings(gesture.drawings, gesture.transform);
+    } else if (gesture.type === 'edge-bend' && gesture.moved) {
+      this.actions.bendEdge(gesture.edge, gesture.bend);
     }
     this.requestRender();
   }
@@ -1877,16 +1907,61 @@ export class CanvasView {
     return null;
   }
 
+  // A model rebuild makes fresh ModelEdge objects: the open flow's on every setModel, a frame's
+  // subgraph whenever its file is edited. Null once the edge is gone or no longer drawn.
+  private currentEdgeMatching(edge: ModelEdge): ModelEdge | null {
+    const matches = (candidate: ModelEdge): boolean => isSameEdge(candidate, edge);
+    return this.model.edges.find(matches) ?? this.expansionLayer.findEdgeWhere(matches);
+  }
+
+  // An edit to a frame's file rebuilds only that frame's subgraph, lazily, during layout; nothing
+  // tells the view, so the selection is carried over to the rebuilt edge here.
+  private resolveSelectedEdge(): void {
+    if (this.selectedEdge) this.selectedEdge = this.currentEdgeMatching(this.selectedEdge);
+  }
+
+  // The bend drag a press at `world` would start on `edge`, or null when it misses the edge's grip.
+  private edgeBendGrabbedAt(edge: ModelEdge, world: Point, screen: Point): EdgeBendGesture | null {
+    const geometry = this.edgeGeometryOf(edge);
+    const local = this.pointInEdgeModel(edge, world);
+    if (!geometry || !gripContains(geometry, local, this.screenScaleOf(edge.from))) return null;
+    return beginEdgeBend(edge, geometry, local, screen);
+  }
+
+  private edgeGripContains(edge: ModelEdge, world: Point): boolean {
+    const geometry = this.edgeGeometryOf(edge);
+    return geometry != null && gripContains(geometry, this.pointInEdgeModel(edge, world), this.screenScaleOf(edge.from));
+  }
+
+  private hitEdgeGrip(world: Point): ModelEdge | null {
+    const edge = this.hitEdge(world);
+    return edge && this.edgeGripContains(edge, world) ? edge : null;
+  }
+
+  // An edge's geometry is in the coordinates of the model that draws it, which for an edge inside
+  // an unfolded frame is the frame's subgraph. That model's locus already composes every frame
+  // above it, so the point is mapped in one step rather than descended into frame by frame.
+  private pointInEdgeModel(edge: ModelEdge, world: Point): Point {
+    const locus = this.expansionLayer.locusOf(edge.from);
+    return locus ? inverseTransformPoint(world, locus.transform) : world;
+  }
+
+  private edgeBendsInFlight(): EdgeBendOverrides | null {
+    return this.gesture?.type === 'edge-bend' ? bendOverridesOf(this.gesture) : null;
+  }
+
   private updateCursor(world?: Point): void {
     let cursor = this.tool === 'node' || this.tool === 'draw' ? 'crosshair' : 'default';
     if (this.spaceDown || this.gesture?.type === 'pan') cursor = 'grab';
     else if (world && this.tool !== 'draw') {
+      // In the order a press tests them, so the cursor never promises what a press would not do.
       if (this.hitBadge(world)) cursor = 'pointer';
       else if (this.hitPort(world)) cursor = 'crosshair';
-      else if (this.hitResizeHandle(world) || this.hitRegionHandle(world) || this.hitStrokeResizeHandle(world)) {
-        cursor = 'nwse-resize';
-      }
+      else if (this.hitStrokeResizeHandle(world)) cursor = 'nwse-resize';
+      else if (this.selectedEdge && this.edgeGripContains(this.selectedEdge, world)) cursor = 'move';
+      else if (this.hitResizeHandle(world) || this.hitRegionHandle(world)) cursor = 'nwse-resize';
       else if (this.hitNode(world) || this.hitGhost(world)) cursor = 'move';
+      else if (this.hitEdgeGrip(world)) cursor = 'move';
       else if (this.hitRegion(world)) cursor = 'move';
     }
     this.canvas.style.cursor = cursor;
@@ -1904,7 +1979,8 @@ export class CanvasView {
   private scenePainter(hiddenTitles: HiddenCanvasTitles): ScenePainter {
     return new ScenePainter({
       regionRects: this.regionRectsForPainting(),
-      drawingTransforms: this.strokeTransformsInFlight() ?? undefined,
+      drawingTransforms: this.strokeTransformsInFlight(),
+      edgeBends: this.edgeBendsInFlight(),
       ctx: this.ctx,
       rough: this.rough,
       baseRoughness: this.baseRoughness,
@@ -1918,18 +1994,19 @@ export class CanvasView {
   private render(): void {
     const { ctx } = this;
     this.edgeGeometry.clear();
-    const painter = this.scenePainter(this.hiddenTitles);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
     if (this.sceneTransition) {
-      this.renderSceneTransition(this.sceneTransition, painter);
+      this.renderSceneTransition(this.sceneTransition, this.scenePainter(this.hiddenTitles));
       return;
     }
 
     const expansionState = this.expansionLayer.layout(this.model, performance.now());
     this.expansionLayer.collectLoci(this.model);
     this.resolveHeldDrawings();
+    this.resolveSelectedEdge();
+    const painter = this.scenePainter(this.hiddenTitles);
     const dpr = this.devicePixelRatio;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.drawGridIfVisible(this.view);
@@ -2094,7 +2171,7 @@ export class CanvasView {
     const inflate = SELECTION_OUTLINE_INFLATE;
     ctx.save();
     ctx.strokeStyle = canvasPalette.select;
-    ctx.lineWidth = 1.4 / this.view.scale;
+    ctx.lineWidth = SELECTION_LINE_WIDTH_PX / this.view.scale;
     ctx.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
     for (const node of this.selection) {
       if (!this.isNodeVisible(node)) continue;
@@ -2110,6 +2187,8 @@ export class CanvasView {
     }
     ctx.restore();
 
+    this.drawSelectedEdgeGrip();
+
     const handleRect = this.resizeHandleRect();
     if (!handleRect) return;
     const handleSize = 8 / this.view.scale;
@@ -2117,6 +2196,25 @@ export class CanvasView {
     for (const origin of selectionHandleOrigins(handleRect, handleSize)) {
       ctx.fillRect(origin.x, origin.y, handleSize, handleSize);
     }
+  }
+
+  // A labelled edge is grabbed by its label, so only an unlabelled one gets a drawn grip; a
+  // self-loop, which cannot be bent, gets none.
+  private drawSelectedEdgeGrip(): void {
+    const edge = this.selectedEdge;
+    const geometry = edge ? this.edgeGeometryOf(edge) : null;
+    if (!edge || !geometry?.chord || geometry.labelRect) return;
+    const center = this.edgeAnchor(edge);
+    const { ctx } = this;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, EDGE_GRIP_DRAWN_RADIUS_PX / this.view.scale, 0, Math.PI * 2);
+    ctx.fillStyle = canvasPalette.portFill;
+    ctx.fill();
+    ctx.strokeStyle = canvasPalette.select;
+    ctx.lineWidth = SELECTION_LINE_WIDTH_PX / this.view.scale;
+    ctx.stroke();
+    ctx.restore();
   }
 
   // Corner handles belong to a selection of exactly one node, one stroke or one group; any other
@@ -2141,7 +2239,7 @@ export class CanvasView {
       if (!rect) continue;
       ctx.save();
       ctx.strokeStyle = canvasPalette.select;
-      ctx.lineWidth = 1.4 / this.view.scale;
+      ctx.lineWidth = SELECTION_LINE_WIDTH_PX / this.view.scale;
       ctx.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
       ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
       ctx.restore();
@@ -2172,7 +2270,7 @@ export class CanvasView {
         ctx.fillStyle = canvasPalette.portFill;
         ctx.fill();
         ctx.strokeStyle = canvasPalette.select;
-        ctx.lineWidth = 1.4 / this.view.scale;
+        ctx.lineWidth = SELECTION_LINE_WIDTH_PX / this.view.scale;
         ctx.stroke();
       }
     }
@@ -2187,7 +2285,7 @@ export class CanvasView {
       ctx.save();
       ctx.strokeStyle = canvasPalette.select;
       ctx.setLineDash([7 / this.view.scale, 5 / this.view.scale]);
-      ctx.lineWidth = 1.4 / this.view.scale;
+      ctx.lineWidth = SELECTION_LINE_WIDTH_PX / this.view.scale;
       ctx.strokeRect(gesture.rect.x, gesture.rect.y, gesture.rect.w, gesture.rect.h);
       ctx.restore();
     } else if (gesture.type === 'marquee' && gesture.rect) {
@@ -2210,7 +2308,7 @@ export class CanvasView {
       ctx.lineTo(end.x, end.y);
       ctx.stroke();
       ctx.restore();
-      painter.drawArrowhead(start, end, canvasPalette.select);
+      painter.drawArrowhead('arrow', start, end, canvasPalette.select);
       if (gesture.hoverTarget) {
         const { x, y, w, h } = this.rect(gesture.hoverTarget);
         ctx.strokeStyle = canvasPalette.select;

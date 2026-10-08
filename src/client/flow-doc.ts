@@ -34,6 +34,7 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import type { NodeShape } from '../shared/canvas-layer.js';
+import type { EdgeKind, EdgeStyle } from '../shared/canvas-edge-style.js';
 import { strokeBounds, type Stroke } from '../shared/canvas-drawings.js';
 import type { DisplayGeometry } from './canvas/expansion.js';
 import type { Point } from './geometry.js';
@@ -46,7 +47,7 @@ export interface GhostNode {
   pos: Rect;
 }
 
-export type EdgeKind = 'flow' | 'error';
+export type { EdgeKind };
 
 /** Identity of a subgraph expansion that `{Inner}` names resolve against (spec §5.7). */
 export type ExpandIdentity =
@@ -63,6 +64,19 @@ export interface ModelEdge {
   spec: EdgeSpec;
   kind: EdgeKind;
   to?: FlowNode | GhostNode;
+}
+
+// What identifies an edge across builds of the model, which make fresh ModelEdge objects. A flow
+// edge is its EdgeSpec object, which survives a rebuild. An error edge's spec is parsed afresh from
+// `on_error` on every build, so it is the node carrying the property that identifies it.
+export type EdgeIdentity = EdgeSpec | FlowNode;
+
+export function edgeIdentityOf(edge: ModelEdge): EdgeIdentity {
+  return edge.kind === 'error' ? edge.from : edge.spec;
+}
+
+export function isSameEdge(a: ModelEdge, b: ModelEdge): boolean {
+  return edgeIdentityOf(a) === edgeIdentityOf(b);
 }
 
 export interface NodeTraits {
@@ -106,7 +120,7 @@ export interface FlowModel {
 
 export interface ModelVisuals {
   shapeOf(node: FlowNode): NodeShape;
-  edgeColorOf(edge: ModelEdge): string | null;
+  edgeStyleOf(edge: ModelEdge): EdgeStyle;
   // The strokes drawn in this model's graph scope, in its coordinates.
   strokes(): Stroke[];
   // The ids of the strokes picked up together with this one — its whole group, itself included —

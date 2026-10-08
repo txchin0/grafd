@@ -184,7 +184,7 @@ function reportEdgeCrossings(
     warning(
       'too-many-edge-crossings',
       line,
-      `This graph has ${crossings} pairs of edges that cross (limit ${MAX_EDGE_CROSSING_PAIRS}); rearrange nodes so fewer edges overlap.`,
+      `This graph has ${crossings} pairs of edges that cross (limit ${MAX_EDGE_CROSSING_PAIRS}); rearrange nodes so fewer edges overlap. Bending edges does not change this count, which measures straight lines between node centres.`,
     ),
   );
 }

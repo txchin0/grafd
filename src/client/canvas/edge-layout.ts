@@ -5,17 +5,29 @@
 // before anything is drawn, so it can be computed and tested without a renderer.
 
 import { DEFAULT_NODE_SHAPE, type NodeShape } from '../../shared/canvas-layer.js';
+import type { EdgeBend } from '../../shared/canvas-edge-style.js';
 import type { FlowNode, Rect } from '../../shared/flow-format.js';
-import { displayRectOf, type FlowModel, type GhostNode, type ModelEdge } from '../flow-doc.js';
 import {
+  displayRectOf,
+  edgeIdentityOf,
+  type EdgeIdentity,
+  type FlowModel,
+  type GhostNode,
+  type ModelEdge,
+} from '../flow-doc.js';
+import { edgeStyleIn } from '../model-visuals.js';
+import {
+  boundsOfPoints,
   halfExtentAlong,
   midpointOf,
   offsetAlong,
   perpendicular,
   rectCenter,
+  rectContains,
   unitVectorBetween,
   type Point,
 } from '../geometry.js';
+import { bendPointOf } from './edge-bend.js';
 import { createEdgeGeometry, type EdgeGeometry } from './edge-path.js';
 import { transformRect } from './expansion.js';
 import { shapeBorderPointFrom, shapeBorderPointToward } from './node-shapes.js';
@@ -59,12 +71,56 @@ function isGhost(target: FlowNode | GhostNode): target is GhostNode {
   return 'ghost' in target && target.ghost === true;
 }
 
-export function layOutModelEdges(model: FlowModel, geometry: EdgeGeometryMap): void {
+// A drag in progress, by edge: the bend it would write, or null for the edge with no bend at all.
+// Keyed by identity rather than by ModelEdge, so a model rebuilt mid-drag still finds it.
+export type EdgeBendOverrides = ReadonlyMap<EdgeIdentity, EdgeBend | null>;
+
+export function layOutModelEdges(model: FlowModel, geometry: EdgeGeometryMap, bendOverrides: EdgeBendOverrides | null = null): void {
+  const bendOf = (edge: ModelEdge): EdgeBend | null => {
+    const identity = edgeIdentityOf(edge);
+    return bendOverrides?.has(identity) ? bendOverrides.get(identity)! : edgeStyleIn(model, edge).bend;
+  };
   for (const bundle of bundleEdgesByNodePair(model.edges, geometry).values()) {
-    bundle.forEach((edge, occurrence) => {
-      geometry.set(edge, geometryOfEdge(model, edge, laneOf(occurrence, bundle.length), occurrence));
-    });
+    layOutBundle(model, bundle, bendOf, geometry);
   }
+}
+
+// One rect per drawn edge, from its laid-out path. A bend can carry an edge far outside the nodes
+// it joins, so framing a model has to measure its edges as well as its nodes.
+export function edgePathBounds(model: FlowModel): Rect[] {
+  const geometry: EdgeGeometryMap = new Map();
+  layOutModelEdges(model, geometry);
+  return [...geometry.values()]
+    .map((edge) => boundsOfPoints(edge.path))
+    .filter((rect): rect is Rect => rect != null);
+}
+
+// A bent edge leaves its bundle: it runs where the user put it, and the edges still laid out
+// automatically share the lanes among themselves. So while one edge of three is being bent, the
+// other two re-lane as a pair — live, because the drag's bend is laid out like a stored one.
+// Self-loops are never bent, whatever their entry says, so their nesting never shifts.
+function layOutBundle(
+  model: FlowModel,
+  bundle: ModelEdge[],
+  bendOf: (edge: ModelEdge) => EdgeBend | null,
+  geometry: EdgeGeometryMap,
+): void {
+  if (bundle[0].to === bundle[0].from) {
+    bundle.forEach((edge, occurrence) => geometry.set(edge, selfLoopGeometry(model, edge.from, occurrence)));
+    return;
+  }
+  const unbent: ModelEdge[] = [];
+  for (const edge of bundle) {
+    const bend = bendOf(edge);
+    const bent = bend ? bentGeometry(endpointsOf(model, edge, edge.to!), bend) : null;
+    if (bent) geometry.set(edge, bent);
+    else unbent.push(edge);
+  }
+  unbent.forEach((edge, occurrence) => {
+    const target = edge.to!;
+    const lane = inCanonicalOrientation(laneOf(occurrence, unbent.length), edge.from, target);
+    geometry.set(edge, lanedGeometry(endpointsOf(model, edge, target), lane));
+  });
 }
 
 // Edges are laid out per unordered node pair, because how far one is displaced depends on how
@@ -103,12 +159,6 @@ function inCanonicalOrientation(lane: Lane, from: FlowNode, to: FlowNode | Ghost
   return from.name <= to.name ? lane : { index: -lane.index, extent: lane.extent };
 }
 
-function geometryOfEdge(model: FlowModel, edge: ModelEdge, lane: Lane, occurrence: number): EdgeGeometry {
-  const target = edge.to!;
-  if (target === edge.from) return selfLoopGeometry(model, edge.from, occurrence);
-  return lanedGeometry(endpointsOf(model, edge, target), inCanonicalOrientation(lane, edge.from, target));
-}
-
 // An edge normally spans its two nodes' borders, but either end is redirected onto a named
 // node inside an unfolded frame when the `{Inner}` form names one (spec §5.7, §5.8).
 function endpointsOf(model: FlowModel, edge: ModelEdge, target: FlowNode | GhostNode): { from: Endpoint; to: Endpoint } {
@@ -145,7 +195,23 @@ function lanedGeometry(ends: { from: Endpoint; to: Endpoint }, lane: Lane): Edge
   const start = shapeBorderPointFrom(ends.from.shape, ends.from.rect, offsetAlong(fromCenter, across, offset), towardTarget);
   const end = shapeBorderPointFrom(ends.to.shape, ends.to.rect, offsetAlong(toCenter, across, offset), towardSource);
   const mid = offsetAlong(midpointOf(start, end), across, outwardBow(start, end, lane));
-  return createEdgeGeometry([start, mid, end]);
+  return createEdgeGeometry([start, mid, end], { chord: { from: fromCenter, to: toCenter } });
+}
+
+// Null when the chord has no length to measure the bend against, which leaves the edge unbent.
+function bentGeometry(ends: { from: Endpoint; to: Endpoint }, bend: EdgeBend): EdgeGeometry | null {
+  const chord = { from: rectCenter(ends.from.rect), to: rectCenter(ends.to.rect) };
+  const bendPoint = bendPointOf(bend, chord);
+  if (!bendPoint) return null;
+  const start = shapeBorderPointToward(ends.from.shape, ends.from.rect, aimFrom(ends.from.rect, bendPoint, chord.to));
+  const end = shapeBorderPointToward(ends.to.shape, ends.to.rect, aimFrom(ends.to.rect, bendPoint, chord.from));
+  return createEdgeGeometry([start, bendPoint, end], { grip: bendPoint, chord });
+}
+
+// An end leaves its node facing the bend — unless the bend was dragged inside that node, where
+// facing it would point the end back into the node; it faces the other end instead.
+function aimFrom(rect: Rect, bendPoint: Point, otherCenter: Point): Point {
+  return rectContains(rect, bendPoint) ? otherCenter : bendPoint;
 }
 
 // The whole ladder is scaled by one factor rather than clamped lane by lane, so a short edge
@@ -175,7 +241,7 @@ function selfLoopGeometry(model: FlowModel, node: FlowNode, occurrence: number):
   const start = shapeBorderPointToward(shape, rect, { x: x + w - SELF_LOOP_START_INSET - nesting, y });
   const end = shapeBorderPointToward(shape, rect, { x: x + w, y: y + SELF_LOOP_END_DROP + nesting });
   const apex = { x: x + w + SELF_LOOP_APEX_OFFSET.x + nesting, y: y + SELF_LOOP_APEX_OFFSET.y - nesting };
-  return createEdgeGeometry([start, apex, end]);
+  return createEdgeGeometry([start, apex, end], { chord: null });
 }
 
 // A host frame's named inner node mapped into this model's coordinates, so an edge can start

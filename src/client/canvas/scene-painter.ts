@@ -22,8 +22,17 @@ import type { Point } from '../geometry.js';
 import { unionRect } from '../../shared/rect-math.js';
 import { canvasPalette, resolveLayerColor } from '../theme.js';
 import type { HiddenCanvasTitles } from './canvas-view.js';
-import { edgeEnd, edgePathApproach, edgePathMidpoint } from './edge-path.js';
-import { drawnShapeOf, edgeReachesInsideOpenFrame, layOutModelEdges, type EdgeGeometryMap } from './edge-layout.js';
+import type { Arrowhead, EdgeStyle, LineStyle } from '../../shared/canvas-edge-style.js';
+import { edgeStyleIn } from '../model-visuals.js';
+import { arrowheadIsFilled, arrowheadOutline, type ArrowheadOutline } from './arrowheads.js';
+import { edgeEnd, edgePathApproach, edgePathDeparture, edgeStart } from './edge-path.js';
+import {
+  drawnShapeOf,
+  edgeReachesInsideOpenFrame,
+  layOutModelEdges,
+  type EdgeBendOverrides,
+  type EdgeGeometryMap,
+} from './edge-layout.js';
 import { STROKE_LINE_WIDTHS, transformedStroke, type StrokeTransform } from '../../shared/canvas-drawings.js';
 import { storedDrawingKey } from './drawing-selection.js';
 import type { ExpansionLayer, FrameExpansion } from './expansion.js';
@@ -67,6 +76,22 @@ function regionHachureAngle(seed: number): number {
 }
 
 const ARROWHEAD_TANGENT_BACKOFF = 12;
+const ARROWHEAD_LINE_WIDTH = 1.6;
+
+// How each line style is stroked. Rough draws a line twice, and its two passes drift apart: that
+// reads as sketchiness on a solid or dashed line, but smears dots, so a dotted line is drawn once.
+// Edges are stroked with round caps, which is what makes a zero-length dash a true dot.
+interface LineStroke {
+  dash: number[];
+  singlePass: boolean;
+}
+
+const EDGE_LINE_CAP: CanvasLineCap = 'round';
+const LINE_STROKES: Record<LineStyle, LineStroke> = {
+  solid: { dash: [], singlePass: false },
+  dashed: { dash: [7, 5], singlePass: false },
+  dotted: { dash: [0, 5], singlePass: true },
+};
 const EDGE_DATA_LINE_HEIGHT = 13;
 const EDGE_DATA_GAP = 2;
 // Below this the unfolded subgraph is not yet worth drawing, and the clip plus alpha cost more
@@ -89,7 +114,9 @@ export interface ScenePainterOptions {
   regionRects?: ReadonlyMap<ContextBlock, Rect>;
   // How each stroke a gesture is moving or resizing has been carried so far, in its own model's
   // units, keyed by `storedDrawingKey`. The layer is written only when the drag lands.
-  drawingTransforms?: ReadonlyMap<string, StrokeTransform>;
+  drawingTransforms?: ReadonlyMap<string, StrokeTransform> | null;
+  // The bend an edge being dragged would take, painted before anything is written.
+  edgeBends?: EdgeBendOverrides | null;
 }
 
 function seedFrom(text: string): number {
@@ -110,6 +137,7 @@ export class ScenePainter {
   private readonly expansions: ExpansionLayer;
   private readonly regionRects: ReadonlyMap<ContextBlock, Rect> | null;
   private readonly drawingTransforms: ReadonlyMap<string, StrokeTransform> | null;
+  private readonly edgeBends: EdgeBendOverrides | null;
 
   constructor(options: ScenePainterOptions) {
     this.ctx = options.ctx;
@@ -121,6 +149,7 @@ export class ScenePainter {
     this.expansions = options.expansions;
     this.regionRects = options.regionRects ?? null;
     this.drawingTransforms = options.drawingTransforms ?? null;
+    this.edgeBends = options.edgeBends ?? null;
   }
 
   // Labels get their own pass after nodes so they stay readable even where an edge dives under
@@ -131,7 +160,7 @@ export class ScenePainter {
     // for an unfolded frame therefore places that file's regions above the host frame and below
     // the inner nodes (R20a) with no special casing.
     this.drawRegions(model);
-    layOutModelEdges(model, this.edgeGeometry);
+    layOutModelEdges(model, this.edgeGeometry, this.edgeBends);
     const redirected: ModelEdge[] = [];
     for (const edge of model.edges) {
       if (edgeReachesInsideOpenFrame(model, edge)) redirected.push(edge);
@@ -194,20 +223,36 @@ export class ScenePainter {
   }
 
   // The gesture overlay draws its own in-flight edge, so this primitive is shared with the view.
-  drawArrowhead(fromPoint: Point, tip: Point, color: string): void {
+  // A head is always drawn solid, whatever dash its line has.
+  drawArrowhead(kind: Arrowhead, fromPoint: Point, tip: Point, color: string): void {
+    const outline = arrowheadOutline(kind, fromPoint, tip);
+    if (!outline) return;
     const { ctx } = this;
-    const angle = Math.atan2(tip.y - fromPoint.y, tip.x - fromPoint.x);
-    const length = 11;
-    const spread = 0.46;
+    ctx.save();
+    ctx.setLineDash([]);
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1.6;
+    ctx.fillStyle = color;
+    ctx.lineWidth = ARROWHEAD_LINE_WIDTH;
     ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(tip.x, tip.y);
-    ctx.lineTo(tip.x - length * Math.cos(angle - spread), tip.y - length * Math.sin(angle - spread));
-    ctx.moveTo(tip.x, tip.y);
-    ctx.lineTo(tip.x - length * Math.cos(angle + spread), tip.y - length * Math.sin(angle + spread));
+    ctx.lineJoin = 'round';
+    this.traceArrowhead(outline);
+    if (arrowheadIsFilled(outline)) ctx.fill();
     ctx.stroke();
+    ctx.restore();
+  }
+
+  private traceArrowhead(outline: ArrowheadOutline): void {
+    const { ctx } = this;
+    ctx.beginPath();
+    if (outline.kind === 'circle') {
+      ctx.arc(outline.center.x, outline.center.y, outline.radius, 0, Math.PI * 2);
+      return;
+    }
+    const polylines = outline.kind === 'lines' ? outline.strokes : [outline.points];
+    for (const points of polylines) {
+      points.forEach((point, index) => (index === 0 ? ctx.moveTo(point.x, point.y) : ctx.lineTo(point.x, point.y)));
+    }
+    if (outline.kind === 'polygon') ctx.closePath();
   }
 
   private roughnessFor(elementRoughness: number): number {
@@ -219,35 +264,41 @@ export class ScenePainter {
   }
 
   // Selection outranks the canvas layer's colour, which outranks the edge kind's default.
-  private edgeColor(model: FlowModel, edge: ModelEdge): string {
+  private edgeColor(edge: ModelEdge, style: EdgeStyle): string {
     if (edge === this.selectedEdge) return canvasPalette.select;
-    const layerColor = model.visuals?.edgeColorOf(edge);
-    if (layerColor) return resolveLayerColor(layerColor);
+    if (style.color) return resolveLayerColor(style.color);
     return edge.kind === 'error' ? canvasPalette.error : canvasPalette.edge;
   }
 
   private drawEdge(model: FlowModel, edge: ModelEdge): void {
     const geometry = this.edgeGeometry.get(edge);
     if (!geometry) return;
-    const color = this.edgeColor(model, edge);
+    const style = edgeStyleIn(model, edge);
+    const color = this.edgeColor(edge, style);
+    const lineStroke = LINE_STROKES[style.line];
     const options: RoughOptions = {
       seed: seedFrom(`${edge.from.name}->${edge.spec.target}:${edge.spec.label ?? ''}`),
       stroke: color,
       strokeWidth: edge === this.selectedEdge ? 2.2 : 1.5,
       roughness: this.roughnessFor(EDGE_ROUGHNESS),
       bowing: 0.4,
+      disableMultiStroke: lineStroke.singlePass,
     };
-    if (edge.kind === 'error') options.strokeLineDash = [7, 5];
+    if (lineStroke.dash.length > 0) options.strokeLineDash = lineStroke.dash;
 
+    this.ctx.save();
+    this.ctx.lineCap = EDGE_LINE_CAP;
     this.rough.curve(geometry.through.map((point) => [point.x, point.y] as [number, number]), options);
-    this.drawArrowhead(edgePathApproach(geometry.path, ARROWHEAD_TANGENT_BACKOFF), edgeEnd(geometry), color);
+    this.ctx.restore();
+    this.drawArrowhead(style.endHead, edgePathApproach(geometry.path, ARROWHEAD_TANGENT_BACKOFF), edgeEnd(geometry), color);
+    this.drawArrowhead(style.startHead, edgePathDeparture(geometry.path, ARROWHEAD_TANGENT_BACKOFF), edgeStart(geometry), color);
   }
 
   private drawEdgeLabel(edge: ModelEdge): void {
     const geometry = this.edgeGeometry.get(edge);
     if (!geometry) return;
     const labelText = edge.spec.label ?? (edge.kind === 'error' ? 'on error' : null);
-    const anchor = edgePathMidpoint(geometry.path);
+    const anchor = geometry.grip;
     const fields = edge.spec.data ?? [];
 
     const labelRect = labelText ? this.drawEdgeLabelPill(labelText, anchor, edge.kind === 'error') : null;

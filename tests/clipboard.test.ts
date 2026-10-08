@@ -13,12 +13,22 @@ import {
   applyCapturedVisuals,
   captureVisuals,
   documentIdentities,
-  edgeColorOf,
   emptyCanvasLayer,
   nodeShapeOf,
-  setEdgeColor,
   setNodeShape,
+  type CanvasLayer,
 } from '../src/shared/canvas-layer.js';
+import { edgeStyleOf, setEdgeStyle } from '../src/shared/canvas-edge-style.js';
+
+// An edge's colour reads and writes alike whatever its kind, so these tests treat every edge as a
+// flow edge.
+function setEdgeColor(layer: CanvasLayer, edgeKey: string, color: string | null): void {
+  setEdgeStyle(layer, edgeKey, { color }, 'flow');
+}
+
+function edgeColorOf(layer: CanvasLayer | null, edgeKey: string | null): string | null {
+  return edgeStyleOf(layer, edgeKey, 'flow').color;
+}
 
 const MAIN = `---
 name: Main

@@ -822,7 +822,7 @@ Editor-owned properties are the one part of a `.flow` file that a future version
 
 Every visual style the editor offers is stored outside the `.flow`, in the graph's canvas layer: a JSON file named after its graph with `.canvas.json` appended (`auth/login.flow` → `auth/login.flow.canvas.json`). The editor writes it only while it holds something; a graph with no styling has no canvas layer.
 
-A canvas layer is entirely editor-owned. Its content is not part of this format — it records node shapes and edge colours, keyed by node `id` and by a key derived from each edge, free drawings, filed under the graph scope they were drawn in (the file body, or a `graph:` block by name), groups of drawings the editor moves as one, and whatever decoration later editor versions add — and nothing in it changes what a graph means. There is no style property in the `.flow` grammar: a `shape:` or `color:` line in a `.flow` is an unknown property, not a style.
+A canvas layer is entirely editor-owned. Its content is not part of this format — it records node shapes and how each edge is drawn (its colour, line style, arrowheads and bend), keyed by node `id` and by a key derived from each edge, free drawings, filed under the graph scope they were drawn in (the file body, or a `graph:` block by name), groups of drawings the editor moves as one, and whatever decoration later editor versions add — and nothing in it changes what a graph means. There is no style property in the `.flow` grammar: a `shape:` or `color:` line in a `.flow` is an unknown property, not a style.
 
 **Rules for agents:**
 

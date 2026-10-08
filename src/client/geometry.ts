@@ -71,6 +71,19 @@ export function offsetAlong(point: Point, direction: Point, distance: number): P
   return { x: point.x + direction.x * distance, y: point.y + direction.y * distance };
 }
 
+export function boundsOfPoints(points: readonly Point[]): Rect | null {
+  if (points.length === 0) return null;
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  return { x: left, y: top, w: Math.max(...xs) - left, h: Math.max(...ys) - top };
+}
+
+export function distanceBetween(a: Point, b: Point): number {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
 export function midpointOf(a: Point, b: Point): Point {
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }

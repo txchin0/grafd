@@ -140,12 +140,23 @@
             <span class="field-caption">colour</span>
             <div id="ee-color" class="choice-row" role="group" aria-label="Edge colour"></div>
           </div>
+          <div id="ee-line-field">
+            <span class="field-caption">line</span>
+            <div id="ee-line" class="choice-row" role="group" aria-label="Line style"></div>
+          </div>
+          <div id="ee-heads-field">
+            <span class="field-caption">arrowheads — start, end</span>
+            <div id="ee-start-head" class="choice-row" role="group" aria-label="Start arrowhead"></div>
+            <div id="ee-end-head" class="choice-row" role="group" aria-label="End arrowhead"></div>
+          </div>
           <div id="ee-data">
             <span class="field-caption">data</span>
             <div id="ee-data-rows"></div>
             <button id="ee-add-field" type="button" class="quiet-button">+ field</button>
           </div>
           <div class="editor-actions">
+            <button id="ee-straighten" type="button" class="quiet-button hidden">Straighten</button>
+            <span class="spacer"></span>
             <button id="ee-delete" type="button" class="danger-button">Delete edge</button>
           </div>
         </div>
@@ -173,6 +184,7 @@
         </div>
 
         <div id="help-overlay" class="hidden">
+          <button id="help-close" type="button" class="quiet-button" title="Close" aria-label="Close shortcuts">✕</button>
           <h2>Shortcuts</h2>
           <table>
             <tr><td>V / 1, N / 2, C / 3, D / 4</td><td>switch between the Select, Add-node, Region and Draw tools</td></tr>

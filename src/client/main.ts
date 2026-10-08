@@ -81,6 +81,7 @@ import {
 import { drawingsForExtractedDocument } from '../shared/canvas-drawings.js';
 import { CanvasLayerStore } from './canvas-layer-store.js';
 import { createCanvasLayerSync } from './canvas-layer-sync.js';
+import type { EdgeStylePatch } from '../shared/canvas-edge-style.js';
 import { dressModel } from './model-visuals.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
 import { ServerWorkspace, serverIsAvailable } from './workspace-server.js';
@@ -164,6 +165,7 @@ const elements = {
   sidebarReveal: elementById<HTMLButtonElement>('sidebar-reveal'),
   helpToggle: elementById<HTMLButtonElement>('help-toggle'),
   helpOverlay: elementById<HTMLDivElement>('help-overlay'),
+  helpClose: elementById<HTMLButtonElement>('help-close'),
   toolSelectButton: elementById<HTMLButtonElement>('tool-select-button'),
   toolNodeButton: elementById<HTMLButtonElement>('tool-node-button'),
   toolContextButton: elementById<HTMLButtonElement>('tool-context-button'),
@@ -1088,6 +1090,13 @@ function applyLayerEdit(owner: DocumentOwner, edit: () => boolean): void {
   if (edit()) rerenderAfterEditTo(owner);
 }
 
+// The layer an edge's look is written to is that of the file declaring it — for an edge inside an
+// unfolded frame, the subgraph's file.
+function applyEdgeStyleEdit(edge: ModelEdge, patch: EdgeStylePatch): void {
+  const owner = ownerOf(edge.from);
+  applyLayerEdit(owner, () => layerSync.setEdgeStyle(owner, edge, patch));
+}
+
 function applyEdit(node: FlowNode, mutation: () => void, options?: { commit?: CommitTiming }): void {
   applyToDoc(ownerOf(node), mutation, options);
 }
@@ -1196,8 +1205,8 @@ function findNode(nodeId: string): FlowNode | null {
   return inOpenFlow ?? expansions.findNodeById(nodeId);
 }
 
-function findEdge(spec: EdgeSpec): ModelEdge | null {
-  return openFlow?.model.edges.find((edge) => edge.spec === spec) ?? expansions.findEdgeBySpec(spec);
+function findEdgeWhere(matches: (edge: ModelEdge) => boolean): ModelEdge | null {
+  return openFlow?.model.edges.find(matches) ?? expansions.findEdgeWhere(matches);
 }
 
 function knownDocuments(): DocumentOwner[] {
@@ -1464,7 +1473,7 @@ function createNodeForEmptyDrop(
 }
 
 function editCreatedEdge(spec: EdgeSpec | null): void {
-  const createdEdge = spec ? findEdge(spec) : null;
+  const createdEdge = spec ? findEdgeWhere((edge) => edge.spec === spec) : null;
   if (!createdEdge) return;
   view.selectedEdge = createdEdge;
   editors.openEdgeEditor(createdEdge);
@@ -1577,6 +1586,7 @@ const view = new CanvasView(elementById<HTMLCanvasElement>('canvas'), {
   regionClicked: (region) => editors.openRegionEditor(region),
   completeEdge,
   editEdge: (edge) => editors.openEdgeEditor(edge),
+  bendEdge: (edge, bend) => applyEdgeStyleEdit(edge, { bend }),
   editNodeTitle: (node) => editors.openTitleEditor(node),
   editRegionTitle: (region) => editors.openRegionNameEditor(region),
   openExpand,
@@ -1615,7 +1625,7 @@ const editors: Editors = createEditors({
   deleteRegion: (region) => contextOps.deleteRegion(region),
   readableContexts: (node) => contextOps.readableContexts(node),
   findNode,
-  findEdge,
+  findEdge: (reference) => findEdgeWhere((edge) => FlowDoc.isSameEdge(edge, reference)),
   renameNode: renameNodeAction,
   applyEdit,
   applyEditNow: (node, mutation) => applyEdit(node, mutation, { commit: 'now' }),
@@ -1640,11 +1650,8 @@ const editors: Editors = createEditors({
     const owner = ownerOf(node);
     applyLayerEdit(owner, () => layerSync.setShape(owner, node, shape));
   },
-  edgeColorOf: (edge) => layerSync.edgeColorOf(ownerOf(edge.from), edge),
-  applyEdgeColorEdit: (edge, color) => {
-    const owner = ownerOf(edge.from);
-    applyLayerEdit(owner, () => layerSync.setEdgeColor(owner, edge, color));
-  },
+  edgeStyleOf: (edge) => layerSync.edgeStyleOf(ownerOf(edge.from), edge),
+  applyEdgeStyleEdit,
 });
 
 contextOps = createContextOrchestration({
@@ -1796,11 +1803,13 @@ function nodeMenuItems(node: FlowNode, screenPoint: Point): MenuItem[] {
 }
 
 function edgeMenuItems(edge: ModelEdge): MenuItem[] {
-  return [
-    { label: 'Edit label', onSelect: () => editors.openEdgeEditor(edge) },
-    { separator: true },
-    { label: 'Delete edge', danger: true, onSelect: deleteSelection },
-  ];
+  const items: MenuItem[] = [{ label: 'Edit label', onSelect: () => editors.openEdgeEditor(edge) }];
+  if (layerSync.edgeStyleOf(ownerOf(edge.from), edge).bend) {
+    items.push({ label: 'Straighten', onSelect: () => applyEdgeStyleEdit(edge, { bend: null }) });
+  }
+  items.push({ separator: true });
+  items.push({ label: 'Delete edge', danger: true, onSelect: deleteSelection });
+  return items;
 }
 
 function drawingMenuItems(): MenuItem[] {
@@ -1936,8 +1945,18 @@ function wireSidebarToggle(): void {
 
 function wireHelp(): void {
   const toggleHelp = () => elements.helpOverlay.classList.toggle('hidden');
+  const closeHelp = () => elements.helpOverlay.classList.add('hidden');
   elements.helpToggle.addEventListener('click', toggleHelp);
-  elements.helpOverlay.addEventListener('click', toggleHelp);
+  elements.helpClose.addEventListener('click', closeHelp);
+  document.addEventListener('pointerdown', (event) => {
+    if (isOutsideHelp(event.target)) closeHelp();
+  }, true);
+}
+
+// The toggle is excluded so its own click, which follows this pointerdown, can still close it.
+function isOutsideHelp(target: EventTarget | null): boolean {
+  if (!(target instanceof Node)) return false;
+  return !elements.helpOverlay.contains(target) && !elements.helpToggle.contains(target);
 }
 
 function isTypingTarget(element: EventTarget | null): element is HTMLInputElement | HTMLTextAreaElement {

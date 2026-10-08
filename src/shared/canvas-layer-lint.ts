@@ -12,12 +12,30 @@ import {
   LAYER_COLOR_SLOTS,
   NODE_SHAPES,
 } from './canvas-layer.js';
+import {
+  ARROWHEADS,
+  LINE_STYLES,
+  defaultEdgeStyle,
+  isArrowhead,
+  isLineStyle,
+  readEdgeBend,
+  type Arrowhead,
+} from './canvas-edge-style.js';
 import { STROKE_KIND, STROKE_WIDTHS, isStrokeWidth, strokePointsOf } from './canvas-drawings.js';
 import { DRAWING_MEMBER_KIND, groupMembersOf, type Group } from './canvas-groups.js';
 import { byLine, info, warning, type Diagnostic } from './flow-diagnostics.js';
 import { parseFlow, type FlowDocument } from './flow-format.js';
 
 const FIRST_LINE = 1;
+
+const ARROWHEAD_DESCRIPTIONS: Record<Arrowhead, string> = {
+  none: 'no head',
+  arrow: 'an arrow',
+  triangle: 'a triangle',
+  diamond: 'a diamond',
+  dot: 'a dot',
+  bar: 'a bar',
+};
 
 // `flowText` is the paired .flow's text, or null when no .flow sits beside the layer.
 export function lintCanvasLayer(layerText: string, flowText: string | null): Diagnostic[] {
@@ -37,9 +55,7 @@ export function lintCanvasLayer(layerText: string, flowText: string | null): Dia
     }
   }
   for (const [edgeKey, visual] of Object.entries(layer.edges)) {
-    if (visual.color !== undefined && !isLayerColor(visual.color)) {
-      diagnostics.push(warning('invalid-edge-color', lineOf(edgeKey), `Invalid colour ${JSON.stringify(visual.color)}; the edge keeps its default colour. Use one of ${LAYER_COLOR_SLOTS.join(', ')}, or #rrggbb.`));
-    }
+    diagnostics.push(...edgeVisualDiagnostics(visual, lineOf(edgeKey)));
   }
 
   const flow = flowText != null ? parseFlow(flowText) : null;
@@ -47,6 +63,27 @@ export function lintCanvasLayer(layerText: string, flowText: string | null): Dia
   diagnostics.push(...groupDiagnostics(layerText));
   if (flow) diagnostics.push(...staleEntries(layer.nodes, layer.edges, flow, lineOf));
   return diagnostics.sort(byLine);
+}
+
+function edgeVisualDiagnostics(visual: Record<string, unknown>, line: number): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  if (visual.color !== undefined && !isLayerColor(visual.color)) {
+    diagnostics.push(warning('invalid-edge-color', line, `Invalid colour ${JSON.stringify(visual.color)}; the edge keeps its default colour. Use one of ${LAYER_COLOR_SLOTS.join(', ')}, or #rrggbb.`));
+  }
+  if (visual.line !== undefined && !isLineStyle(visual.line)) {
+    diagnostics.push(warning('unknown-edge-line', line, `Unknown line ${JSON.stringify(visual.line)}; the edge keeps its default line. Lines: ${LINE_STYLES.join(', ')}.`));
+  }
+  const defaults = defaultEdgeStyle('flow');
+  for (const [field, end] of [['startHead', 'start'], ['endHead', 'end']] as const) {
+    if (visual[field] !== undefined && !isArrowhead(visual[field])) {
+      const drawnAs = ARROWHEAD_DESCRIPTIONS[defaults[field]];
+      diagnostics.push(warning('unknown-arrowhead', line, `Unknown ${end} head ${JSON.stringify(visual[field])}; the edge is drawn with ${drawnAs} there. Heads: ${ARROWHEADS.join(', ')}.`));
+    }
+  }
+  if (visual.bend !== undefined && !readEdgeBend(visual.bend)) {
+    diagnostics.push(warning('invalid-edge-bend', line, `Invalid bend ${JSON.stringify(visual.bend)}; the edge is drawn unbent. A bend is a pair of numbers, [along, across].`));
+  }
+  return diagnostics;
 }
 
 // Read from the raw JSON rather than the parsed layer, which already dropped what is broken.

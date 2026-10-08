@@ -4,10 +4,11 @@
 // onto its neighbour fails here rather than in a screenshot.
 
 import { describe, expect, it } from 'vitest';
-import { layOutModelEdges, type EdgeGeometryMap } from '../src/client/canvas/edge-layout.js';
+import { edgePathBounds, layOutModelEdges, type EdgeGeometryMap } from '../src/client/canvas/edge-layout.js';
 import { edgeEnd, edgeStart, type EdgeGeometry } from '../src/client/canvas/edge-path.js';
-import { assignMissingIds, buildModel, type ModelEdge } from '../src/client/flow-doc.js';
-import { distanceToEdgePath } from '../src/client/canvas/edge-path.js';
+import { assignMissingIds, buildModel, edgeIdentityOf, type EdgeIdentity, type ModelEdge } from '../src/client/flow-doc.js';
+import { distanceToEdgePath, edgePathMidpoint } from '../src/client/canvas/edge-path.js';
+import type { EdgeBend } from '../src/shared/canvas-edge-style.js';
 import { rectCenter, unitVectorBetween, type Point } from '../src/client/geometry.js';
 import { parseFlow, type Rect } from '../src/shared/flow-format.js';
 import { parseCanvasLayer } from '../src/shared/canvas-layer.js';
@@ -228,5 +229,90 @@ describe('edges meeting shaped nodes', () => {
     for (const point of [edgeStart(loop), edgeEnd(loop)]) {
       expect(((point.x - 100) / 100) ** 2 + ((point.y - 50) / 50) ** 2).toBeCloseTo(1, 6);
     }
+  });
+});
+
+describe('bent edges', () => {
+  const PAIR = flowBetween(['  -> B', '  -> B'], []);
+  const FIRST_KEY = 'a-1 -> #b-1';
+  const SECOND_KEY = 'a-1 -> #b-1 : #2';
+  // Half way along, and a quarter of the 800-unit chord to one side: 200 units off the axis.
+  const BEND = { along: 0.5, across: 0.25 };
+
+  function layOutBent(flowText: string, edges: Record<string, unknown>, overrides?: Map<EdgeIdentity, EdgeBend | null>) {
+    const doc = parseFlow(flowText);
+    assignMissingIds(doc);
+    const model = dressModel(buildModel(doc, null), parseCanvasLayer(JSON.stringify({ edges })));
+    const geometry: EdgeGeometryMap = new Map();
+    layOutModelEdges(model, geometry, overrides);
+    return { model, geometry, rects: model.nodes.map((node) => node.pos!) };
+  }
+
+  it('runs through its bend point, leaving each node on the border that faces it', () => {
+    const { model, geometry, rects } = layOutBent(PAIR, { [FIRST_KEY]: { bend: [BEND.along, BEND.across] } });
+    const bent = geometry.get(model.edges[0])!;
+    const bendPoint = { x: 500, y: 44 + 200 };
+    expect(bent.grip.x).toBeCloseTo(bendPoint.x, 6);
+    expect(bent.grip.y).toBeCloseTo(bendPoint.y, 6);
+    expect(distanceToEdgePath(bendPoint, bent.path)).toBeCloseTo(0, 6);
+    // The bend is below both nodes, so the edge leaves A downward and meets B from below.
+    expect(edgeStart(bent).y).toBeCloseTo(rects[0].y + rects[0].h, 6);
+    expect(edgeEnd(bent).y).toBeCloseTo(rects[1].y + rects[1].h, 6);
+  });
+
+  it('leaves its bundle, so the one edge left runs straight down the middle', () => {
+    const { model, geometry, rects } = layOutBent(PAIR, { [FIRST_KEY]: { bend: [BEND.along, BEND.across] } });
+    const remaining = offsetsOf(geometry.get(model.edges[1])!, rects);
+    expect(remaining.start).toBeCloseTo(0, 6);
+    expect(remaining.mid).toBeCloseTo(0, 6);
+    expect(remaining.end).toBeCloseTo(0, 6);
+  });
+
+  it('lays an edge whose drag override is null out exactly as an unbent one, back in its lane', () => {
+    const plain = layOutBent(PAIR, {});
+    const bentInLayer = layOutBent(PAIR, { [SECOND_KEY]: { bend: [BEND.along, BEND.across] } });
+    const overrides = new Map<EdgeIdentity, EdgeBend | null>([[edgeIdentityOf(bentInLayer.model.edges[1]), null]]);
+    const relaidOut: EdgeGeometryMap = new Map();
+    layOutModelEdges(bentInLayer.model, relaidOut, overrides);
+    plain.model.edges.forEach((edge, index) => {
+      expect(relaidOut.get(bentInLayer.model.edges[index])!.through).toEqual(plain.geometry.get(edge)!.through);
+    });
+  });
+
+  it('still applies a drag override after the model is rebuilt mid-drag', () => {
+    const doc = parseFlow(PAIR);
+    assignMissingIds(doc);
+    const layer = parseCanvasLayer(JSON.stringify({ edges: {} }));
+    const pressedOn = dressModel(buildModel(doc, null), layer);
+    const rebuilt = dressModel(buildModel(doc, null), layer);
+    expect(rebuilt.edges[0]).not.toBe(pressedOn.edges[0]);
+    const overrides = new Map([[edgeIdentityOf(pressedOn.edges[0]), BEND]]);
+    const geometry: EdgeGeometryMap = new Map();
+    layOutModelEdges(rebuilt, geometry, overrides);
+    expect(geometry.get(rebuilt.edges[0])!.grip.y).toBeCloseTo(44 + 200, 6);
+  });
+
+  it('measures a bent edge where it runs, far outside the nodes it joins', () => {
+    const { model } = layOutBent(PAIR, { [FIRST_KEY]: { bend: [BEND.along, BEND.across] } });
+    const lowestEdge = Math.max(...edgePathBounds(model).map((rect) => rect.y + rect.h));
+    expect(lowestEdge).toBeGreaterThanOrEqual(44 + 200 - 1);
+  });
+
+  it('never bends a self-loop, so the loops nested around it keep their places', () => {
+    const loops = ['---', 'name: Loops', '---', '', 'A', '  id: a-1', '  pos: 0, 0, 200, 100', '  -> A', '  -> A', ''].join('\n');
+    const plain = layOutBent(loops, {});
+    const withBend = layOutBent(loops, { 'a-1 -> #a-1': { bend: [0.5, 0.4] } });
+    withBend.model.edges.forEach((edge, index) => {
+      const geometry = withBend.geometry.get(edge)!;
+      expect(geometry.through).toEqual(plain.geometry.get(plain.model.edges[index])!.through);
+      expect(geometry.chord).toBeNull();
+    });
+  });
+
+  it('grips an unbent edge half way along the curve it draws', () => {
+    const { model, geometry } = layOutBent(flowBetween(['  -> B'], ['  -> A']), {});
+    const laned = geometry.get(model.edges[0])!;
+    expect(laned.grip).toEqual(edgePathMidpoint(laned.path));
+    expect(laned.chord).not.toBeNull();
   });
 });

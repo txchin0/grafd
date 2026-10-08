@@ -13,7 +13,6 @@ import {
   parseListValue,
   formatListValue,
   type EdgeDataField,
-  type EdgeSpec,
   type FlowNode,
   type Rect,
   type Reference,
@@ -26,7 +25,8 @@ import { createTitleEditor } from './title-editor.js';
 import { createRegionNameEditor, type RenameRegion } from './region-name-editor.js';
 import { createReferenceRows } from './reference-rows.js';
 import type { LinkContext } from './reference-link.js';
-import { createColorSwatches, createShapePicker } from './visual-pickers.js';
+import { createArrowheadPicker, createColorSwatches, createLineStylePicker, createShapePicker } from './visual-pickers.js';
+import type { EdgeStyle, EdgeStylePatch } from '../shared/canvas-edge-style.js';
 
 export interface EditorContext {
   view: CanvasView;
@@ -40,7 +40,8 @@ export interface EditorContext {
   // Every provider this node may read, and whether it arrives from the graph above (R37).
   readableContexts(node: FlowNode): { name: string; inherited: boolean }[];
   findNode(nodeId: string): FlowNode | null;
-  findEdge(spec: EdgeSpec): ModelEdge | null;
+  // The edge in the current model that `reference`, taken from an earlier build, is (isSameEdge).
+  findEdge(reference: ModelEdge): ModelEdge | null;
   renameNode(node: FlowNode, requestedName: string): string;
   applyEdit(node: FlowNode, mutation: () => void): void;
   applyEditNow(node: FlowNode, mutation: () => void): void;
@@ -65,8 +66,8 @@ export interface EditorContext {
   renameRegion: RenameRegion;
   shapeOf(node: FlowNode): NodeShape;
   applyShapeEdit(node: FlowNode, shape: NodeShape): void;
-  edgeColorOf(edge: ModelEdge): string | null;
-  applyEdgeColorEdit(edge: ModelEdge, color: string | null): void;
+  edgeStyleOf(edge: ModelEdge): EdgeStyle;
+  applyEdgeStyleEdit(edge: ModelEdge, patch: EdgeStylePatch): void;
 }
 
 export interface Editors {
@@ -123,6 +124,10 @@ export function createEditors(context: EditorContext): Editors {
     deleteEdge: elementById<HTMLButtonElement>('ee-delete'),
     shapeChoices: elementById<HTMLDivElement>('ne-shape'),
     colorChoices: elementById<HTMLDivElement>('ee-color'),
+    lineChoices: elementById<HTMLDivElement>('ee-line'),
+    startHeadChoices: elementById<HTMLDivElement>('ee-start-head'),
+    endHeadChoices: elementById<HTMLDivElement>('ee-end-head'),
+    straighten: elementById<HTMLButtonElement>('ee-straighten'),
   };
 
   const titleEditor = createTitleEditor(context);
@@ -156,15 +161,30 @@ export function createEditors(context: EditorContext): Editors {
     shapePicker.fill(context.shapeOf(node));
   });
 
-  const colorSwatches = createColorSwatches(elements.colorChoices, (color) => {
+  const colorSwatches = createColorSwatches(elements.colorChoices, (color) => applyEdgeStyle({ color }));
+  const lineStylePicker = createLineStylePicker(elements.lineChoices, (line) => applyEdgeStyle({ line }));
+  const startHeadPicker = createArrowheadPicker(elements.startHeadChoices, 'start', (startHead) => applyEdgeStyle({ startHead }));
+  const endHeadPicker = createArrowheadPicker(elements.endHeadChoices, 'end', (endHead) => applyEdgeStyle({ endHead }));
+  elements.straighten.addEventListener('click', () => applyEdgeStyle({ bend: null }));
+
+  function applyEdgeStyle(patch: EdgeStylePatch): void {
     const edge = editingEdge();
     if (!edge) return;
-    context.applyEdgeColorEdit(edge, color);
-    colorSwatches.fill(context.edgeColorOf(edge));
-  });
+    context.applyEdgeStyleEdit(edge, patch);
+    fillEdgeStyle(edge);
+  }
+
+  function fillEdgeStyle(edge: ModelEdge): void {
+    const style = context.edgeStyleOf(edge);
+    colorSwatches.fill(style.color);
+    lineStylePicker.fill(style.line);
+    startHeadPicker.fill(style.startHead);
+    endHeadPicker.fill(style.endHead);
+    elements.straighten.classList.toggle('hidden', style.bend == null);
+  }
 
   let editingNodeId: string | null = null;
-  let editingEdgeSpec: EdgeSpec | null = null;
+  let editingEdgeReference: ModelEdge | null = null;
   // Held as the target it was opened with rather than by name: the block object survives the
   // renders that replace the model, and a rename keeps editing the same block.
   let editingRegion: RegionTarget | null = null;
@@ -174,7 +194,7 @@ export function createEditors(context: EditorContext): Editors {
   }
 
   function editingEdge(): ModelEdge | null {
-    return editingEdgeSpec ? context.findEdge(editingEdgeSpec) : null;
+    return editingEdgeReference ? context.findEdge(editingEdgeReference) : null;
   }
 
   function openTitleEditor(node: FlowNode): void {
@@ -332,18 +352,18 @@ export function createEditors(context: EditorContext): Editors {
     regionNameEditor.close();
     closeNodeEditor();
     closeRegionEditor();
-    editingEdgeSpec = edge.spec;
+    editingEdgeReference = edge;
     elements.edgeLabel.value = edge.spec.label ?? '';
     elements.edgeDataRows.replaceChildren();
     fillRefinementSelects(edge);
-    colorSwatches.fill(context.edgeColorOf(edge));
+    fillEdgeStyle(edge);
     fillDataFields(edge);
     elements.edgeEditor.classList.remove('hidden');
     reposition();
     elements.edgeLabel.focus();
     elements.edgeLabel.select();
     void Promise.all([context.ensureInnerTargets(edge), context.ensureInnerSources(edge)]).then(() => {
-      if (editingEdgeSpec === edge.spec) fillRefinementSelects(edge);
+      if (editingEdgeReference && FlowDoc.isSameEdge(editingEdgeReference, edge)) fillRefinementSelects(edge);
     });
   }
 
@@ -494,7 +514,7 @@ export function createEditors(context: EditorContext): Editors {
       context.applyEdit(edge.from, () => FlowDoc.setEdgeLabel(edge, elements.edgeLabel.value));
     }
     if (edge) commitPendingDataFields(edge);
-    editingEdgeSpec = null;
+    editingEdgeReference = null;
     elements.edgeEditor.classList.add('hidden');
   }
 
@@ -551,11 +571,11 @@ export function createEditors(context: EditorContext): Editors {
       fillNodeFields(node);
     }
     const edge = editingEdge();
-    if (editingEdgeSpec && !edge) {
+    if (editingEdgeReference && !edge) {
       closeEdgeEditor();
     } else if (edge) {
       fillRefinementSelects(edge);
-      colorSwatches.fill(context.edgeColorOf(edge));
+      fillEdgeStyle(edge);
       fillDataFields(edge);
     }
     reposition();

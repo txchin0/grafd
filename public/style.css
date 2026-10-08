@@ -578,9 +578,13 @@ html, body {
 
 .field-caption { font-size: var(--text-caption); color: var(--muted); }
 
-/* Canvas-layer choices: shape buttons and edge colour swatches. */
+/* Canvas-layer choices: shape buttons, edge colour swatches, line styles and arrowheads. */
 #ne-shape-field,
-#ee-color-field { display: flex; flex-direction: column; gap: 4px; }
+#ee-color-field,
+#ee-line-field,
+#ee-heads-field { display: flex; flex-direction: column; gap: 4px; }
+#ee-heads-field .choice-row + .choice-row { margin-top: 2px; }
+.choice svg .filled { fill: currentColor; }
 .choice-row { display: flex; flex-wrap: wrap; gap: 4px; }
 .choice {
   display: inline-flex;
@@ -752,6 +756,13 @@ html, body {
   padding: 18px 24px;
   box-shadow: var(--shadow-modal);
   z-index: 20;
+}
+
+#help-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 2px 8px;
 }
 
 #help-overlay h2 {

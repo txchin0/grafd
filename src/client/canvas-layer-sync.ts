@@ -19,20 +19,19 @@ import {
   captureVisuals,
   documentIdentities,
   drawingListsAreEditable,
-  edgeColorOf,
   emptyCanvasLayer,
   flowPathOfCanvasLayer,
   followIdentityChanges,
   nodeShapeOf,
   parseCanvasLayer,
   serializeCanvasLayer,
-  setEdgeColor,
   setNodeShape,
   type CanvasLayer,
   type CapturedVisuals,
   type DocumentIdentities,
   type NodeShape,
 } from '../shared/canvas-layer.js';
+import { edgeStyleOf, setEdgeStyle, type EdgeStyle, type EdgeStylePatch } from '../shared/canvas-edge-style.js';
 import type { CarriedDrawings } from '../shared/canvas-drawings.js';
 import type { FlowDocument, FlowNode } from '../shared/flow-format.js';
 import type { DocumentOwner } from './canvas/expansion.js';
@@ -45,11 +44,11 @@ export interface CanvasLayerSync {
   // Handed to the edit session as its FlowCommitObserver.
   readonly observer: FlowCommitObserver;
   shapeOf(owner: DocumentOwner, node: FlowNode): NodeShape;
-  edgeColorOf(owner: DocumentOwner, edge: ModelEdge): string | null;
+  edgeStyleOf(owner: DocumentOwner, edge: ModelEdge): EdgeStyle;
   // Standalone visual edits, each one undoable action that writes only the layer. False when
   // there was no layer to edit (still loading, or unreadable) or nothing to key the edit by.
   setShape(owner: DocumentOwner, node: FlowNode, shape: NodeShape): boolean;
-  setEdgeColor(owner: DocumentOwner, edge: ModelEdge, color: string | null): boolean;
+  setEdgeStyle(owner: DocumentOwner, edge: ModelEdge, patch: EdgeStylePatch): boolean;
   // Drawing edits, each its own undoable action — or part of the one already open, so a stroke
   // moved or deleted with nodes lands in the same undo step. False when there was no layer.
   // A drawing edit, its own undoable action or part of the one already open, so a stroke moved
@@ -119,9 +118,9 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
     return nodeId != null && editLayer(owner.path, (layer) => setNodeShape(layer, nodeId, shape));
   }
 
-  function setEdgeColorOf(owner: DocumentOwner, edge: ModelEdge, color: string | null): boolean {
+  function setEdgeStyleOf(owner: DocumentOwner, edge: ModelEdge, patch: EdgeStylePatch): boolean {
     const key = edgeLayerKey(owner.doc, edge);
-    return key != null && editLayer(owner.path, (layer) => setEdgeColor(layer, key, color));
+    return key != null && editLayer(owner.path, (layer) => setEdgeStyle(layer, key, patch, edge.kind));
   }
 
   function drawingsAreEditable(owner: DocumentOwner): boolean {
@@ -187,9 +186,9 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
   return {
     observer,
     shapeOf: (owner, node) => nodeShapeOf(layers.layerFor(owner.path), node.id),
-    edgeColorOf: (owner, edge) => edgeColorOf(layers.layerFor(owner.path), edgeLayerKey(owner.doc, edge)),
+    edgeStyleOf: (owner, edge) => edgeStyleOf(layers.layerFor(owner.path), edgeLayerKey(owner.doc, edge), edge.kind),
     setShape,
-    setEdgeColor: setEdgeColorOf,
+    setEdgeStyle: setEdgeStyleOf,
     editDrawings,
     drawingsAreEditable,
     drawingContentOf: (owner) => {

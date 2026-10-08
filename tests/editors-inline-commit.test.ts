@@ -103,6 +103,10 @@ const ELEMENT_IDS = [
   'ee-delete',
   'ne-shape',
   'ee-color',
+  'ee-line',
+  'ee-start-head',
+  'ee-end-head',
+  'ee-straighten',
   'title-editor',
   'region-name-editor',
   'region-name-input',
@@ -154,8 +158,8 @@ function createContextStub() {
     applyRegionReferencesEdit: vi.fn(),
     shapeOf: vi.fn(() => 'rectangle'),
     applyShapeEdit: vi.fn(),
-    edgeColorOf: vi.fn(() => null),
-    applyEdgeColorEdit: vi.fn(),
+    edgeStyleOf: vi.fn(() => ({ color: null, line: null, startHead: 'none', endHead: 'arrow', bend: null })),
+    applyEdgeStyleEdit: vi.fn(),
   } as unknown as EditorContext;
 }
 

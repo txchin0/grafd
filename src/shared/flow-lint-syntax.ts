@@ -22,7 +22,11 @@ const CONTEXT_KEYS = ['pos', 'description', 'references', 'nodes'];
 const LIST_VALUED_KEYS = ['inherits', 'updates'];
 // Keys someone reaching for styling would write. The format has no style property — styling
 // lives in the graph's canvas layer — so these get a message that says where it went.
-const STYLE_KEYS = new Set(['shape', 'color', 'colour', 'fill', 'stroke', 'style', 'background']);
+// `line` is left out: as a property name it is too likely to mean something else.
+const STYLE_KEYS = new Set([
+  'shape', 'color', 'colour', 'fill', 'stroke', 'style', 'background',
+  'bend', 'arrowhead', 'startHead', 'endHead', 'dash',
+]);
 // Where a `key: value` line sits, which decides both the keys it may use and how it is named in
 // a diagnostic. Not called `context`: that word is taken by the domain here.
 type PropertySite = 'preamble' | 'node' | 'context';

@@ -23,7 +23,6 @@ import {
 } from '../../shared/flow-format.js';
 import * as FlowDoc from '../flow-doc.js';
 import type { CanvasLayer } from '../../shared/canvas-layer.js';
-import type { EdgeSpec } from '../../shared/flow-format.js';
 import { dressModel } from '../model-visuals.js';
 import type { FlowModel, ModelEdge } from '../flow-doc.js';
 import {
@@ -329,9 +328,9 @@ export class ExpansionLayer {
     return null;
   }
 
-  findEdgeBySpec(spec: EdgeSpec): ModelEdge | null {
+  findEdgeWhere(matches: (edge: ModelEdge) => boolean): ModelEdge | null {
     for (const model of this.subModels.values()) {
-      const edge = model.edges?.find((candidate) => candidate.spec === spec);
+      const edge = model.edges?.find(matches);
       if (edge) return edge;
     }
     return null;

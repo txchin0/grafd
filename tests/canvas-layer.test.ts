@@ -4,7 +4,6 @@ import {
   canvasLayerPathOf,
   captureVisuals,
   documentIdentities,
-  edgeColorOf,
   emptyCanvasLayer,
   flowPathOfCanvasLayer,
   followIdentityChanges,
@@ -13,12 +12,22 @@ import {
   onErrorEdgeKey,
   parseCanvasLayer,
   serializeCanvasLayer,
-  setEdgeColor,
   setNodeShape,
   type CanvasLayer,
 } from '../src/shared/canvas-layer.js';
 import { parseFlow, setProp, type FlowDocument, type FlowNode } from '../src/shared/flow-format.js';
 import * as FlowDoc from '../src/client/flow-doc.js';
+import { edgeStyleOf, setEdgeStyle } from '../src/shared/canvas-edge-style.js';
+
+// An edge's colour reads and writes alike whatever its kind, so these tests treat every edge as a
+// flow edge.
+function setEdgeColor(layer: CanvasLayer, edgeKey: string, color: string | null): void {
+  setEdgeStyle(layer, edgeKey, { color }, 'flow');
+}
+
+function edgeColorOf(layer: CanvasLayer | null, edgeKey: string | null): string | null {
+  return edgeStyleOf(layer, edgeKey, 'flow').color;
+}
 
 const IDS = {
   start: '11111111-1111-4111-8111-111111111111',
@@ -154,6 +163,17 @@ describe('following identity changes', () => {
     expect(Object.keys(layer.edges)).toHaveLength(1);
   });
 
+  it("moves an edge's whole look — line, heads and bend too — with a relabel", () => {
+    const doc = parseFlow(FLOW);
+    const layer = emptyCanvasLayer();
+    const look = { color: 'blue', line: 'dotted', startHead: 'dot', endHead: 'triangle', bend: [0.3, 0.1] };
+    layer.edges[keyOf(doc, 'Check', 0)] = { ...look };
+    const before = documentIdentities(doc);
+    nodeNamed(doc, 'Check').edges[0].label = 'finished';
+    followIdentityChanges(layer, before, documentIdentities(doc));
+    expect(layer.edges[keyOf(doc, 'Check', 0)]).toEqual(look);
+  });
+
   it('keeps the colour of the second of two identical edges when the first is deleted', () => {
     const doc = parseFlow(FLOW);
     const layer = layerWithEdge(doc, 'Start', 1, 'red');
@@ -189,6 +209,17 @@ describe('following identity changes', () => {
     setProp(nodeNamed(doc, 'Start'), 'on_error', null);
     followIdentityChanges(layer, before, documentIdentities(doc));
     expect(layer.edges).toEqual({});
+  });
+
+  it('keeps the bend and solid line of an on_error edge whose handler is retargeted', () => {
+    const doc = parseFlow(FLOW);
+    const layer = emptyCanvasLayer();
+    const look = { line: 'solid', bend: { along: 0.4, across: -0.3 } } as const;
+    setEdgeStyle(layer, onErrorEdgeKey(IDS.start), look, 'error');
+    const before = documentIdentities(doc);
+    setProp(nodeNamed(doc, 'Start'), 'on_error', '-> Check');
+    followIdentityChanges(layer, before, documentIdentities(doc));
+    expect(edgeStyleOf(layer, onErrorEdgeKey(IDS.start), 'error')).toMatchObject(look);
   });
 
   it('follows an edge lifted onto the host when its source is extracted into a subgraph', () => {
@@ -257,6 +288,19 @@ describe('copies', () => {
     expect(edgeColorOf(layer, after.edgeKeys.get(copies[0].edges[0])!)).toBe('red');
     expect(edgeColorOf(layer, onErrorEdgeKey(copies[0].id!))).toBe('orange');
     expect(nodeShapeOf(layer, IDS.start)).toBe('diamond');
+  });
+
+  it("carries an edge's line, heads and bend onto its copy", () => {
+    const doc = parseFlow(FLOW);
+    const layer = emptyCanvasLayer();
+    const look = { line: 'dashed', endHead: 'diamond', bend: [0.5, -0.3] };
+    layer.edges[keyOf(doc, 'Check', 0)] = { ...look };
+    const sources = [nodeNamed(doc, 'Check'), nodeNamed(doc, 'Done')];
+    const captured = captureVisuals(layer, documentIdentities(doc), sources);
+    const copies = FlowDoc.duplicateNodes(doc.items, sources, { x: 20, y: 20 });
+    const after = documentIdentities(doc);
+    applyCapturedVisuals(layer, after, copies, captured);
+    expect(layer.edges[after.edgeKeys.get(copies[0].edges[0])!]).toEqual(look);
   });
 
   function layerWithShapes(doc: FlowDocument): CanvasLayer {

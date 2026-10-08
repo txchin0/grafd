@@ -59,6 +59,7 @@ function createSurface() {
     moveCommitted: vi.fn(),
     completeEdge: vi.fn(),
     editEdge: vi.fn(),
+    bendEdge: vi.fn(),
     editNodeTitle: vi.fn(),
     editRegionTitle: vi.fn(),
     openExpand: vi.fn(),

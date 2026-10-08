@@ -33,7 +33,7 @@ End
 `;
 
 function bowedEdge(bow: number) {
-  return createEdgeGeometry([{ x: 0, y: 0 }, { x: 200, y: bow }, { x: 400, y: 0 }]);
+  return createEdgeGeometry([{ x: 0, y: 0 }, { x: 200, y: bow }, { x: 400, y: 0 }], { chord: null });
 }
 
 describe('edge path distance', () => {
@@ -53,7 +53,7 @@ describe('edge path distance', () => {
 
   it('follows a self-loop out past the node it leaves and returns to', () => {
     const apex = { x: 242, y: -40 };
-    const selfLoop = createEdgeGeometry([{ x: 170, y: 0 }, apex, { x: 200, y: 24 }]);
+    const selfLoop = createEdgeGeometry([{ x: 170, y: 0 }, apex, { x: 200, y: 24 }], { chord: null });
     expect(distanceToEdgePath(apex, selfLoop.path)).toBeCloseTo(0, 6);
   });
 
@@ -118,6 +118,7 @@ function stubActions(): CanvasActions {
     moveCommitted: vi.fn(),
     completeEdge: vi.fn(),
     editEdge: vi.fn(),
+    bendEdge: vi.fn(),
     editNodeTitle: vi.fn(),
     editRegionTitle: vi.fn(),
     openExpand: vi.fn(),

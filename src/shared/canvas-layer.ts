@@ -208,22 +208,14 @@ export function nodeShapeOf(layer: CanvasLayer | null, nodeId: string | null): N
   return isNodeShape(shape) ? shape : DEFAULT_NODE_SHAPE;
 }
 
-export function edgeColorOf(layer: CanvasLayer | null, edgeKey: string | null): string | null {
-  if (!layer || edgeKey == null) return null;
-  const color = layer.edges[edgeKey]?.color;
-  return isLayerColor(color) ? color : null;
-}
-
 // The default shape is never written; clearing the last field of an entry removes the entry.
 export function setNodeShape(layer: CanvasLayer, nodeId: string, shape: NodeShape | null): void {
   setEntryField(layer.nodes, nodeId, 'shape', shape === DEFAULT_NODE_SHAPE ? null : shape);
 }
 
-export function setEdgeColor(layer: CanvasLayer, edgeKey: string, color: string | null): void {
-  setEntryField(layer.edges, edgeKey, 'color', color);
-}
-
-function setEntryField(entries: Record<string, Record<string, unknown>>, key: string, field: string, value: unknown): void {
+// The one way an entry is edited, whichever module owns its fields: clearing its last field
+// removes the entry, so the layer never holds an empty one.
+export function setEntryField(entries: Record<string, Record<string, unknown>>, key: string, field: string, value: unknown): void {
   const entry = { ...(entries[key] ?? {}) };
   if (value == null) delete entry[field];
   else entry[field] = value;

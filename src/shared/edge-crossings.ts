@@ -1,6 +1,8 @@
 // Crossing number of a graph drawn with straight center-to-center edges: how many pairs of
 // segments properly intersect. The canvas draws bowed splines; the linter uses this simpler
-// model so it can judge layout without importing client geometry.
+// model so it can judge layout without importing client geometry. It never reads the canvas
+// layer either, so a bend dragged into an edge there does not change the count: only moving nodes
+// does, and the warning says so.
 //
 // A proper intersection is two segment interiors crossing. Shared endpoints, collinear overlap,
 // and zero-length segments (self-loops) do not count.
