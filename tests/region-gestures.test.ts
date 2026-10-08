@@ -132,6 +132,7 @@ describe('applyRegionResize', () => {
       corner: 'se',
       startRect: { ...context.block.pos! },
       startWorld: { x: 200, y: 120 },
+      hadDrawnArea: true,
     };
     applyRegionResize(gesture, { x: 40, y: 30 }, identity);
     expect(context.block.pos).toEqual({ x: 0, y: 0, w: 40, h: 30 });
@@ -201,10 +202,26 @@ describe('rollback', () => {
       corner: 'se',
       startRect: { x: 0, y: 0, w: 200, h: 120 },
       startWorld: { x: 200, y: 120 },
+      hadDrawnArea: true,
     };
     applyRegionResize(gesture, { x: 10, y: 10 }, identity);
     rollbackRegionResize(gesture);
     expect(context.block.pos).toEqual({ x: 0, y: 0, w: 200, h: 120 });
+  });
+
+  it('takes back the drawn area an abandoned resize gave a member-derived region', () => {
+    const context = contextNamed(MEMBER_DERIVED, 'Auth');
+    const gesture: RegionResizeSnapshot = {
+      context,
+      corner: 'se',
+      startRect: { x: 32, y: 32, w: 136, h: 80 },
+      startWorld: { x: 168, y: 112 },
+      hadDrawnArea: false,
+    };
+    applyRegionResize(gesture, { x: 200, y: 140 }, identity);
+    expect(context.block.pos).toEqual({ x: 32, y: 32, w: 168, h: 108 });
+    rollbackRegionResize(gesture);
+    expect(context.block.pos).toBeNull();
   });
 });
 
@@ -304,6 +321,28 @@ describe('applyCombinedMove', () => {
     };
     applyCombinedMove(gesture, { x: 80, y: 40 }, identity);
     expect(host.pos).toMatchObject({ x: 240, y: 220 });
+  });
+
+  it('carries every piece the distance its pressed region travelled, however the grid falls', () => {
+    const model = modelOf(NESTED);
+    const outer = model.contexts.find((context) => context.block.name === 'Outer')!;
+    const host = model.nodes.find((node) => node.name === 'Host')!;
+    host.pos = { x: 204, y: 204, w: 200, h: 88 };
+    const gesture: CombinedMoveSnapshot = {
+      startPositions: new Map([[host, { x: 204, y: 204 }]]),
+      scales: new Map(),
+      movingRegions: [outer],
+      startRects: new Map([[outer.block, { x: 0, y: 0, w: 800, h: 600 }]]),
+      startWorld: { x: 0, y: 0 },
+      moved: false,
+    };
+    const snapToEight = (value: number) => Math.round(value / 8) * 8;
+    // Just short of a half step, as a pointer converted from screen to world arrives: snapped on
+    // its own the region would move 8 and the off-grid member 12.
+    const delta = applyCombinedMove(gesture, { x: 0, y: 11.999999999999996 }, snapToEight, { block: outer.block });
+    expect(delta).toEqual({ x: 0, y: 8 });
+    expect(outer.block.pos).toMatchObject({ x: 0, y: 8 });
+    expect(host.pos).toMatchObject({ x: 204, y: 212 });
   });
 
   it('rolls everything back', () => {

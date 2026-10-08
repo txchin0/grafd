@@ -6,7 +6,7 @@ import { buildModel, displayRects, type FlowModel } from '../src/client/flow-doc
 import { distanceToPolyline, simplifyPolyline } from '../src/client/geometry.js';
 import { dressModel } from '../src/client/model-visuals.js';
 import { hitStrokeAt, strokesInsideRect, type StrokeSurface } from '../src/client/canvas/drawing-hit-test.js';
-import { applyCombinedMove, effectiveMoveDelta, type CombinedMoveSnapshot } from '../src/client/canvas/region-gestures.js';
+import { applyCombinedMove, combinedMoveDelta, type CombinedMoveSnapshot } from '../src/client/canvas/region-gestures.js';
 import { beginStrokeGesture, extendStrokeGesture, finishedStrokePoints, resizedStrokeTransform } from '../src/client/canvas/stroke-gesture.js';
 import type { FrameTarget } from '../src/client/canvas/expansion.js';
 
@@ -87,7 +87,7 @@ describe('the pen', () => {
   });
 });
 
-describe('effectiveMoveDelta', () => {
+describe('the distance a combined move carries everything', () => {
   const doc = parseFlow('---\nname: demo\n---\n\nA\n  pos: 3, 3, 100, 60\n');
   const node = doc.items.flatMap((item) => (item.kind === 'node' ? [item.node] : []))[0];
   const snap8 = (value: number) => Math.round(value / 8) * 8;
@@ -106,14 +106,13 @@ describe('effectiveMoveDelta', () => {
   it('follows the snapped distance a node actually travelled, in world units', () => {
     const gesture = snapshot(0.5);
     node.pos = { x: 3, y: 3, w: 100, h: 60 };
-    applyCombinedMove(gesture, { x: 10, y: 0 }, snap8);
     // 10 world units at scale 0.5 is 20 local, snapped from 23 to 24: 21 local, 10.5 world.
-    expect(effectiveMoveDelta(gesture, { x: 10, y: 0 }, node)).toEqual({ x: 10.5, y: -1.5 });
+    expect(applyCombinedMove(gesture, { x: 10, y: 0 }, snap8, { node })).toEqual({ x: 10.5, y: -1.5 });
   });
 
   it('follows the pointer exactly when only strokes move', () => {
     const empty: CombinedMoveSnapshot = { ...snapshot(1), startPositions: new Map(), scales: new Map() };
-    expect(effectiveMoveDelta(empty, { x: 7, y: -3 }, null)).toEqual({ x: 7, y: -3 });
+    expect(combinedMoveDelta(empty, { x: 7, y: -3 }, snap8, null)).toEqual({ x: 7, y: -3 });
   });
 });
 

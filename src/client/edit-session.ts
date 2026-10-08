@@ -188,6 +188,10 @@ export class EditSession {
     return this.tracked.has(path);
   }
 
+  get undoDepth(): number {
+    return this.undoStack.length;
+  }
+
   // Parse `text` and install it as the document at `path`, replacing whatever was there. As with
   // a layer, the committed state is the canonical serialization rather than the text read.
   adoptText(path: string, text: string): FlowDocument {

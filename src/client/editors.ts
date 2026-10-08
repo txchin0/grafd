@@ -27,6 +27,7 @@ import { createReferenceRows } from './reference-rows.js';
 import type { LinkContext } from './reference-link.js';
 import { createArrowheadPicker, createColorSwatches, createLineStylePicker, createShapePicker } from './visual-pickers.js';
 import type { EdgeStyle, EdgeStylePatch } from '../shared/canvas-edge-style.js';
+import { refuseReservedNameCharacters } from './name-input.js';
 
 export interface EditorContext {
   view: CanvasView;
@@ -130,6 +131,7 @@ export function createEditors(context: EditorContext): Editors {
     straighten: elementById<HTMLButtonElement>('ee-straighten'),
   };
 
+  refuseReservedNameCharacters(elements.title);
   const titleEditor = createTitleEditor(context);
   const regionNameEditor = createRegionNameEditor(context);
 

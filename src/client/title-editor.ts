@@ -9,6 +9,7 @@
 import type { FlowNode } from '../shared/flow-format.js';
 import type { CanvasView } from './canvas/canvas-view.js';
 import { positionInlineTitleInput } from './inline-title-overlay.js';
+import { refuseReservedNameCharacters } from './name-input.js';
 
 export interface TitleEditorContext {
   view: CanvasView;
@@ -26,6 +27,7 @@ export interface TitleEditor {
 
 export function createTitleEditor(context: TitleEditorContext): TitleEditor {
   const input = document.getElementById('title-editor') as HTMLInputElement;
+  refuseReservedNameCharacters(input);
   let editingNodeId: string | null = null;
 
   function editingNode(): FlowNode | null {

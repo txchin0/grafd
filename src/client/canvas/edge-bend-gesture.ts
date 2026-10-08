@@ -5,7 +5,7 @@
 import type { EdgeBend } from '../../shared/canvas-edge-style.js';
 import { edgeIdentityOf, type ModelEdge } from '../flow-doc.js';
 import { distanceBetween, rectContains, type Point } from '../geometry.js';
-import { bendThrough, distanceFromChord } from './edge-bend.js';
+import { bendThrough, canBendAlong, distanceFromChord } from './edge-bend.js';
 import type { EdgeBendOverrides } from './edge-layout.js';
 import type { EdgeChord, EdgeGeometry } from './edge-path.js';
 
@@ -32,7 +32,7 @@ export interface EdgeBendGesture {
 // A self-loop has no chord to bend against, so neither part of it is a grip. `local` is in the
 // coordinates of the model drawing the edge, and `screenScale` is the scale that model is drawn at.
 export function gripContains(geometry: EdgeGeometry, local: Point, screenScale: number): boolean {
-  if (!geometry.chord) return false;
+  if (!geometry.chord || !canBendAlong(geometry.chord)) return false;
   if (geometry.labelRect) return rectContains(geometry.labelRect, local);
   return distanceBetween(local, geometry.grip) * screenScale <= GRIP_HIT_RADIUS_PX;
 }

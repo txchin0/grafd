@@ -14,6 +14,12 @@ function squaredLengthOf(vector: Point): number {
   return vector.x * vector.x + vector.y * vector.y;
 }
 
+// Whether a chord can carry a bend at all: one of no length — two nodes stacked on the same
+// centre — has nothing to measure a bend against.
+export function canBendAlong(chord: EdgeChord): boolean {
+  return squaredLengthOf(chordVector(chord)) > 0;
+}
+
 // Null for a chord of no length: its two ends coincide, so there is nothing to measure against.
 // `along` is trusted as given: a bend is clamped where it enters, read from a file or taken from
 // the pointer.

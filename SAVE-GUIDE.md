@@ -45,7 +45,7 @@ references:                   # optional: links to related code, docs, URLs
 
 ## Nodes
 
-Declared as a bare name at column 0. Properties indented 2 spaces. Names are unique per graph. Names never contain `: ` (colon-space) or curly braces `{` `}` (braces appear only on edges: a trailing `{Inner}` on an edge target names a node inside the target subgraph; a leading `{Inner Source}` prefix names a node inside the owning subgraph that the edge leaves from).
+Declared as a bare name at column 0. Properties indented 2 spaces. Names are unique per graph. Names never contain `: ` (colon-space), a double quote `"`, or curly braces `{` `}`, and never start with `#` (that line would be a comment) (braces appear only on edges: a trailing `{Inner}` on an edge target names a node inside the target subgraph; a leading `{Inner Source}` prefix names a node inside the owning subgraph that the edge leaves from).
 
 ```
 Node Name

@@ -187,18 +187,20 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
     if (nodes.length + regions.length + drawings.length > 0) options.select(nodes, regions, drawings);
   }
 
-  // Paste at the pointer places the first positioned item under it and keeps the rest in
-  // formation around it; with no pointer position it offsets like a duplicate instead.
+  // Paste at the pointer puts the top-left corner of everything copied under it, the rest kept in
+  // formation — whatever order it was selected in; with no pointer position it offsets like a
+  // duplicate instead.
   function offsetToward(world: Point | undefined): Point {
-    const anchor = groups
+    const corners = groups
       .flatMap((group) => [
         ...group.nodes.map((node) => node.pos),
         ...group.regions.map((region) => region.pos),
-        ...group.drawings.drawings.map((drawing) => strokePointsOf(drawing.points)?.[0]),
+        ...group.drawings.drawings.flatMap((drawing) => strokePointsOf(drawing.points) ?? []),
       ])
-      .find((pos): pos is Point => pos != null);
-    if (!world || !anchor) return { x: DUPLICATE_STEP, y: DUPLICATE_STEP };
-    return { x: Math.round(world.x - anchor.x), y: Math.round(world.y - anchor.y) };
+      .filter((pos): pos is Point => pos != null);
+    if (!world || corners.length === 0) return { x: DUPLICATE_STEP, y: DUPLICATE_STEP };
+    const topLeft = { x: Math.min(...corners.map((corner) => corner.x)), y: Math.min(...corners.map((corner) => corner.y)) };
+    return { x: Math.round(world.x - topLeft.x), y: Math.round(world.y - topLeft.y) };
   }
 
   function paste(world?: Point): void {

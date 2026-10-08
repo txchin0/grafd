@@ -18,6 +18,7 @@ import { DEFAULT_ROUGHNESS } from '../../shared/manifest.js';
 import {
   DEFAULT_STROKE_WIDTH,
   STROKE_LINE_WIDTHS,
+  strokeBounds,
   strokePointBounds,
   transformedStroke,
   translationBy,
@@ -28,7 +29,10 @@ import {
 import {
   displayRectOf,
   displayRects,
+  findNodeById,
   isSameEdge,
+  keepEmptiedRegionsInPlace,
+  membersAfterChanges,
   membershipChangesForCombinedMove,
   membershipChangesForRegion,
   regionRectOf,
@@ -39,6 +43,7 @@ import {
   type ModelEdge,
 } from '../flow-doc.js';
 import {
+  distanceBetween,
   easeInOutCubic,
   normalizedRect,
   rectCenter,
@@ -56,6 +61,7 @@ import {
   gripContains,
   type EdgeBendGesture,
 } from './edge-bend-gesture.js';
+import { canBendAlong } from './edge-bend.js';
 import type { EdgeBend } from '../../shared/canvas-edge-style.js';
 import { shapeBorderPointToward, shapeTextBox } from './node-shapes.js';
 import { BADGE_HIT_RADIUS, nodeBadges, type BadgeHit } from './node-badges.js';
@@ -72,7 +78,6 @@ import {
 import {
   applyCombinedMove,
   applyRegionResize,
-  effectiveMoveDelta,
   movingRegionGroupFor,
   regionRectDuringResize,
   regionRectsWithDrawnMove,
@@ -80,6 +85,8 @@ import {
   rollbackCombinedMove,
   rollbackRegionResize,
   type CombinedMoveSnapshot,
+  type MoveReference,
+  type RegionResizeSnapshot,
 } from './region-gestures.js';
 import { hitRegionAt, hitRegionHandleAt } from './region-hit-test.js';
 import { hitStrokeAt, strokesInsideRect, worldBoundsOf, type StrokeSurface } from './drawing-hit-test.js';
@@ -158,6 +165,13 @@ interface ViewStrokeSurface extends StrokeSurface {
   host: FlowNode | null;
 }
 
+// The selection when it is exactly one thing (soleSelection).
+type SoleSelection =
+  | { kind: 'node'; node: FlowNode }
+  | { kind: 'region'; context: ModelContext }
+  | { kind: 'edge'; edge: ModelEdge }
+  | { kind: 'strokes'; resizable: ResizableStrokes };
+
 // What a stroke's corner handles resize: a lone stroke, or exactly one whole group.
 interface ResizableStrokes {
   surface: ViewStrokeSurface;
@@ -172,13 +186,23 @@ interface MovingStroke {
   scale: number;
 }
 
-type MoveGesture = CombinedMoveSnapshot & {
+// Every gesture that drags something starts out as a press, and becomes a drag only once the
+// pointer has travelled DRAG_THRESHOLD_PX (`hasBecomeDrag`). Until then nothing moves, resizes or
+// is written, and letting go is a click on whatever was pressed.
+interface DragStart {
+  startScreen: Point;
+  moved: boolean;
+}
+
+type MoveGesture = CombinedMoveSnapshot & DragStart & {
   type: 'move';
   pressed:
     | { kind: 'node'; node: FlowNode }
     | { kind: 'region'; context: ModelContext }
     | { kind: 'drawing'; drawing: DrawingSelection };
   pressedBadge: BadgeHit | null;
+  // Shift added the pressed thing to the selection, so a click that ends here keeps the rest.
+  additive: boolean;
   // The explicitly selected nodes — what membership measures as "free" nodes — as distinct
   // from the members a moving region carries along.
   selectedNodes: FlowNode[];
@@ -188,27 +212,21 @@ type MoveGesture = CombinedMoveSnapshot & {
   // stored key. Painted as an offset; the layer is written only when the drag lands.
   strokeOffsets: Map<string, Point>;
   startWorld: Point;
-  startScreen: Point;
-  moved: boolean;
 };
 
 type Gesture =
   | { type: 'pan'; startView: View; startScreen: Point }
-  | { type: 'edge'; from: FlowNode; toWorld: Point; hoverTarget: FlowNode | null }
-  | { type: 'resize'; node: FlowNode; corner: ResizeCorner; startRect: Rect; startWorld: Point; scale: number }
+  | ({ type: 'edge'; from: FlowNode; toWorld: Point; hoverTarget: FlowNode | null; additive: boolean } & DragStart)
+  | ({ type: 'resize'; node: FlowNode; corner: ResizeCorner; startRect: Rect; startWorld: Point; scale: number } & DragStart)
   | MoveGesture
-  | {
+  | (RegionResizeSnapshot & DragStart & {
       type: 'region-resize';
-      context: ModelContext;
-      corner: ResizeCorner;
-      startRect: Rect;
-      startWorld: Point;
       frozenRegionRects: Map<ContextBlock, Rect>;
-    }
+    })
   | { type: 'create'; tool: Tool; startWorld: Point; startScreen: Point; rect: Rect | null }
   | { type: 'marquee'; startWorld: Point; rect: Rect | null }
   | StrokeGesture
-  | {
+  | (DragStart & {
       type: 'stroke-resize';
       // A lone stroke, or every member of one group — all on one surface, all stretched alike.
       drawings: DrawingSelection[];
@@ -219,9 +237,61 @@ type Gesture =
       startWorld: Point;
       scale: number;
       transform: StrokeTransform;
-    }
+    })
   | EdgeBendGesture
   | { type: 'pinch'; pointers: [number, number]; start: PinchAnchor };
+
+// What a press at a point lands on, in the order a press settles it: the affordances of what is
+// already selected, then what is drawn on the canvas, then the canvas itself. The press, the hover
+// cursor and the context menu all read this one answer (`pressTargetAt`), so the cursor cannot
+// promise what a press would not do, and a kind of thing added here reaches every reader at once.
+type PressTarget =
+  | { kind: 'port'; node: FlowNode; port: Point }
+  | { kind: 'stroke-handle'; resizable: ResizableStrokes; corner: ResizeCorner }
+  | { kind: 'selected-edge-grip'; edge: ModelEdge }
+  | { kind: 'node-handle'; node: FlowNode; corner: ResizeCorner }
+  | { kind: 'region-handle'; context: ModelContext; corner: ResizeCorner }
+  | { kind: 'node'; node: FlowNode; badge: BadgeHit | null }
+  | { kind: 'ghost'; ghost: GhostNode }
+  | { kind: 'edge'; edge: ModelEdge; atGrip: boolean }
+  | { kind: 'region'; context: ModelContext }
+  | { kind: 'stroke'; stroke: DrawingSelection }
+  | { kind: 'canvas' };
+
+type CanvasCursor = 'default' | 'crosshair' | 'pointer' | 'move' | 'nwse-resize' | 'grab';
+
+// A move is measured on what was pressed, so that is what lands on the grid.
+function moveReferenceOf(pressed: MoveGesture['pressed']): MoveReference {
+  if (pressed.kind === 'node') return { node: pressed.node };
+  if (pressed.kind === 'region') return { block: pressed.context.block };
+  return null;
+}
+
+// What pressing the target does, shown before the press: a grab cursor drags what is under it, a
+// pointer is a click with a meaning of its own, and bare canvas shows the tool. Exhaustive, so a
+// new kind of target does not compile until it has a cursor.
+function cursorFor(target: PressTarget, canvasCursor: CanvasCursor): CanvasCursor {
+  switch (target.kind) {
+    case 'port':
+      return 'crosshair';
+    case 'stroke-handle':
+    case 'node-handle':
+    case 'region-handle':
+      return 'nwse-resize';
+    case 'selected-edge-grip':
+    case 'region':
+    case 'stroke':
+      return 'move';
+    case 'node':
+      return target.badge ? 'pointer' : 'move';
+    case 'ghost':
+      return 'pointer';
+    case 'edge':
+      return target.atGrip ? 'move' : 'default';
+    case 'canvas':
+      return canvasCursor;
+  }
+}
 
 interface HeldScene {
   model: FlowModel;
@@ -461,7 +531,9 @@ export class CanvasView {
   view: View = { x: 0, y: 0, scale: 1 };
   model: FlowModel;
   selection = new Set<FlowNode>();
-  selectedEdge: ModelEdge | null = null;
+  // Edges join the selection like everything else. What only one edge at a time can have — the
+  // bend grip, the editor a new edge opens in — belongs to a lone selected edge (`selectedEdge`).
+  selectedEdges: ModelEdge[] = [];
   // Regions share the selection with nodes — a mixed selection moves, deletes and copies as one
   // gesture — but the single-region accessor below stays for the callers that address one
   // region as an edit target.
@@ -571,23 +643,29 @@ export class CanvasView {
     this.requestRender();
   }
 
-  setModel(model: FlowModel): void {
-    const previouslySelectedEdge = this.selectedEdge;
+  get selectedEdge(): ModelEdge | null {
+    return this.selectedEdges.length === 1 ? this.selectedEdges[0] : null;
+  }
 
+  set selectedEdge(edge: ModelEdge | null) {
+    this.selectedEdges = edge ? [edge] : [];
+  }
+
+  setModel(model: FlowModel): void {
     this.model = model;
-    // Top-level nodes are re-resolved by id; embedded subgraph nodes keep their identity
-    // across rebuilds (they are the same AST objects), so they stay selected as-is. Nodes
-    // that truly disappeared are dropped from drawing by the locus visibility check.
+    // Every node is re-resolved by id — a top-level one in the new model, one inside an unfolded
+    // frame in whichever loaded document holds it — so a node that an edit, an undo or a file
+    // change has removed or replaced never lingers in the selection.
     this.selection = new Set(
       [...this.selection]
-        .map((node) => model.nodes.find((candidate) => candidate.id === node.id)
-          ?? (this.expansionLayer.isEmbedded(node) ? node : null))
+        .map((node) => model.nodes.find((candidate) => candidate.id === node.id) ?? this.embeddedNodeNow(model, node))
         .filter((node): node is FlowNode => node != null),
     );
     // An embedded edge's frame may not be laid out against the new model yet; the next render
     // resolves it to its rebuilt counterpart, or drops it.
-    this.selectedEdge = previouslySelectedEdge && (this.currentEdgeMatching(previouslySelectedEdge)
-      ?? (this.expansionLayer.isEmbedded(previouslySelectedEdge.from) ? previouslySelectedEdge : null));
+    this.selectedEdges = this.selectedEdges
+      .map((edge) => this.currentEdgeMatching(edge) ?? (this.expansionLayer.isEmbedded(edge.from) ? edge : null))
+      .filter((edge): edge is ModelEdge => edge != null);
     // By name, not by identity: a region has no id, and rebuilding the model makes a fresh
     // ModelContext for the same block.
     const selectedRegionNames = [...this.selectedRegions].map((context) => context.block.name);
@@ -596,10 +674,16 @@ export class CanvasView {
       .filter((context): context is ModelContext => context != null));
     if (this.hoverNode) {
       const previousHoverId = this.hoverNode.id;
-      this.hoverNode = model.nodes.find((node) => node.id === previousHoverId)
-        ?? (this.expansionLayer.isEmbedded(this.hoverNode) ? this.hoverNode : null);
+      this.hoverNode = model.nodes.find((node) => node.id === previousHoverId) ?? this.embeddedNodeNow(model, this.hoverNode);
     }
     this.requestRender();
+  }
+
+  // A node shown inside an unfolded frame lives in one of the open document's own `graph:` blocks
+  // or in an external file the expansion layer holds; either way its id finds what it is now.
+  private embeddedNodeNow(model: FlowModel, node: FlowNode): FlowNode | null {
+    if (!node.id || !this.expansionLayer.isEmbedded(node)) return null;
+    return findNodeById(model.sourceDoc, node.id) ?? this.expansionLayer.findNodeById(node.id);
   }
 
   setTool(tool: Tool): void {
@@ -1014,145 +1098,210 @@ export class CanvasView {
       return;
     }
 
+    const creating = this.createsOnPress(event.shiftKey);
+    const target = this.pressTargetAt(world, { creating });
+    switch (target.kind) {
+      case 'port':
+        this.gesture = { type: 'edge', from: target.node, toWorld: world, hoverTarget: null, startScreen: screen, moved: false, additive: event.shiftKey };
+        return;
+      case 'stroke-handle':
+        this.gesture = this.beginStrokeResize(target.resizable, target.corner, world, screen);
+        return;
+      case 'selected-edge-grip':
+        if (event.shiftKey) this.pressEdge(target.edge, world, screen, true);
+        else this.gesture = this.edgeBendGrabbedAt(target.edge, world, screen);
+        return;
+      case 'node-handle':
+        this.gesture = {
+          type: 'resize',
+          node: target.node,
+          corner: target.corner,
+          startRect: { ...target.node.pos! },
+          startWorld: world,
+          scale: this.expansionLayer.scaleOf(target.node),
+          startScreen: screen,
+          moved: false,
+        };
+        return;
+      case 'region-handle':
+        this.gesture = this.beginRegionResize(target.context, target.corner, world, screen);
+        return;
+      case 'node':
+        this.pressNode(target.node, target.badge, world, screen, event.shiftKey);
+        return;
+      case 'ghost':
+        this.actions.materializeGhost(target.ghost);
+        return;
+      case 'edge':
+        this.pressEdge(target.edge, world, screen, event.shiftKey);
+        return;
+      case 'region':
+        this.pressRegion(target.context, world, screen, event.shiftKey);
+        return;
+      case 'stroke':
+        this.pressStroke(target.stroke, world, screen, event.shiftKey);
+        return;
+      case 'canvas':
+        this.pressCanvas(world, screen, event.shiftKey, creating);
+        return;
+    }
+  }
+
+  // The node and region tools make something on a press, unless shift turns it back into selecting.
+  private createsOnPress(shiftKey: boolean): boolean {
+    return (this.tool === 'node' || this.tool === 'context') && !shiftKey;
+  }
+
+  // What a press at `world` lands on (PressTarget). `creating` hands an unfolded frame's empty
+  // interior to the subgraph being drawn into rather than to the frame's host; it never hides
+  // anything already drawn there, so every tool can grab whatever the select tool can.
+  private pressTargetAt(world: Point, { creating }: { creating: boolean }): PressTarget {
     const port = this.hitPort(world);
-    if (port) {
-      this.gesture = { type: 'edge', from: port.node, toWorld: world, hoverTarget: null };
-      return;
-    }
-
+    if (port) return { kind: 'port', ...port };
     const strokeHandle = this.hitStrokeResizeHandle(world);
-    if (strokeHandle) {
-      const { resizable, corner } = strokeHandle;
-      this.gesture = {
-        type: 'stroke-resize',
-        drawings: resizable.drawings,
-        storedKeys: resizable.drawings.map((drawing) => storedDrawingKey(drawing.model, drawing.id)),
-        corner,
-        startBox: boundsOfRects(resizable.strokes.map(strokePointBounds))!,
-        startWorld: world,
-        scale: resizable.surface.transform.scale,
-        transform: translationBy({ x: 0, y: 0 }),
-      };
-      return;
-    }
-
+    if (strokeHandle) return { kind: 'stroke-handle', ...strokeHandle };
     // A label is drawn over the nodes, so the selected edge's grip answers before they do.
-    const selectedEdgeBend = this.selectedEdge && this.edgeBendGrabbedAt(this.selectedEdge, world, screen);
-    if (selectedEdgeBend) {
-      this.gesture = selectedEdgeBend;
-      return;
+    const loneEdge = this.edgeSelectedAlone();
+    if (loneEdge && this.edgeGripContains(loneEdge, world)) {
+      return { kind: 'selected-edge-grip', edge: loneEdge };
     }
-
-    const handle = this.hitResizeHandle(world);
-    if (handle) {
-      this.gesture = {
-        type: 'resize',
-        node: handle.node,
-        corner: handle.corner,
-        startRect: { ...handle.node.pos! },
-        startWorld: world,
-        scale: this.expansionLayer.scaleOf(handle.node),
-      };
-      return;
-    }
-
+    const nodeHandle = this.hitResizeHandle(world);
+    if (nodeHandle) return { kind: 'node-handle', ...nodeHandle };
     const regionHandle = this.hitRegionHandle(world);
-    if (regionHandle) {
-      const context = regionHandle.context;
-      const startRect = { ...this.regionRectOfContext(context)! };
-      // A region with no drawn area acquires one the moment it is resized: the user is reserving
-      // space, which is the only thing that ever authors a block's `pos`.
-      context.block.pos = { ...startRect };
-      this.gesture = {
-        type: 'region-resize',
-        context,
-        corner: regionHandle.corner,
-        startRect,
-        startWorld: world,
-        frozenRegionRects: this.freezeRegionRects(),
-      };
-      return;
-    }
-
-    const wantsCreate = (this.tool === 'node' || this.tool === 'context') && !event.shiftKey;
+    if (regionHandle) return { kind: 'region-handle', ...regionHandle };
     const node = this.hitNode(world);
-    const stroke = wantsCreate ? null : this.hitStrokeAbove(node, world);
-    if (node && !stroke && !(wantsCreate && this.isFrameBackground(node, world))) {
-      if (event.shiftKey && this.selection.has(node)) {
-        this.selection.delete(node);
-        this.requestRender();
-        return;
-      }
-      if (!this.selection.has(node)) {
-        if (!event.shiftKey) {
-          this.selection.clear();
-          this.selectedRegions.clear();
-          this.heldDrawings = [];
-        }
-        this.selection.add(node);
-        this.selectedEdge = null;
-      }
-      this.gesture = this.beginMoveGesture(world, screen, { kind: 'node', node }, this.hitBadge(world));
-      this.requestRender();
-      return;
-    }
-
+    const stroke = this.hitStrokeAbove(node, world);
+    const pressedNode = stroke ? null : this.nodeAnsweringPress(node, world, creating);
+    if (pressedNode) return { kind: 'node', node: pressedNode, badge: this.hitBadge(world) };
     const ghost = this.hitGhost(world);
-    if (ghost) {
-      this.actions.materializeGhost(ghost);
-      return;
-    }
-
+    if (ghost) return { kind: 'ghost', ghost };
     const edge = this.hitEdge(world);
-    if (edge) {
-      this.selection.clear();
-      this.selectedRegions.clear();
-      this.heldDrawings = [];
-      // Closing an editor can commit its edit, which rebuilds the model under the edge just hit.
-      this.actions.canvasClicked();
-      this.selectedEdge = this.currentEdgeMatching(edge) ?? edge;
-      this.gesture = this.edgeBendGrabbedAt(this.selectedEdge, world, screen);
-      this.requestRender();
-      return;
-    }
-
+    if (edge) return { kind: 'edge', edge, atGrip: this.edgeGripContains(edge, world) };
     const region = this.hitRegion(world);
-    if (region) {
-      // A press on a region closes open editors at press time, whether or not it becomes a drag
-      // — the same contract a node press has.
-      this.actions.canvasClicked();
-      if (event.shiftKey && this.selectedRegions.has(region)) {
-        this.selectedRegions.delete(region);
-        this.requestRender();
-        return;
-      }
-      if (!this.selectedRegions.has(region)) {
-        if (!event.shiftKey) {
-          this.selection.clear();
-          this.selectedRegions.clear();
-          this.heldDrawings = [];
-        }
-        this.selectedRegions.add(region);
-        this.selectedEdge = null;
-      }
-      this.gesture = this.beginMoveGesture(world, screen, { kind: 'region', context: region }, null);
+    if (region) return { kind: 'region', context: region };
+    return stroke ? { kind: 'stroke', stroke } : { kind: 'canvas' };
+  }
+
+  // While creating, an unfolded frame's empty interior is the subgraph's drawing surface rather
+  // than a press on the frame's host (isFrameBackground).
+  private nodeAnsweringPress(node: FlowNode | null, world: Point, creating: boolean): FlowNode | null {
+    if (!node || (creating && this.isFrameBackground(node, world))) return null;
+    return node;
+  }
+
+  private beginStrokeResize(resizable: ResizableStrokes, corner: ResizeCorner, world: Point, screen: Point): Gesture {
+    return {
+      type: 'stroke-resize',
+      drawings: resizable.drawings,
+      storedKeys: resizable.drawings.map((drawing) => storedDrawingKey(drawing.model, drawing.id)),
+      corner,
+      startBox: boundsOfRects(resizable.strokes.map(strokePointBounds))!,
+      startWorld: world,
+      scale: resizable.surface.transform.scale,
+      transform: translationBy({ x: 0, y: 0 }),
+      startScreen: screen,
+      moved: false,
+    };
+  }
+
+  private beginRegionResize(context: ModelContext, corner: ResizeCorner, world: Point, screen: Point): Gesture {
+    return {
+      type: 'region-resize',
+      context,
+      corner,
+      startRect: { ...this.regionRectOfContext(context)! },
+      startWorld: world,
+      hadDrawnArea: context.block.pos !== null,
+      frozenRegionRects: this.freezeRegionRects(),
+      startScreen: screen,
+      moved: false,
+    };
+  }
+
+  private pressNode(node: FlowNode, badge: BadgeHit | null, world: Point, screen: Point, shiftKey: boolean): void {
+    if (shiftKey && this.selection.has(node)) {
+      this.selection.delete(node);
       this.requestRender();
       return;
     }
+    if (!this.selection.has(node)) {
+      if (!shiftKey) this.clearSelection();
+      this.selection.add(node);
+    }
+    this.gesture = this.beginMoveGesture(world, screen, { kind: 'node', node }, badge, shiftKey);
+    this.requestRender();
+  }
 
-    if (stroke) {
-      this.pressStroke(stroke, world, screen, event.shiftKey);
+  private pressEdge(edge: ModelEdge, world: Point, screen: Point, shiftKey: boolean): void {
+    // Closing an editor can commit its edit, which rebuilds the model under the edge just hit.
+    this.actions.canvasClicked();
+    const pressed = this.currentEdgeMatching(edge) ?? edge;
+    if (shiftKey) {
+      this.toggleSelectedEdge(pressed);
+      this.requestRender();
       return;
     }
+    this.clearSelection();
+    this.selectedEdge = pressed;
+    this.gesture = this.edgeBendGrabbedAt(pressed, world, screen);
+    this.requestRender();
+  }
 
-    if (!event.shiftKey) {
+  // The bend grip, like a node's or a region's corner handles (R52), belongs to an edge that is the
+  // whole selection: in a mixed one, a press there is a press on the edge like any other.
+  private edgeSelectedAlone(): ModelEdge | null {
+    const sole = this.soleSelection();
+    return sole?.kind === 'edge' ? sole.edge : null;
+  }
+
+  // The selection when it is exactly one thing — one node, one region, one edge, or one stroke or
+  // group — which is all that ever gets corner handles or a bend grip (R52). Drawing those
+  // affordances and answering a press on them both ask here, so a handle is never drawn that a
+  // press would not answer, and a kind added to the selection is counted by every one of them.
+  private soleSelection(): SoleSelection | null {
+    const kindsSelected = [this.selection.size, this.selectedRegions.size, this.selectedEdges.length, this.heldDrawings.length]
+      .filter((count) => count > 0).length;
+    if (kindsSelected !== 1) return null;
+    if (this.selection.size === 1) return { kind: 'node', node: [...this.selection][0] };
+    if (this.selectedRegions.size === 1) return { kind: 'region', context: [...this.selectedRegions][0] };
+    if (this.selectedEdges.length === 1) return { kind: 'edge', edge: this.selectedEdges[0] };
+    const resizable = this.heldDrawings.length > 0 ? this.resizableStrokeSelection() : null;
+    return resizable ? { kind: 'strokes', resizable } : null;
+  }
+
+  private toggleSelectedEdge(edge: ModelEdge): void {
+    const wasSelected = this.selectedEdges.some((candidate) => isSameEdge(candidate, edge));
+    this.selectedEdges = wasSelected
+      ? this.selectedEdges.filter((candidate) => !isSameEdge(candidate, edge))
+      : [...this.selectedEdges, edge];
+  }
+
+  private pressRegion(region: ModelContext, world: Point, screen: Point, shiftKey: boolean): void {
+    // A press on a region closes open editors at press time, whether or not it becomes a drag
+    // — the same contract a node press has.
+    this.actions.canvasClicked();
+    if (shiftKey && this.selectedRegions.has(region)) {
+      this.selectedRegions.delete(region);
+      this.requestRender();
+      return;
+    }
+    if (!this.selectedRegions.has(region)) {
+      if (!shiftKey) this.clearSelection();
+      this.selectedRegions.add(region);
+    }
+    this.gesture = this.beginMoveGesture(world, screen, { kind: 'region', context: region }, null, shiftKey);
+    this.requestRender();
+  }
+
+  private pressCanvas(world: Point, screen: Point, shiftKey: boolean, creating: boolean): void {
+    if (!shiftKey) {
       this.selection.clear();
       this.selectedEdge = null;
       this.selectedRegions.clear();
       this.heldDrawings = [];
       this.actions.canvasClicked();
     }
-    this.gesture = wantsCreate
+    this.gesture = creating
       ? { type: 'create', tool: this.tool, startWorld: world, startScreen: screen, rect: null }
       : { type: 'marquee', startWorld: world, rect: null };
     this.requestRender();
@@ -1169,6 +1318,7 @@ export class CanvasView {
     screen: Point,
     pressed: MoveGesture['pressed'],
     pressedBadge: BadgeHit | null,
+    additive: boolean,
   ): MoveGesture {
     const movingRegions = movingRegionGroupFor(this.model, [...this.selectedRegions]);
     const selectedNodes = [...this.selection];
@@ -1182,7 +1332,8 @@ export class CanvasView {
       type: 'move',
       pressed,
       pressedBadge,
-      movingStrokes: this.movingStrokesFor(nodes),
+      additive,
+      movingStrokes: this.movingStrokesFor(nodes, movingRegions),
       strokeOffsets: new Map(),
       selectedNodes,
       startPositions: new Map(nodes.map((entry) => [entry, { x: entry.pos!.x, y: entry.pos!.y }])),
@@ -1200,12 +1351,12 @@ export class CanvasView {
 
   // The selected strokes a move carries, once per stored stroke. A stroke inside a frame whose
   // host is itself moving already travels with the frame, as a node inside it does.
-  private movingStrokesFor(movingNodes: readonly FlowNode[]): MovingStroke[] {
+  private movingStrokesFor(movingNodes: readonly FlowNode[], movingRegions: readonly ModelContext[]): MovingStroke[] {
     const moving = new Set(movingNodes);
     const surfaces = this.strokeSurfaces();
     const strokes: MovingStroke[] = [];
     const seen = new Set<string>();
-    for (const drawing of this.heldDrawings) {
+    for (const drawing of [...this.heldDrawings, ...this.strokesInsideRegions(movingRegions)]) {
       const surface = surfaces.find((candidate) => candidate.model === drawing.model);
       const storedKey = storedDrawingKey(drawing.model, drawing.id);
       if (!surface || seen.has(storedKey) || this.isInsideMovingFrame(surface.host, moving)) continue;
@@ -1215,6 +1366,23 @@ export class CanvasView {
     return strokes;
   }
 
+  // R28b: a moving region carries the drawings lying wholly inside its frame when the drag
+  // begins, as it carries its members — an annotation travels with the box it annotates. A group
+  // moves as one, so it goes only when every stroke in it is inside.
+  private strokesInsideRegions(regions: readonly ModelContext[]): DrawingSelection[] {
+    const frames = regions
+      .map((context) => regionRectOf(this.model, context))
+      .filter((frame): frame is Rect => frame != null);
+    if (frames.length === 0) return [];
+    const strokes = this.model.visuals?.strokes() ?? [];
+    const enclosedIds = new Set(strokes
+      .filter((stroke) => frames.some((frame) => rectContainsRect(frame, strokeBounds(stroke))))
+      .map((stroke) => stroke.id));
+    return [...enclosedIds]
+      .map((id) => ({ model: this.model, id }))
+      .filter((drawing) => this.groupOfDrawing(drawing).every((member) => enclosedIds.has(member)));
+  }
+
   private isInsideMovingFrame(host: FlowNode | null, moving: ReadonlySet<FlowNode>): boolean {
     for (let frameHost = host; frameHost; frameHost = this.expansionLayer.hostOf(frameHost)) {
       if (moving.has(frameHost)) return true;
@@ -1222,9 +1390,8 @@ export class CanvasView {
     return false;
   }
 
-  private moveCarriedStrokes(gesture: MoveGesture, world: Point): void {
-    const reference = gesture.pressed.kind === 'node' ? gesture.pressed.node : null;
-    const delta = effectiveMoveDelta(gesture, world, reference);
+  // Strokes travel the distance everything else did, so they stay with what they annotate.
+  private moveCarriedStrokes(gesture: MoveGesture, delta: Point): void {
     for (const stroke of gesture.movingStrokes) {
       gesture.strokeOffsets.set(stroke.storedKey, { x: delta.x / stroke.scale, y: delta.y / stroke.scale });
     }
@@ -1306,6 +1473,18 @@ export class CanvasView {
     );
   }
 
+  // Escape while a gesture is under way abandons it: a move or resize goes back to where it
+  // started, anything else ends without writing, and the pointer is ignored until it is let go.
+  // A pan is only a view change, so it is not something to cancel. True when one was abandoned.
+  cancelGesture(): boolean {
+    if (!this.gesture || this.gesture.type === 'pan' || this.gesture.type === 'pinch') return false;
+    this.abandonGesture();
+    this.awaitingPointerRelease = this.activePointers.size > 0;
+    this.updateCursor();
+    this.requestRender();
+    return true;
+  }
+
   private abandonGesture(): void {
     const gesture = this.gesture;
     this.gesture = null;
@@ -1346,7 +1525,7 @@ export class CanvasView {
       const previousHover = this.hoverNode;
       this.hoverNode = this.hoverNodeAt(world);
       if (previousHover !== this.hoverNode) this.requestRender();
-      this.updateCursor(world);
+      this.updateCursor(world, event.shiftKey);
       return;
     }
 
@@ -1357,21 +1536,22 @@ export class CanvasView {
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'move') {
-      const screenDistance = Math.hypot(screen.x - gesture.startScreen.x, screen.y - gesture.startScreen.y);
-      if (!gesture.moved && screenDistance < DRAG_THRESHOLD_PX) return;
-      applyCombinedMove(gesture, world, snap);
-      this.moveCarriedStrokes(gesture, world);
+      if (!hasBecomeDrag(gesture, screen)) return;
+      this.moveCarriedStrokes(gesture, applyCombinedMove(gesture, world, snap, moveReferenceOf(gesture.pressed)));
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'resize') {
+      if (!hasBecomeDrag(gesture, screen)) return;
       this.applyResize(gesture, world);
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'region-resize') {
+      if (!hasBecomeDrag(gesture, screen)) return;
       applyRegionResize(gesture, world, snap);
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'edge') {
+      if (!hasBecomeDrag(gesture, screen)) return;
       gesture.toWorld = world;
       const rawTarget = this.hitNode(world);
       const drop = this.resolveEdgeDrop(gesture.from, rawTarget, world);
@@ -1387,6 +1567,7 @@ export class CanvasView {
       const local = this.pointInEdgeModel(edge, world);
       if (extendEdgeBend(gesture, local, this.screenScaleOf(edge.from), screen, DRAG_THRESHOLD_PX)) this.requestRender();
     } else if (gesture.type === 'stroke-resize') {
+      if (!hasBecomeDrag(gesture, screen)) return;
       const localDelta = {
         x: (world.x - gesture.startWorld.x) / gesture.scale,
         y: (world.y - gesture.startWorld.y) / gesture.scale,
@@ -1441,32 +1622,39 @@ export class CanvasView {
     if (gesture.type === 'move') {
       if (gesture.moved) {
         const movedNodes = [...gesture.startPositions.keys()];
+        const membershipChanges = this.membershipChangesFor(gesture);
+        // Written with the move, which writes the block's file in the same step (R18a).
+        keepEmptiedRegionsInPlace(gesture.regionRects, (block) => membersAfterChanges(block, membershipChanges));
         if (gesture.movingRegions.length > 0) {
           this.actions.regionMoved(
             gesture.movingRegions.map((context) => this.regionTargetOf(context)),
             movedNodes,
-            this.membershipChangesFor(gesture),
+            membershipChanges,
             this.drawingMovesOf(gesture),
           );
         } else {
-          this.actions.moveCommitted(movedNodes, this.membershipChangesFor(gesture), this.drawingMovesOf(gesture));
+          this.actions.moveCommitted(movedNodes, membershipChanges, this.drawingMovesOf(gesture));
         }
       } else {
+        if (!gesture.additive) this.narrowSelectionTo(gesture.pressed);
         this.dispatchPress(gesture, world, event.detail);
       }
     } else if (gesture.type === 'resize') {
-      this.actions.moveCommitted([gesture.node]);
+      if (gesture.moved) this.actions.moveCommitted([gesture.node]);
+      else this.clickPressed({ kind: 'node', node: gesture.node }, event.detail);
     } else if (gesture.type === 'region-resize') {
-      this.commitRegionResize(gesture);
+      if (gesture.moved) this.commitRegionResize(gesture);
+      else this.clickPressed({ kind: 'region', context: gesture.context }, event.detail);
     } else if (gesture.type === 'edge') {
-      this.actions.completeEdge(gesture.from, this.resolveEdgeDrop(gesture.from, this.hitNode(world), world));
+      if (gesture.moved) this.actions.completeEdge(gesture.from, this.resolveEdgeDrop(gesture.from, this.hitNode(world), world));
+      else this.clickNodeOfPort(gesture.from, gesture.additive);
     } else if (gesture.type === 'create') {
       this.completeCreateGesture(gesture, world);
     } else if (gesture.type === 'marquee' && gesture.rect) {
       this.selectInMarquee(gesture.rect);
     } else if (gesture.type === 'draw') {
       this.actions.createStroke(finishedStrokePoints(gesture, this.view.scale), gesture.frameHost, { ...this.drawStyle });
-    } else if (gesture.type === 'stroke-resize' && !isIdentityTransform(gesture.transform)) {
+    } else if (gesture.type === 'stroke-resize' && gesture.moved && !isIdentityTransform(gesture.transform)) {
       this.actions.resizeDrawings(gesture.drawings, gesture.transform);
     } else if (gesture.type === 'edge-bend' && gesture.moved) {
       this.actions.bendEdge(gesture.edge, gesture.bend);
@@ -1474,22 +1662,51 @@ export class CanvasView {
     this.requestRender();
   }
 
+  // A port is part of its node, so a port pressed and let go without dragging is a click on the
+  // node: shift toggles it, a plain click makes it the selection and opens its editor.
+  private clickNodeOfPort(node: FlowNode, additive: boolean): void {
+    if (!additive) {
+      this.select(node);
+      this.actions.nodeClicked(node);
+      return;
+    }
+    if (this.selection.has(node)) this.selection.delete(node);
+    else this.selection.add(node);
+    this.requestRender();
+  }
+
+  // A plain click on one item of a multi-selection makes that item the selection. The press
+  // could not narrow it — it might have been the start of a drag of everything selected — so the
+  // release does, once it is clear there was no drag.
+  private narrowSelectionTo(pressed: MoveGesture['pressed']): void {
+    if (pressed.kind === 'node') this.select(pressed.node);
+    else if (pressed.kind === 'region') this.selectRegion(pressed.context.block.name);
+    else this.selectOnlyDrawing(pressed.drawing);
+  }
+
   // A press that selected something without dragging it has nothing to write; it was a click,
   // and a click opens the editor of whatever it landed on.
   private dispatchPress(gesture: MoveGesture, world: Point, clickCount: number): void {
-    if (gesture.pressed.kind === 'drawing') return;
-    if (gesture.pressed.kind === 'region') {
-      if (clickCount < 2) this.actions.regionClicked(this.regionTargetOf(gesture.pressed.context));
-      return;
-    }
-    const badge = this.hitBadge(world);
+    if (this.releasedOnPressedBadge(gesture, world)) return;
+    this.clickPressed(gesture.pressed, clickCount);
+  }
+
+  // A badge answers a press and release on the same badge — the expand or collapse it shows.
+  private releasedOnPressedBadge(gesture: MoveGesture, world: Point): boolean {
     const pressedBadge = gesture.pressedBadge;
-    if (badge && pressedBadge && badge.node === pressedBadge.node && badge.kind === pressedBadge.kind) {
-      if (badge.kind === 'open') this.actions.openExpand(badge.node);
-      else this.actions.toggleExpand(badge.node);
-      return;
-    }
-    if (clickCount < 2) this.actions.nodeClicked(gesture.pressed.node);
+    const badge = pressedBadge ? this.hitBadge(world) : null;
+    if (!pressedBadge || badge?.node !== pressedBadge.node || badge.kind !== pressedBadge.kind) return false;
+    if (badge.kind === 'open') this.actions.openExpand(badge.node);
+    else this.actions.toggleExpand(badge.node);
+    return true;
+  }
+
+  // Also what a handle let go without dragging is: a handle is part of what it resizes, so the
+  // click is on its owner. The second click of a double-click is the double-click's own.
+  private clickPressed(pressed: MoveGesture['pressed'], clickCount: number): void {
+    if (clickCount >= 2 || pressed.kind === 'drawing') return;
+    if (pressed.kind === 'region') this.actions.regionClicked(this.regionTargetOf(pressed.context));
+    else this.actions.nodeClicked(pressed.node);
   }
 
   private commitRegionResize(gesture: Extract<Gesture, { type: 'region-resize' }>): void {
@@ -1639,6 +1856,7 @@ export class CanvasView {
     // contains its subgraph's edges.
     const edge = this.hitEdge(world);
     if (edge) {
+      this.clearSelection();
       this.selectedEdge = edge;
       this.actions.editEdge(edge);
       this.requestRender();
@@ -1667,47 +1885,63 @@ export class CanvasView {
     this.actions.quickCreateNode(target.point, target.frameHost);
   }
 
-  // Right-click classifies the target with the same hit chain as onPointerDown and hands it to
-  // the app to build a menu. A node that is not already part of the selection becomes the sole
-  // selection first, so the menu acts on it; an existing multi-selection is left intact.
+  // Right-click reads the same target a press would land on and hands it to the app to build a
+  // menu; an affordance stands for the thing it belongs to, a port or handle for its node. It never
+  // creates, so it reads the target as the select tool does. A node that is not already part of
+  // the selection becomes the sole selection first, so the menu acts on it; an existing
+  // multi-selection is left intact.
   private onContextMenu(event: MouseEvent): void {
     event.preventDefault();
     const world = this.screenToWorld(this.eventPoint(event));
     const screenPoint = { x: event.clientX, y: event.clientY };
+    const target = this.pressTargetAt(world, { creating: false });
+    switch (target.kind) {
+      case 'port':
+      case 'node-handle':
+      case 'node':
+        this.openNodeMenu(target.node, screenPoint);
+        return;
+      case 'selected-edge-grip':
+      case 'edge':
+        this.openEdgeMenu(target.edge, screenPoint);
+        return;
+      case 'region-handle':
+      case 'region':
+        this.openRegionMenu(target.context, screenPoint);
+        return;
+      case 'stroke':
+        if (!this.isDrawingHeld(target.stroke)) this.selectOnlyDrawing(target.stroke);
+        this.actions.contextMenu({ kind: 'drawing' }, screenPoint);
+        return;
+      case 'stroke-handle':
+        this.actions.contextMenu({ kind: 'drawing' }, screenPoint);
+        return;
+      case 'ghost':
+      case 'canvas':
+        this.actions.contextMenu({ kind: 'canvas', world }, screenPoint);
+        return;
+    }
+  }
 
-    const node = this.hitNode(world);
-    const stroke = this.hitStrokeAbove(node, world);
-    if (node && !stroke) {
-      if (!this.selection.has(node)) this.select(node);
-      this.actions.contextMenu({ kind: 'node', node }, screenPoint);
-      return;
-    }
-    const edge = this.hitEdge(world);
-    if (edge) {
-      this.selectedEdge = edge;
+  private openNodeMenu(node: FlowNode, screenPoint: Point): void {
+    if (!this.selection.has(node)) this.select(node);
+    this.actions.contextMenu({ kind: 'node', node }, screenPoint);
+  }
+
+  private openEdgeMenu(edge: ModelEdge, screenPoint: Point): void {
+    this.clearSelection();
+    this.selectedEdge = edge;
+    this.actions.contextMenu({ kind: 'edge', edge }, screenPoint);
+  }
+
+  private openRegionMenu(region: ModelContext, screenPoint: Point): void {
+    if (!this.selectedRegions.has(region)) {
       this.selection.clear();
-      this.heldDrawings = [];
+      this.selectedEdge = null;
+      this.selectedRegions = new Set([region]);
       this.requestRender();
-      this.actions.contextMenu({ kind: 'edge', edge }, screenPoint);
-      return;
     }
-    const region = this.hitRegion(world);
-    if (region) {
-      if (!this.selectedRegions.has(region)) {
-        this.selection.clear();
-        this.selectedEdge = null;
-        this.selectedRegions = new Set([region]);
-        this.requestRender();
-      }
-      this.actions.contextMenu({ kind: 'region', region: this.regionTargetOf(region) }, screenPoint);
-      return;
-    }
-    if (stroke) {
-      if (!this.isDrawingHeld(stroke)) this.selectOnlyDrawing(stroke);
-      this.actions.contextMenu({ kind: 'drawing' }, screenPoint);
-      return;
-    }
-    this.actions.contextMenu({ kind: 'canvas', world }, screenPoint);
+    this.actions.contextMenu({ kind: 'region', region: this.regionTargetOf(region) }, screenPoint);
   }
 
   // The scale a node is actually drawn at: the camera's, times the frame nesting it sits in.
@@ -1815,8 +2049,9 @@ export class CanvasView {
   }
 
   private hitResizeHandle(world: Point): { node: FlowNode; corner: ResizeCorner } | null {
-    if (this.selection.size !== 1 || this.selectedRegions.size > 0 || this.heldDrawings.length > 0) return null;
-    const [node] = this.selection;
+    const sole = this.soleSelection();
+    if (sole?.kind !== 'node') return null;
+    const { node } = sole;
     const corner = hitResizeCorner(this.rect(node), world, HANDLE_HIT_RADIUS_PX / this.view.scale);
     return corner ? { node, corner } : null;
   }
@@ -1836,8 +2071,9 @@ export class CanvasView {
   }
 
   private hitRegionHandle(world: Point): { context: ModelContext; corner: ResizeCorner } | null {
-    if (this.selectedRegions.size !== 1 || this.selection.size > 0) return null;
-    const [context] = this.selectedRegions;
+    const sole = this.soleSelection();
+    if (sole?.kind !== 'region') return null;
+    const { context } = sole;
     return hitRegionHandleAt(context, this.model, world, this.view.scale);
   }
 
@@ -1916,8 +2152,10 @@ export class CanvasView {
 
   // An edit to a frame's file rebuilds only that frame's subgraph, lazily, during layout; nothing
   // tells the view, so the selection is carried over to the rebuilt edge here.
-  private resolveSelectedEdge(): void {
-    if (this.selectedEdge) this.selectedEdge = this.currentEdgeMatching(this.selectedEdge);
+  private resolveSelectedEdges(): void {
+    this.selectedEdges = this.selectedEdges
+      .map((edge) => this.currentEdgeMatching(edge))
+      .filter((edge): edge is ModelEdge => edge != null);
   }
 
   // The bend drag a press at `world` would start on `edge`, or null when it misses the edge's grip.
@@ -1933,11 +2171,6 @@ export class CanvasView {
     return geometry != null && gripContains(geometry, this.pointInEdgeModel(edge, world), this.screenScaleOf(edge.from));
   }
 
-  private hitEdgeGrip(world: Point): ModelEdge | null {
-    const edge = this.hitEdge(world);
-    return edge && this.edgeGripContains(edge, world) ? edge : null;
-  }
-
   // An edge's geometry is in the coordinates of the model that draws it, which for an edge inside
   // an unfolded frame is the frame's subgraph. That model's locus already composes every frame
   // above it, so the point is mapped in one step rather than descended into frame by frame.
@@ -1950,21 +2183,15 @@ export class CanvasView {
     return this.gesture?.type === 'edge-bend' ? bendOverridesOf(this.gesture) : null;
   }
 
-  private updateCursor(world?: Point): void {
-    let cursor = this.tool === 'node' || this.tool === 'draw' ? 'crosshair' : 'default';
-    if (this.spaceDown || this.gesture?.type === 'pan') cursor = 'grab';
-    else if (world && this.tool !== 'draw') {
-      // In the order a press tests them, so the cursor never promises what a press would not do.
-      if (this.hitBadge(world)) cursor = 'pointer';
-      else if (this.hitPort(world)) cursor = 'crosshair';
-      else if (this.hitStrokeResizeHandle(world)) cursor = 'nwse-resize';
-      else if (this.selectedEdge && this.edgeGripContains(this.selectedEdge, world)) cursor = 'move';
-      else if (this.hitResizeHandle(world) || this.hitRegionHandle(world)) cursor = 'nwse-resize';
-      else if (this.hitNode(world) || this.hitGhost(world)) cursor = 'move';
-      else if (this.hitEdgeGrip(world)) cursor = 'move';
-      else if (this.hitRegion(world)) cursor = 'move';
-    }
-    this.canvas.style.cursor = cursor;
+  private updateCursor(world?: Point, shiftKey = false): void {
+    this.canvas.style.cursor = this.cursorAt(world, shiftKey);
+  }
+
+  private cursorAt(world: Point | undefined, shiftKey: boolean): CanvasCursor {
+    if (this.spaceDown || this.gesture?.type === 'pan') return 'grab';
+    const canvasCursor = this.tool === 'node' || this.tool === 'draw' ? 'crosshair' : 'default';
+    if (!world || this.tool === 'draw') return canvasCursor;
+    return cursorFor(this.pressTargetAt(world, { creating: this.createsOnPress(shiftKey) }), canvasCursor);
   }
 
   requestRender(): void {
@@ -1984,7 +2211,7 @@ export class CanvasView {
       ctx: this.ctx,
       rough: this.rough,
       baseRoughness: this.baseRoughness,
-      selectedEdge: this.selectedEdge,
+      selectedEdges: this.selectedEdges,
       hiddenTitles,
       edgeGeometry: this.edgeGeometry,
       expansions: this.expansionLayer,
@@ -2005,7 +2232,7 @@ export class CanvasView {
     const expansionState = this.expansionLayer.layout(this.model, performance.now());
     this.expansionLayer.collectLoci(this.model);
     this.resolveHeldDrawings();
-    this.resolveSelectedEdge();
+    this.resolveSelectedEdges();
     const painter = this.scenePainter(this.hiddenTitles);
     const dpr = this.devicePixelRatio;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -2201,9 +2428,9 @@ export class CanvasView {
   // A labelled edge is grabbed by its label, so only an unlabelled one gets a drawn grip; a
   // self-loop, which cannot be bent, gets none.
   private drawSelectedEdgeGrip(): void {
-    const edge = this.selectedEdge;
+    const edge = this.edgeSelectedAlone();
     const geometry = edge ? this.edgeGeometryOf(edge) : null;
-    if (!edge || !geometry?.chord || geometry.labelRect) return;
+    if (!edge || !geometry?.chord || !canBendAlong(geometry.chord) || geometry.labelRect) return;
     const center = this.edgeAnchor(edge);
     const { ctx } = this;
     ctx.save();
@@ -2220,12 +2447,9 @@ export class CanvasView {
   // Corner handles belong to a selection of exactly one node, one stroke or one group; any other
   // selection is not resizable, and handles it would not answer would lie about what a press does.
   private resizeHandleRect(): Rect | null {
-    if (this.selection.size === 1 && this.selectedRegions.size === 0 && this.heldDrawings.length === 0) {
-      const [node] = this.selection;
-      return this.isNodeVisible(node) ? this.rect(node) : null;
-    }
-    const resizable = this.resizableStrokeSelection();
-    return resizable ? this.strokeHandleRect(resizable) : null;
+    const sole = this.soleSelection();
+    if (sole?.kind === 'node') return this.isNodeVisible(sole.node) ? this.rect(sole.node) : null;
+    return sole?.kind === 'strokes' ? this.strokeHandleRect(sole.resizable) : null;
   }
 
   // Every selected region gets the same dashed outline a node does, drawn on its frame rather
@@ -2245,9 +2469,9 @@ export class CanvasView {
       ctx.restore();
     }
 
-    if (this.selectedRegions.size !== 1 || this.selection.size > 0) return;
-    const [context] = this.selectedRegions;
-    const rect = this.selectedRegionDisplayRectOf(context);
+    const sole = this.soleSelection();
+    if (sole?.kind !== 'region') return;
+    const rect = this.selectedRegionDisplayRectOf(sole.context);
     if (!rect) return;
     const handleSize = 8 / this.view.scale;
     ctx.fillStyle = canvasPalette.select;
@@ -2392,8 +2616,7 @@ export class CanvasView {
       if (shiftKey) this.holdDrawing(stroke, this.surfaceOfModel(stroke.model));
       else this.selectOnlyDrawing(stroke);
     }
-    this.selectedEdge = null;
-    this.gesture = this.beginMoveGesture(world, screen, { kind: 'drawing', drawing: stroke }, null);
+    this.gesture = this.beginMoveGesture(world, screen, { kind: 'drawing', drawing: stroke }, null, shiftKey);
     this.requestRender();
   }
 
@@ -2426,6 +2649,22 @@ export class CanvasView {
 
   // Selects every stroke grouped with one already selected — after a grouping changes what
   // belongs together, the selection follows it.
+  // Everything a selection can hold in the graph on screen: its nodes (an unfolded frame brings
+  // what is inside it along), its regions, and every stroke not already riding in a selected
+  // frame. Edges are left to the nodes they belong to, which every edit of a selection follows.
+  selectAll(): void {
+    this.clearSelection();
+    this.selection = new Set(this.model.nodes);
+    this.selectedRegions = new Set(this.model.contexts);
+    for (const surface of this.strokeSurfaces()) {
+      if (this.isInsideMovingFrame(surface.host, this.selection)) continue;
+      for (const stroke of surface.model.visuals?.strokes() ?? []) {
+        this.holdDrawing({ model: surface.model, id: stroke.id }, surface);
+      }
+    }
+    this.requestRender();
+  }
+
   holdWholeGroups(): void {
     const surfaces = this.strokeSurfaces();
     for (const held of [...this.heldDrawings]) {
@@ -2514,8 +2753,8 @@ export class CanvasView {
 
   // The selection is a lone stroke, or exactly the members of one group (a grouped stroke is never
   // held alone, so a single group selected means every held stroke shares the first one's group).
+  // Whether the held strokes are one stroke or one whole group — the strokes a corner can resize.
   private resizableStrokeSelection(): ResizableStrokes | null {
-    if (this.heldDrawings.length === 0 || this.selection.size > 0 || this.selectedRegions.size > 0) return null;
     const [first] = this.heldDrawings;
     const group = new Set(this.groupOfDrawing(first));
     const isOneWholeGroup = this.heldDrawings.length === group.size
@@ -2537,11 +2776,18 @@ export class CanvasView {
   }
 
   private hitStrokeResizeHandle(world: Point): { resizable: ResizableStrokes; corner: ResizeCorner } | null {
-    const resizable = this.resizableStrokeSelection();
-    if (!resizable) return null;
+    const sole = this.soleSelection();
+    if (sole?.kind !== 'strokes') return null;
+    const { resizable } = sole;
     const corner = hitResizeCorner(this.strokeHandleRect(resizable), world, HANDLE_HIT_RADIUS_PX / this.view.scale);
     return corner ? { resizable, corner } : null;
   }
+}
+
+function hasBecomeDrag(gesture: DragStart, screen: Point): boolean {
+  if (!gesture.moved && distanceBetween(screen, gesture.startScreen) < DRAG_THRESHOLD_PX) return false;
+  gesture.moved = true;
+  return true;
 }
 
 function isIdentityTransform(transform: StrokeTransform): boolean {

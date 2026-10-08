@@ -29,6 +29,9 @@ export interface RegionResizeSnapshot {
   corner: ResizeCorner;
   startRect: Rect;
   startWorld: Point;
+  // Whether the block had an authored `pos` when the press began. One without acquires it on the
+  // first movement, and an abandoned resize takes it away again.
+  hadDrawnArea: boolean;
 }
 
 export type SnapCoord = (value: number) => number;
@@ -59,41 +62,68 @@ export interface CombinedMoveSnapshot {
   moved: boolean;
 }
 
-export function applyCombinedMove(gesture: CombinedMoveSnapshot, world: Point, snap: SnapCoord): void {
+// What a combined move is measured on: the thing the user pressed, when it is one of the things the
+// move carries.
+export type MoveReference = { node: FlowNode } | { block: ContextBlock } | null;
+
+// Moves everything the gesture carries by one distance, and returns that distance in world units.
+// Snapping each piece on its own would let pieces sitting off the grid — or a distance landing on a
+// half step — travel different amounts, pulling a region away from its own members and strokes away
+// from what they annotate; so the distance is settled once, on the reference, and shared.
+export function applyCombinedMove(
+  gesture: CombinedMoveSnapshot,
+  world: Point,
+  snap: SnapCoord,
+  reference: MoveReference = null,
+): Point {
   gesture.moved = true;
-  const dx = world.x - gesture.startWorld.x;
-  const dy = world.y - gesture.startWorld.y;
+  const delta = combinedMoveDelta(gesture, world, snap, reference);
   for (const [node, start] of gesture.startPositions) {
     const scale = gesture.scales.get(node) ?? 1;
-    node.pos!.x = snap(start.x + dx / scale);
-    node.pos!.y = snap(start.y + dy / scale);
+    node.pos!.x = start.x + Math.round(delta.x / scale);
+    node.pos!.y = start.y + Math.round(delta.y / scale);
   }
   // Only blocks that already had a drawn area keep one (R3); carried pos-free regions follow
   // their members, which travel above.
   for (const [block, start] of gesture.startRects) {
-    block.pos!.x = snap(start.x + dx);
-    block.pos!.y = snap(start.y + dy);
+    block.pos!.x = start.x + Math.round(delta.x);
+    block.pos!.y = start.y + Math.round(delta.y);
   }
+  return delta;
 }
 
-// How far, in world units, a combined move actually carried what it moved. Positions snap
-// absolutely, so the pointer's raw delta can be up to a grid step off; strokes dragged along must
-// travel the snapped distance or they drift away from the nodes they annotate. Measured on
-// `reference` when given, otherwise on the first node or authored region the move carries; a
-// move with neither — strokes alone — follows the pointer exactly.
-export function effectiveMoveDelta(gesture: CombinedMoveSnapshot, world: Point, reference: FlowNode | null): Point {
-  const node = reference && gesture.startPositions.has(reference) ? reference : firstKey(gesture.startPositions);
-  if (node) {
-    const start = gesture.startPositions.get(node)!;
-    const scale = gesture.scales.get(node) ?? 1;
-    return { x: (node.pos!.x - start.x) * scale, y: (node.pos!.y - start.y) * scale };
+// The pointer's distance, adjusted so the reference — or else the first node, or else the first
+// drawn region the move carries — lands on the grid, in world units. A node inside a scaled frame
+// snaps in its own graph's units. A move of strokes alone has nothing on the grid, and follows the
+// pointer exactly.
+export function combinedMoveDelta(
+  gesture: CombinedMoveSnapshot,
+  world: Point,
+  snap: SnapCoord,
+  reference: MoveReference = null,
+): Point {
+  const pointer = { x: world.x - gesture.startWorld.x, y: world.y - gesture.startWorld.y };
+  const node = reference && 'node' in reference && gesture.startPositions.has(reference.node)
+    ? reference.node
+    : null;
+  const block = reference && 'block' in reference && gesture.startRects.has(reference.block)
+    ? reference.block
+    : null;
+  const snappedNode = node ?? (block ? null : firstKey(gesture.startPositions));
+  if (snappedNode) {
+    const start = gesture.startPositions.get(snappedNode)!;
+    const scale = gesture.scales.get(snappedNode) ?? 1;
+    return {
+      x: (snap(start.x + pointer.x / scale) - start.x) * scale,
+      y: (snap(start.y + pointer.y / scale) - start.y) * scale,
+    };
   }
-  const block = firstKey(gesture.startRects);
-  if (block) {
-    const start = gesture.startRects.get(block)!;
-    return { x: block.pos!.x - start.x, y: block.pos!.y - start.y };
+  const snappedBlock = block ?? firstKey(gesture.startRects);
+  if (snappedBlock) {
+    const start = gesture.startRects.get(snappedBlock)!;
+    return { x: snap(start.x + pointer.x) - start.x, y: snap(start.y + pointer.y) - start.y };
   }
-  return { x: world.x - gesture.startWorld.x, y: world.y - gesture.startWorld.y };
+  return pointer;
 }
 
 function firstKey<Key>(map: ReadonlyMap<Key, unknown>): Key | null {
@@ -127,7 +157,9 @@ export function applyRegionResize(gesture: RegionResizeSnapshot, world: Point, s
   const dx = world.x - gesture.startWorld.x;
   const dy = world.y - gesture.startWorld.y;
   const start = gesture.startRect;
-  const corner = gesture.context.block.pos!;
+  // A region with no drawn area acquires one the moment it is resized: the user is reserving
+  // space, which is the only thing that ever authors a block's `pos`.
+  const frame = gesture.context.block.pos ??= { ...start };
   const opposite = {
     x: gesture.corner[1] === 'w' ? start.x + start.w : start.x,
     y: gesture.corner[0] === 'n' ? start.y + start.h : start.y,
@@ -136,7 +168,7 @@ export function applyRegionResize(gesture: RegionResizeSnapshot, world: Point, s
     x: snap((gesture.corner[1] === 'w' ? start.x : start.x + start.w) + dx),
     y: snap((gesture.corner[0] === 'n' ? start.y : start.y + start.h) + dy),
   };
-  Object.assign(corner, normalizedRect(opposite, dragged));
+  Object.assign(frame, normalizedRect(opposite, dragged));
 }
 
 export function rollbackRegionMove(gesture: RegionMoveSnapshot): void {
@@ -151,7 +183,9 @@ export function rollbackRegionMove(gesture: RegionMoveSnapshot): void {
 }
 
 export function rollbackRegionResize(gesture: RegionResizeSnapshot): void {
-  Object.assign(gesture.context.block.pos!, gesture.startRect);
+  const { block } = gesture.context;
+  if (!gesture.hadDrawnArea) block.pos = null;
+  else Object.assign(block.pos!, gesture.startRect);
 }
 
 // While a resize is in progress, trust the live `block.pos` rather than `regionRectOf`, which

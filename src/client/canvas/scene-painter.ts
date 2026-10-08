@@ -102,7 +102,7 @@ export interface ScenePainterOptions {
   ctx: CanvasRenderingContext2D;
   rough: RoughCanvas;
   baseRoughness: number;
-  selectedEdge: ModelEdge | null;
+  selectedEdges: readonly ModelEdge[];
   // The inline editors paint over these; drawing them again underneath would show through.
   hiddenTitles: HiddenCanvasTitles;
   edgeGeometry: EdgeGeometryMap;
@@ -131,7 +131,7 @@ export class ScenePainter {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly rough: RoughCanvas;
   private readonly baseRoughness: number;
-  private readonly selectedEdge: ModelEdge | null;
+  private readonly selectedEdges: readonly ModelEdge[];
   private readonly hiddenTitles: HiddenCanvasTitles;
   private readonly edgeGeometry: EdgeGeometryMap;
   private readonly expansions: ExpansionLayer;
@@ -143,7 +143,7 @@ export class ScenePainter {
     this.ctx = options.ctx;
     this.rough = options.rough;
     this.baseRoughness = options.baseRoughness;
-    this.selectedEdge = options.selectedEdge;
+    this.selectedEdges = options.selectedEdges;
     this.hiddenTitles = options.hiddenTitles;
     this.edgeGeometry = options.edgeGeometry;
     this.expansions = options.expansions;
@@ -265,7 +265,7 @@ export class ScenePainter {
 
   // Selection outranks the canvas layer's colour, which outranks the edge kind's default.
   private edgeColor(edge: ModelEdge, style: EdgeStyle): string {
-    if (edge === this.selectedEdge) return canvasPalette.select;
+    if (this.selectedEdges.includes(edge)) return canvasPalette.select;
     if (style.color) return resolveLayerColor(style.color);
     return edge.kind === 'error' ? canvasPalette.error : canvasPalette.edge;
   }
@@ -279,7 +279,7 @@ export class ScenePainter {
     const options: RoughOptions = {
       seed: seedFrom(`${edge.from.name}->${edge.spec.target}:${edge.spec.label ?? ''}`),
       stroke: color,
-      strokeWidth: edge === this.selectedEdge ? 2.2 : 1.5,
+      strokeWidth: this.selectedEdges.includes(edge) ? 2.2 : 1.5,
       roughness: this.roughnessFor(EDGE_ROUGHNESS),
       bowing: 0.4,
       disableMultiStroke: lineStroke.singlePass,

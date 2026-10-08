@@ -386,12 +386,56 @@ export function membershipChangesForCombinedMove(
 // inverse of drawing a region over existing nodes (R9a). Each overlapping region is evaluated
 // independently (R15). Callers pass a model of the scope the node was created in.
 export function membershipChangesForNewNode(model: FlowModel, node: FlowNode): MembershipChange[] {
-  const regionRects = new Map<ContextBlock, Rect>();
+  return membershipChangesForMove(model, [node], regionFramesOf(model));
+}
+
+// Every region's frame as it stands now — what to measure against once an edit has begun to
+// change the frames, by taking members away or giving them new ones.
+export function regionFramesOf(model: FlowModel): Map<ContextBlock, Rect> {
+  const frames = new Map<ContextBlock, Rect>();
   for (const context of model.contexts) {
     const frame = regionRectOf(model, context);
-    if (frame) regionRects.set(context.block, frame);
+    if (frame) frames.set(context.block, frame);
   }
-  return membershipChangesForMove(model, [node], regionRects);
+  return frames;
+}
+
+// The frame each region with no drawn area shows now — what `keepEmptiedRegionsInPlace` needs
+// to remember from before an edit takes members away.
+export function framesOfUndrawnRegions(model: FlowModel): Map<ContextBlock, Rect> {
+  const frames = new Map<ContextBlock, Rect>();
+  for (const context of model.contexts) {
+    const frame = context.block.pos ? null : regionRectOf(model, context);
+    if (frame) frames.set(context.block, frame);
+  }
+  return frames;
+}
+
+// R18a: a region with no drawn area is the bounds of its members, so an edit that leaves it none
+// would keep it in the file with nothing to draw — invisible, and out of reach of every gesture
+// that could select or delete it. It keeps the frame it had instead, as a drawn area: what a
+// resize gives it too (R30), and for the same reason — the user acted on that space.
+export function keepEmptiedRegionsInPlace(
+  framesBefore: ReadonlyMap<ContextBlock, Rect>,
+  membersAfter: (block: ContextBlock) => readonly string[],
+): void {
+  for (const [block, frame] of framesBefore) {
+    if (block.pos || membersAfter(block).length > 0) continue;
+    block.pos = {
+      x: Math.round(frame.x),
+      y: Math.round(frame.y),
+      w: Math.round(frame.w),
+      h: Math.round(frame.h),
+    };
+  }
+}
+
+// A region's members once a gesture's membership changes land, which the gesture reports
+// before they are written.
+export function membersAfterChanges(block: ContextBlock, changes: readonly MembershipChange[]): string[] {
+  const leaving = new Set(changes.filter((change) => change.block === block && !change.joins).map((change) => change.node.name));
+  const joining = changes.filter((change) => change.block === block && change.joins).map((change) => change.node.name);
+  return [...block.members.filter((name) => !leaving.has(name)), ...joining];
 }
 
 // One node's rect in its own model's coordinates. Callers must prefer this over reading `pos`
@@ -482,6 +526,12 @@ export function containingItems(doc: FlowDocument, node: FlowNode): FlowItem[] {
     }
   }
   return doc.items;
+}
+
+// The `graph:` block these items belong to, or null for the document's body.
+export function scopeNameOfItems(doc: FlowDocument, items: FlowItem[]): string | null {
+  if (items === doc.items) return null;
+  return doc.items.find((item): item is GraphItem => item.kind === 'graph' && item.items === items)?.name ?? null;
 }
 
 export function containingItemsForContext(doc: FlowDocument, block: ContextBlock): FlowItem[] {
@@ -1261,6 +1311,20 @@ export function addEdge(
     data: null,
   });
   return fromNode.edges[fromNode.edges.length - 1];
+}
+
+// An edge of `fromNode` that says exactly what a new unlabelled one to the same place would.
+export function findUnlabelledEdge(
+  fromNode: FlowNode,
+  targetName: string,
+  innerTarget: string | null = null,
+  innerSource: string | null = null,
+): EdgeSpec | null {
+  return fromNode.edges.find((spec) => spec.target === targetName
+    && !spec.label
+    && !spec.data
+    && spec.innerTarget === innerTarget
+    && spec.innerSource === innerSource) ?? null;
 }
 
 export function deleteEdge(edge: ModelEdge): void {

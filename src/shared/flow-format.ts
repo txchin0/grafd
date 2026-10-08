@@ -606,7 +606,7 @@ export function writeReferencesForNode(
   node.references = references;
 }
 
-const ILLEGAL_IN_NAME = /:(\s|$)|[{}]/;
+const ILLEGAL_IN_NAME = /:(\s|$)|[{}"]|^#/;
 
 /** Whether a name can be a node name at all (spec §3.2), which sanitizeName enforces. */
 export function isLegalNodeName(name: string): boolean {
@@ -616,12 +616,20 @@ export function isLegalNodeName(name: string): boolean {
 // Node names may not contain ": " or curly braces (spec §3.2); braces mark an inner
 // subgraph target on edges. The format is line-based, so names are collapsed to one line.
 export function sanitizeName(rawName: string): string {
-  return rawName
+  const collapsed = rawName
     .replace(/\s+/g, ' ')
     .replace(/:(\s|$)/g, ' -$1')
     .replace(/[{}]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  return withoutReservedNameCharacters(collapsed).replace(/\s+/g, ' ').trim();
+}
+
+// The format has no escapes, so two characters can never be part of a name: a `"` ends an edge's
+// label early wherever the name is the edge's target, and a leading `#` turns the node's own
+// line into a comment. Name fields refuse them as they are typed.
+export function withoutReservedNameCharacters(text: string): string {
+  return text.replace(/"/g, '').replace(/^[\s#]*#/, '');
 }
 
 // Edge data keys are read back with PROPERTY_LINE, so a key that is not a single identifier

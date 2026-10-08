@@ -22,7 +22,8 @@ The codebase is TypeScript, compiled by `tsc` alone — no bundler. `npm run bui
 `src/` to `dist/` (which is served, never edited); `npm run watch` recompiles on change
 (pair it with a running server; only server-side edits need a restart). `npm run typecheck`
 checks everything including tests without emitting, and `npm test` runs the Vitest unit
-tests in `tests/`.
+tests in `tests/`, including random editing sessions against the headless editor (see
+`tests/` under Architecture).
 
 ## Linting .flow files
 
@@ -131,9 +132,17 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   - `canvas-view.ts` — the interactive surface: camera, tool modes, hit-testing, pointer
     gestures (drag-create, move, resize, port-drag edge creation, marquee), subgraph camera
     animations, and the editing chrome (selection outlines, ports, marquee, in-flight edge).
-    Owns the edge-geometry map that hit-testing reads. Nodes and regions share one selection:
+    Owns the edge-geometry map that hit-testing reads. What a press lands on is settled once, by
+    `pressTargetAt`, and read by the press, the hover cursor (`cursorFor`, exhaustive over the
+    targets) and the context menu alike; a new kind of thing on the canvas is a new target there,
+    never a branch in one of the readers. The tool only decides what bare canvas (and an unfolded
+    frame's empty interior) does — what is already drawn answers every tool the same way, double-
+    click excepted, which ranks edges first on purpose. Nodes and regions share one selection:
     shift-click and marquee multi-select both kinds, a mixed selection moves as one gesture,
-    and resize handles appear only for a lone node or lone region. Dragging an edge's grip (its
+    and resize handles appear only for a lone node or lone region. Every gesture that drags
+    starts as a press and becomes a drag only past one threshold (`hasBecomeDrag`); until then
+    nothing moves or is written, and letting go is a click on what was pressed — a handle's or
+    port's owner included. Dragging an edge's grip (its
     label, or the handle at its middle) bends it; the bend is painted as an override (keyed by
     the edge's identity, so a rebuild mid-drag does not lose it) and written to the layer once,
     on release, and dragging back onto the chord straightens it. What a press on a grip means is
@@ -240,11 +249,37 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   one entry in `THEMES` — nothing else —
   and `npm run import:theme -- path/to/theme.color-theme.json` (src/tools/theme-import.ts)
   does both from a VS Code color theme.
-- `src/client/main.ts` — app state, WebSocket sync, sidebar, keyboard shortcuts, and the action
-  boundaries around edits that reach more than one document (`edit-session.ts` owns the history
-  itself).
+- `src/client/editor-core.ts` — the editor without its page: the open flow, the workspace and its
+  delegate, document routing, every command an edit runs (and the action boundaries around edits
+  that reach more than one document — `edit-session.ts` owns the history itself), dive
+  navigation, and the canvas context menus as data. It touches no DOM: floating editors, menus,
+  breadcrumb, sidebar and graph panel are reached through the `EditorShell` it is handed, which
+  is what lets tests run the whole editing stack headless.
+- `src/client/main.ts` — the page shell: DOM elements, sidebar, breadcrumb, graph panel, editors,
+  modals, toolbar, preferences and keyboard shortcuts, wired to the core. It edits nothing itself.
 - `tests/` — Vitest unit tests for the parser/serializer, document mutations, server file
-  logic, expansion geometry, and camera math.
+  logic, expansion geometry, and camera math. `editor-harness.ts` runs the real editor core
+  headless (stand-in canvas, in-memory workspace, fake time, counted ids); gestures go in, files
+  come out. `editor-sessions.test.ts` plays random sessions against it with fast-check and checks
+  the rules in `session-invariants.ts` after every step — files lint clean and round-trip, the
+  selection holds only live objects, each gesture is one undo step that restores exactly, a
+  dropped node belongs to exactly the regions enclosing it, the hover cursor predicts the press,
+  and the node and region tools leave every object as grabbable as the select tool does — and
+  what a user expects of the step itself, in `session-expectations.ts`: a click writes nothing, a
+  plain click selects one thing and a shift-click changes exactly one, a drag carries what it
+  grabbed the whole way, an abandoned drag writes nothing, and the commands do what they say. A
+  failure is shrunk to the shortest session that still breaks the rule, and once fixed it joins
+  the pinned regressions that run first on every `npm test`. `SESSION_RUNS=<n>` searches deeper
+  than `npm test` does.
+
+## Adding a kind of canvas object, a tool, or a gesture
+
+The random sessions only reach what they know about, so a change that adds to the canvas is not
+done until they do: put one of the new kind in `tests/session-fixtures.ts`, give it a target in
+`tests/session-actions.ts` (and the gesture or command, if it is new), and run
+`SESSION_RUNS=1000 npx vitest run tests/editor-sessions.test.ts`. When a hand-found UI bug gets
+past them, fix it and also ask which rule or which missing target let it through, and add that —
+the fix closes one bug, the rule closes its whole class.
 
 The browser runs the compiled output as native ES modules — client code imports shared code
 relatively (`../shared/flow-format.js`), which resolves identically inside `dist/` and as

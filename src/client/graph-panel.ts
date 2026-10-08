@@ -54,6 +54,8 @@ export interface GraphPanelOptions {
   openFlow(): OpenFlow | null;
   // Runs a mutation against the open document and commits it. `now` skips the typing debounce.
   edit(mutation: () => void, options?: { commit?: 'debounce' | 'now' }): void;
+  // Writes the open graph's name, refusing one typed empty — the name is required.
+  renameGraph(requestedName: string): void;
   linkContext(): LinkContext;
   // Groups the writes inside it into one undo step, however many documents they reach.
   runAction<T>(body: () => T): T;
@@ -112,8 +114,13 @@ export function createGraphPanel(options: GraphPanelOptions): GraphPanel {
     if (document.activeElement !== field) field.value = value;
   }
 
-  function render({ doc, path, scope }: OpenFlow): void {
-    const displayName = scope ?? (unquote(getPreambleField(doc, 'name') ?? '') || path);
+  function displayNameOf({ doc, path, scope }: OpenFlow): string {
+    return scope ?? (unquote(getPreambleField(doc, 'name') ?? '') || path);
+  }
+
+  function render(flow: OpenFlow): void {
+    const { doc, scope } = flow;
+    const displayName = displayNameOf(flow);
     const scoped = scope != null;
     elements.toggle.textContent = `☰ ${displayName}`;
     setUnlessFocused(elements.name, displayName);
@@ -143,6 +150,13 @@ export function createGraphPanel(options: GraphPanelOptions): GraphPanel {
         options.hostRenamed(mirroredHost, hostOldName);
       }
     });
+    elements.name.value = displayNameOf(flow);
+  }
+
+  // A field cleared out shows the name back, since the core refuses to write an empty one.
+  function renameGraph(flow: OpenFlow): void {
+    options.renameGraph(elements.name.value);
+    elements.name.value = displayNameOf(flow);
   }
 
   elements.toggle.addEventListener('click', () => {
@@ -153,7 +167,7 @@ export function createGraphPanel(options: GraphPanelOptions): GraphPanel {
     const flow = options.openFlow();
     if (!flow) return;
     if (flow.scope) renameScopedBlock(flow);
-    else options.edit(() => setPreambleField(flow.doc, 'name', collapseToSingleLine(elements.name.value)));
+    else renameGraph(flow);
   });
 
   for (const field of preambleTextFields) {

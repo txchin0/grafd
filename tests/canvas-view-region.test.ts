@@ -836,14 +836,14 @@ describe('multi-selecting regions with the select tool', () => {
     expect(view.selectedRegions.size).toBe(1);
   });
 
-  it('pressing an already-selected region keeps the whole selection', () => {
+  it('clicking an already-selected region without dragging makes it the whole selection', () => {
     const { view, canvas, nodeNamed } = openedCanvas(MIXED_FLOW);
     pressAt(canvas, centerOf(nodeNamed('Wanderer')));
     shiftPressAt(canvas, { x: 0, y: 300 });
     pressAt(canvas, { x: 0, y: 300 });
 
     expect(view.selectedRegion?.block.name).toBe('Zone');
-    expect([...view.selection]).toEqual([nodeNamed('Wanderer')]);
+    expect([...view.selection]).toEqual([]);
   });
 
   it('closes open editors at press time, even on a shift-toggle', () => {
@@ -859,8 +859,10 @@ describe('moving a mixed selection', () => {
     pressAt(canvas, { x: 0, y: 300 });
     dragOnCanvas(canvas, centerOf(nodeNamed('Wanderer')), { x: 1900, y: 744 }, { shiftKey: true });
 
-    expect(contextBlockNamed(doc, 'Zone')!.pos).toEqual({ x: 800, y: 600, w: 800, h: 600 });
-    expect(nodeNamed('Inside').pos).toEqual({ x: 1000, y: 800, w: 200, h: 88 });
+    // Wanderer, the node pressed, snaps onto the grid (y 100 + 600 lands on 704); everything else
+    // travels exactly as far, so nothing shifts against anything else.
+    expect(contextBlockNamed(doc, 'Zone')!.pos).toEqual({ x: 800, y: 604, w: 800, h: 600 });
+    expect(nodeNamed('Inside').pos).toEqual({ x: 1000, y: 804, w: 200, h: 88 });
     expect(nodeNamed('Wanderer').pos).toEqual({ x: 1800, y: 704, w: 200, h: 88 });
 
     const movedCalls = (actions.regionMoved as unknown as { mock: { calls: [RegionTarget[], FlowNode[]][] } }).mock.calls;

@@ -8,6 +8,7 @@
 
 import type { CanvasView, RegionTarget } from './canvas/canvas-view.js';
 import { positionInlineTitlePanel } from './inline-title-overlay.js';
+import { refuseReservedNameCharacters } from './name-input.js';
 
 /** Applies the name, reports why it cannot be used, or `undefined` when the edit was abandoned. */
 export type RenameRegion = (
@@ -33,6 +34,7 @@ export interface RegionNameEditor {
 export function createRegionNameEditor(context: RegionNameEditorContext): RegionNameEditor {
   const panel = document.getElementById('region-name-editor') as HTMLDivElement;
   const input = document.getElementById('region-name-input') as HTMLInputElement;
+  refuseReservedNameCharacters(input);
   const error = document.getElementById('region-name-error') as HTMLSpanElement;
   let editing: RegionTarget | null = null;
   let applyName: RenameRegion = context.renameRegion;
