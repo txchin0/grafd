@@ -8,25 +8,26 @@ import fc from 'fast-check';
 import type { Tool } from '../src/client/canvas/canvas-view.js';
 import { regionRectOf } from '../src/client/flow-doc.js';
 import { collapseToSingleLine, type FlowNode } from '../src/shared/flow-format.js';
-import { strokeBounds } from '../src/shared/canvas-drawings.js';
 import type { Point } from '../src/client/geometry.js';
 import type { MenuItem } from '../src/client/context-menu.js';
 import { nodeBadges } from '../src/client/canvas/node-badges.js';
+import { EDITOR_COMMANDS, type EditorCommand } from '../src/client/editor-commands.js';
 import type { HeadlessEditor } from './editor-harness.js';
 
+// What a pick can aim at. Handles, ports and grips are all one kind, `affordance`, resolved
+// against what the view itself reports is on screen (`CanvasView.affordances`), so a target never
+// re-derives where the view draws one.
 export const TARGET_KINDS = [
   'node',
-  'node-corner',
-  'node-port',
   'frame-node',
   'badge',
+  'ghost',
   'region-border',
   'region-inside',
-  'region-corner',
   'edge',
   'edge-line',
   'stroke',
-  'stroke-corner',
+  'affordance',
   'empty',
 ] as const;
 export type TargetKind = (typeof TARGET_KINDS)[number];
@@ -40,22 +41,9 @@ export interface TargetPick {
 
 export const TOOLS = ['select', 'node', 'context', 'draw'] as const satisfies readonly Tool[];
 
-export const COMMANDS = [
-  'delete',
-  'undo',
-  'redo',
-  'copy',
-  'cut',
-  'paste',
-  'duplicate',
-  'group',
-  'ungroup',
-  'escape',
-  'back',
-  'fit',
-  'select-all',
-] as const;
-export type Command = (typeof COMMANDS)[number];
+// Every keyboard command the page binds, from the same table it binds them with.
+export const COMMANDS = EDITOR_COMMANDS;
+export type Command = EditorCommand;
 
 // What people actually type into a name or description field, the awkward cases included: the
 // format's own punctuation, surrounding and inner whitespace, a name already taken, nothing. A
@@ -99,6 +87,9 @@ export type SessionAction =
   | { type: 'wiggle'; from: TargetPick; by: Point }
   // Pressed and carried away, then Escape before letting go.
   | { type: 'abandoned-drag'; from: TargetPick; by: Point }
+  // Clicks something, then drags one of the affordances that selecting it put on screen — the only
+  // way to a corner handle or a bend grip that does not wait on an earlier step to select it.
+  | { type: 'grab-affordance'; owner: TargetPick; affordance: number; by: Point }
   | { type: 'menu'; target: TargetPick; choice: number }
   | { type: 'rename'; target: TargetPick; name: number }
   | { type: 'describe'; target: TargetPick; text: number }
@@ -119,7 +110,7 @@ export interface ActionTrace {
   typed: string | null;
 }
 
-const MAX_PICK_INDEX = 7;
+export const MAX_PICK_INDEX = 7;
 const MAX_NUDGE = 4;
 const MAX_DRAG_OFFSET = 160;
 // Far from anything the fixture draws, so a press there lands on bare canvas.
@@ -147,6 +138,7 @@ export const sessionAction: fc.Arbitrary<SessionAction> = fc.oneof(
   { weight: 3, arbitrary: fc.record({ type: fc.constant('nudge' as const), from: targetPick, by: dragOffset, shift: fc.boolean() }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('wiggle' as const), from: targetPick, by: dragOffset }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('abandoned-drag' as const), from: targetPick, by: dragOffset }) },
+  { weight: 2, arbitrary: fc.record({ type: fc.constant('grab-affordance' as const), owner: targetPick, affordance: fc.nat(MAX_PICK_INDEX), by: dragOffset }) },
   { weight: 2, arbitrary: fc.record({ type: fc.constant('menu' as const), target: targetPick, choice: fc.nat(12) }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('rename' as const), target: targetPick, name: fc.nat(TYPED_NAMES.length - 1) }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('describe' as const), target: targetPick, text: fc.nat(TYPED_DESCRIPTIONS.length - 1) }) },
@@ -166,28 +158,28 @@ function anchorOf(editor: HeadlessEditor, pick: TargetPick): Point | null {
   const model = view.model;
   switch (pick.kind) {
     case 'node':
-    case 'node-corner':
-    case 'node-port':
     case 'frame-node': {
       const node = pickedNode(editor, pick);
       if (!node) return null;
       const { x, y, w, h } = view.rect(node);
-      if (pick.kind === 'node-corner') return { x: x + w, y: y + h };
-      if (pick.kind === 'node-port') return { x: x + w, y: y + h / 2 };
       return { x: x + w / 2, y: y + h / 2 };
     }
+    case 'ghost': {
+      const ghost = itemAt(model.ghosts, pick.index);
+      return ghost ? { x: ghost.pos.x + ghost.pos.w / 2, y: ghost.pos.y + ghost.pos.h / 2 } : null;
+    }
+    case 'affordance':
+      return itemAt(view.affordances(), pick.index)?.point ?? null;
     case 'badge': {
       const badges = model.nodes.flatMap((node) => nodeBadges(model, node, editor.core.expansions.isOpen(node.id)));
       return itemAt(badges, pick.index);
     }
     case 'region-border':
-    case 'region-inside':
-    case 'region-corner': {
+    case 'region-inside': {
       const context = itemAt(model.contexts, pick.index);
       const rect = context ? regionRectOf(model, context) : null;
       if (!rect) return null;
       if (pick.kind === 'region-inside') return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
-      if (pick.kind === 'region-corner') return { x: rect.x + rect.w, y: rect.y + rect.h };
       return { x: rect.x + rect.w / 3, y: rect.y };
     }
     case 'edge':
@@ -198,13 +190,9 @@ function anchorOf(editor: HeadlessEditor, pick: TargetPick): Point | null {
       const path = view.edgeGeometryOf(edge)!.path;
       return path[Math.floor((path.length - 1) * EDGE_LINE_FRACTION)];
     }
-    case 'stroke':
-    case 'stroke-corner': {
+    case 'stroke': {
       const stroke = itemAt(model.visuals?.strokes() ?? [], pick.index);
-      if (!stroke) return null;
-      if (pick.kind === 'stroke') return stroke.points[Math.floor(stroke.points.length / 2)];
-      const bounds = strokeBounds(stroke);
-      return { x: bounds.x + bounds.w, y: bounds.y + bounds.h };
+      return stroke ? stroke.points[Math.floor(stroke.points.length / 2)] : null;
     }
 
     case 'empty':
@@ -286,10 +274,20 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       trace.path = pathBetween(from, away);
       editor.press(from);
       for (const point of trace.path.slice(1)) editor.moveTo(point);
-      escape(editor);
+      editor.core.runCommand('escape');
       editor.moveTo({ x: away.x + action.by.x, y: away.y + action.by.y });
       editor.release(away);
       await editor.settle();
+      return trace;
+    }
+    case 'grab-affordance': {
+      const owner = resolveTarget(editor, action.owner);
+      if (!owner) return trace;
+      await editor.click(owner);
+      const from = resolveTarget(editor, { kind: 'affordance', index: action.affordance, nudge: { x: 0, y: 0 } });
+      if (!from) return trace;
+      trace.path = pathBetween(from, { x: from.x + action.by.x, y: from.y + action.by.y });
+      await editor.drag(trace.path);
       return trace;
     }
     case 'menu': {
@@ -343,66 +341,10 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       return trace;
     }
     case 'command':
-      runCommand(editor, action.command);
+      editor.core.runCommand(action.command);
       await editor.settle();
       return trace;
   }
-}
-
-// The keyboard shortcuts of main.ts's wireKeyboard, by what they call.
-function runCommand(editor: HeadlessEditor, command: Command): void {
-  const { core } = editor;
-  switch (command) {
-    case 'delete':
-      core.deleteSelection();
-      return;
-    case 'undo':
-      core.undo();
-      return;
-    case 'redo':
-      core.redo();
-      return;
-    case 'copy':
-      if (core.hasCopyableSelection()) core.clipboard.copy();
-      return;
-    case 'cut':
-      if (core.hasCopyableSelection()) core.clipboard.cut();
-      return;
-    case 'paste':
-      core.clipboard.paste();
-      return;
-    case 'duplicate':
-      core.clipboard.duplicateSelection();
-      return;
-    case 'group':
-      if (core.view.selectedDrawings.length > 0) core.groupSelectedDrawings();
-      return;
-    case 'ungroup':
-      if (core.view.selectedDrawings.length > 0) core.ungroupSelectedDrawings();
-      return;
-    case 'escape':
-      escape(editor);
-      return;
-    case 'back':
-      if (core.trail().length > 0) void core.navigateBackTo(core.trail().length - 1);
-      return;
-    case 'fit':
-      core.view.fitToContent();
-      return;
-    case 'select-all':
-      core.view.selectAll();
-      return;
-  }
-}
-
-// As main.ts's Escape: it abandons a gesture under way first, and otherwise steps back out of a
-// dive when there is one to leave or drops the selection.
-function escape(editor: HeadlessEditor): void {
-  const { core } = editor;
-  if (core.view.cancelGesture()) return;
-  const trailLength = core.trail().length;
-  if (trailLength > 0) void core.navigateBackTo(trailLength - 1);
-  else core.view.clearSelection();
 }
 
 // A drag passes through intermediate points, as a real pointer does, so gestures that only
@@ -416,7 +358,7 @@ export function pathBetween(from: Point, to: Point): Point[] {
 }
 
 export function gesturesIn(action: SessionAction): number {
-  return action.type === 'double-click' ? 2 : 1;
+  return action.type === 'double-click' || action.type === 'grab-affordance' ? 2 : 1;
 }
 
 export function isHistoryAction(action: SessionAction): boolean {

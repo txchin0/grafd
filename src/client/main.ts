@@ -34,6 +34,7 @@ import { createSidebarFiles } from './sidebar-files.js';
 import { createGraphPanel } from './graph-panel.js';
 import { getBlockProp, setBlockProp } from './context/index.js';
 import { createEditorCore } from './editor-core.js';
+import { commandForKey } from './editor-commands.js';
 
 let currentPreferences: Preferences = loadPreferences();
 applyTheme(currentPreferences.theme);
@@ -99,6 +100,12 @@ const core = createEditorCore({
       refreshFromDoc: () => editors.refreshFromDoc(),
     },
     openMenu: (items, at) => contextMenu.open(items, at),
+    closePopups: () => {
+      contextMenu.close();
+      const helpWasOpen = !elements.helpOverlay.classList.contains('hidden');
+      elements.helpOverlay.classList.add('hidden');
+      return helpWasOpen;
+    },
     openFlowChanged: (flow) => {
       renderBreadcrumb();
       graphPanel.render(flow);
@@ -408,50 +415,16 @@ function wireKeyboard(): void {
       return;
     }
 
+    const command = commandForKey(event);
+    if (command) {
+      if (core.runCommand(command)) event.preventDefault();
+      return;
+    }
+
     const ctrl = event.ctrlKey || event.metaKey;
-    if (ctrl && event.key.toLowerCase() === 'z') {
-      event.preventDefault();
-      if (event.shiftKey) core.redo();
-      else core.undo();
-    } else if (ctrl && event.key.toLowerCase() === 'y') {
-      event.preventDefault();
-      core.redo();
-    } else if (ctrl && event.key.toLowerCase() === 'a') {
-      event.preventDefault();
-      view.selectAll();
-    } else if (ctrl && event.key.toLowerCase() === 'b') {
+    if (ctrl && event.key.toLowerCase() === 'b') {
       event.preventDefault();
       toggleSidebar();
-    } else if (ctrl && event.key.toLowerCase() === 'c') {
-      if (!core.hasCopyableSelection()) return;
-      event.preventDefault();
-      core.clipboard.copy();
-    } else if (ctrl && event.key.toLowerCase() === 'x') {
-      if (!core.hasCopyableSelection()) return;
-      event.preventDefault();
-      core.clipboard.cut();
-    } else if (ctrl && event.key.toLowerCase() === 'v') {
-      event.preventDefault();
-      core.clipboard.paste();
-    } else if (ctrl && event.key.toLowerCase() === 'g') {
-      if (view.selectedDrawings.length === 0) return;
-      event.preventDefault();
-      if (event.shiftKey) core.ungroupSelectedDrawings();
-      else core.groupSelectedDrawings();
-    } else if (ctrl && event.key.toLowerCase() === 'd') {
-      event.preventDefault();
-      core.clipboard.duplicateSelection();
-    } else if (event.key === 'Delete' || event.key === 'Backspace') {
-      core.deleteSelection();
-    } else if (ctrl && event.key === '0') {
-      event.preventDefault();
-      view.fitToContent();
-    } else if (ctrl && (event.key === '=' || event.key === '+')) {
-      event.preventDefault();
-      view.stepZoom(1);
-    } else if (ctrl && event.key === '-') {
-      event.preventDefault();
-      view.stepZoom(-1);
     } else if (!ctrl && (event.key.toLowerCase() === 'v' || event.key === '1')) {
       setTool('select');
     } else if (!ctrl && (event.key.toLowerCase() === 'n' || event.key === '2')) {
@@ -460,19 +433,6 @@ function wireKeyboard(): void {
       setTool('context');
     } else if (!ctrl && (event.key.toLowerCase() === 'd' || event.key === '4')) {
       setTool('draw');
-    } else if (event.key === 'Escape' && view.cancelGesture()) {
-      event.preventDefault();
-    } else if (event.key === 'Escape') {
-      contextMenu.close();
-      editors.closeAll();
-      const helpWasOpen = !elements.helpOverlay.classList.contains('hidden');
-      elements.helpOverlay.classList.add('hidden');
-      const trailLength = core.trail().length;
-      if (!helpWasOpen && trailLength > 0) {
-        void core.navigateBackTo(trailLength - 1);
-      } else if (!helpWasOpen) {
-        view.clearSelection();
-      }
     } else if (event.key === '?') {
       elements.helpOverlay.classList.toggle('hidden');
     }

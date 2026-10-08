@@ -135,14 +135,19 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
     Owns the edge-geometry map that hit-testing reads. What a press lands on is settled once, by
     `pressTargetAt`, and read by the press, the hover cursor (`cursorFor`, exhaustive over the
     targets) and the context menu alike; a new kind of thing on the canvas is a new target there,
-    never a branch in one of the readers. The tool only decides what bare canvas (and an unfolded
-    frame's empty interior) does — what is already drawn answers every tool the same way, double-
-    click excepted, which ranks edges first on purpose. Nodes and regions share one selection:
+    never a branch in one of the readers. `CURSOR_GRABS` says beside it which cursors promise that
+    a drag carries what is under them, and the session tests hold each cursor to that. Corner
+    handles of every kind come from one place (`cornerHandles`), which drawing and pressing them
+    both read; `affordances()` lists where every handle, port and grip on screen sits, and
+    `pressTargetKindAt` what a press would land on, for tests to aim with. The tool only decides
+    what bare canvas (and an unfolded frame's empty interior) does — what is already drawn answers
+    the select, node and region tools the same way, double-click excepted, which ranks edges first
+    on purpose; the pen draws over everything. Nodes and regions share one selection:
     shift-click and marquee multi-select both kinds, a mixed selection moves as one gesture,
     and resize handles appear only for a lone node or lone region. Every gesture that drags
     starts as a press and becomes a drag only past one threshold (`hasBecomeDrag`); until then
     nothing moves or is written, and letting go is a click on what was pressed — a handle's or
-    port's owner included. Dragging an edge's grip (its
+    port's owner included, and a ghost, which a click makes real. Dragging an edge's grip (its
     label, or the handle at its middle) bends it; the bend is painted as an override (keyed by
     the edge's identity, so a rebuild mid-drag does not lose it) and written to the layer once,
     on release, and dragging back onto the chord straightens it. What a press on a grip means is
@@ -252,7 +257,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
 - `src/client/editor-core.ts` — the editor without its page: the open flow, the workspace and its
   delegate, document routing, every command an edit runs (and the action boundaries around edits
   that reach more than one document — `edit-session.ts` owns the history itself), dive
-  navigation, and the canvas context menus as data. It touches no DOM: floating editors, menus,
+  navigation, the canvas context menus as data, and the keyboard commands (`runCommand`; which
+  keys run which command is the table in `editor-commands.ts`, read by main.ts's keyboard handler
+  and the test sessions alike). It touches no DOM: floating editors, menus,
   breadcrumb, sidebar and graph panel are reached through the `EditorShell` it is handed, which
   is what lets tests run the whole editing stack headless.
 - `src/client/main.ts` — the page shell: DOM elements, sidebar, breadcrumb, graph panel, editors,
@@ -275,9 +282,23 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
 ## Adding a kind of canvas object, a tool, or a gesture
 
 The random sessions only reach what they know about, so a change that adds to the canvas is not
-done until they do: put one of the new kind in `tests/session-fixtures.ts`, give it a target in
-`tests/session-actions.ts` (and the gesture or command, if it is new), and run
-`SESSION_RUNS=1000 npx vitest run tests/editor-sessions.test.ts`. When a hand-found UI bug gets
+done until they do, and the tests say so rather than leaving it to memory:
+
+- A new kind of press target (a variant of `PressTarget` in canvas-view.ts) does not compile until
+  `cursorFor` gives it a cursor and `EVERY_PRESS_TARGET` in `tests/editor-sessions.test.ts` lists
+  it, and the coverage test there fails until a session target reaches it. A new handle, port or
+  grip is reached by reporting it from `affordances()` — targets never compute where the view
+  draws something. A new kind of object needs one in `tests/session-fixtures.ts` and a pick in
+  `tests/session-actions.ts`.
+- A new cursor does not compile until `CURSOR_GRABS` says whether it promises a drag.
+- A new keyboard command goes in `editor-commands.ts` and `runCommand`; the sessions press every
+  command in that table.
+- A new gesture needs an action in `tests/session-actions.ts`, and usually an expectation in
+  `tests/session-expectations.ts` for what it should do. The existing ones skip any step that
+  reshapes something rather than moving it, so a new transform is unchecked there until it has
+  its own rule.
+
+Then run `SESSION_RUNS=1000 npx vitest run tests/editor-sessions.test.ts`. When a hand-found UI bug gets
 past them, fix it and also ask which rule or which missing target let it through, and add that —
 the fix closes one bug, the rule closes its whole class.
 

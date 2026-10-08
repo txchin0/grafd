@@ -1,8 +1,9 @@
 // The workspace the random sessions start from. It holds one of every kind of thing a press can
 // land on — nodes inside and outside regions, a drawn region and one sized by its members, edges,
-// a subgraph host, loose strokes and a group of them — so that a sequence of gestures has every
-// pairing of kind and destination within reach. A kind added to the canvas belongs here too, or
-// no session ever touches it.
+// a subgraph host, an edge to a node that does not exist yet (drawn as a ghost), loose strokes and
+// a group of them — so that a sequence of gestures has every pairing of kind and destination within
+// reach. A kind added to the canvas belongs here too, or no session ever touches it; the coverage
+// test in editor-sessions.test.ts fails until one is.
 
 import { parseFlow, serializeFlow } from '../src/shared/flow-format.js';
 import { canvasLayerPathOf, parseCanvasLayer, serializeCanvasLayer } from '../src/shared/canvas-layer.js';
@@ -43,6 +44,7 @@ Delta
   pos: 900, 300, 180, 80
   expand: Delta
   -> Gamma : "back"
+  -> Missing
 
 graph: Delta
   Inner

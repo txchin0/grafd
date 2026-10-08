@@ -46,6 +46,7 @@ import { CanvasView, type ContextTarget, type EdgeDrop } from './canvas/canvas-v
 import type { DrawingMove } from './canvas/drawing-selection.js';
 import { createDrawingOps } from './drawing-ops.js';
 import type { MenuItem } from './context-menu.js';
+import type { EditorCommand } from './editor-commands.js';
 import {
   ExpansionLayer,
   TOGGLE_DURATION_MS,
@@ -97,6 +98,9 @@ export type EditorOverlays = Pick<
 export interface EditorShell {
   editors: EditorOverlays;
   openMenu(items: MenuItem[], at: Point): void;
+  // Escape closes the context menu and the help overlay. True when help was showing: an Escape
+  // that closes it is spent on that alone.
+  closePopups(): boolean;
   // The open flow was rebuilt: the breadcrumb and the graph panel describe it.
   openFlowChanged(flow: OpenFlow): void;
   // Only the dive trail moved; the breadcrumb is the one thing showing it.
@@ -1678,6 +1682,70 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     drawingOps.ungroupDrawings(view.selectedDrawings);
   }
 
+  // Runs a keyboard command (editor-commands.ts). False when it had nothing to act on and left
+  // the key to the browser — Ctrl+C with nothing copyable copies page text as usual.
+  function runCommand(command: EditorCommand): boolean {
+    switch (command) {
+      case 'undo':
+        undo();
+        return true;
+      case 'redo':
+        redo();
+        return true;
+      case 'select-all':
+        view.selectAll();
+        return true;
+      case 'copy':
+        if (!hasCopyableSelection()) return false;
+        clipboard.copy();
+        return true;
+      case 'cut':
+        if (!hasCopyableSelection()) return false;
+        clipboard.cut();
+        return true;
+      case 'paste':
+        clipboard.paste();
+        return true;
+      case 'duplicate':
+        clipboard.duplicateSelection();
+        return true;
+      case 'group':
+        if (view.selectedDrawings.length === 0) return false;
+        groupSelectedDrawings();
+        return true;
+      case 'ungroup':
+        if (view.selectedDrawings.length === 0) return false;
+        ungroupSelectedDrawings();
+        return true;
+      case 'delete':
+        deleteSelection();
+        return true;
+      case 'fit':
+        view.fitToContent();
+        return true;
+      case 'zoom-in':
+        view.stepZoom(1);
+        return true;
+      case 'zoom-out':
+        view.stepZoom(-1);
+        return true;
+      case 'escape':
+        escape();
+        return true;
+    }
+  }
+
+  // Escape abandons a gesture under way first. Otherwise it closes what is floating over the
+  // canvas, and then steps back out of a dive or, with none to leave, drops the selection.
+  function escape(): void {
+    if (view.cancelGesture()) return;
+    editors.closeAll();
+    if (shell.closePopups()) return;
+    const trailLength = navigation.trail.length;
+    if (trailLength > 0) void navigateBackTo(trailLength - 1);
+    else view.clearSelection();
+  }
+
   function canvasMenuItems(world: Point): MenuItem[] {
     const creation = view.creationTargetAt(world);
     return [
@@ -1808,5 +1876,6 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     hasCopyableSelection,
     groupSelectedDrawings,
     ungroupSelectedDrawings,
+    runCommand,
   };
 }

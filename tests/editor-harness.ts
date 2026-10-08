@@ -319,6 +319,7 @@ function createInertShell(menus: MenuItem[][]): EditorShell {
   return {
     editors,
     openMenu: (items) => menus.push(items),
+    closePopups: () => false,
     openFlowChanged: () => {},
     trailChanged: () => {},
     fileListChanged: () => {},

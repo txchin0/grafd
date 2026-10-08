@@ -88,7 +88,7 @@ import {
   type MoveReference,
   type RegionResizeSnapshot,
 } from './region-gestures.js';
-import { hitRegionAt, hitRegionHandleAt } from './region-hit-test.js';
+import { hitRegionAt } from './region-hit-test.js';
 import { hitStrokeAt, strokesInsideRect, worldBoundsOf, type StrokeSurface } from './drawing-hit-test.js';
 import {
   sameDrawingSelection,
@@ -108,6 +108,7 @@ import { inkStroke, strokeInkColor } from './stroke-painter.js';
 import {
   HANDLE_HIT_RADIUS_PX,
   hitResizeCorner,
+  resizeCornersOf,
   selectionHandleOrigins,
   type ResizeCorner,
 } from './resize-handles.js';
@@ -239,6 +240,8 @@ type Gesture =
       transform: StrokeTransform;
     })
   | EdgeBendGesture
+  // A ghost is made real by a click, so a press that is dragged away, or abandoned, makes nothing.
+  | ({ type: 'ghost-press'; ghost: GhostNode } & DragStart)
   | { type: 'pinch'; pointers: [number, number]; start: PinchAnchor };
 
 // What a press at a point lands on, in the order a press settles it: the affordances of what is
@@ -258,7 +261,35 @@ type PressTarget =
   | { kind: 'stroke'; stroke: DrawingSelection }
   | { kind: 'canvas' };
 
-type CanvasCursor = 'default' | 'crosshair' | 'pointer' | 'move' | 'nwse-resize' | 'grab';
+export type PressTargetKind = PressTarget['kind'];
+
+// The corner handles a sole selection shows (R52), and the rectangle they sit on. Drawing them,
+// pressing them and listing them (`affordances`) all ask `cornerHandles`.
+type CornerHandles =
+  | { kind: 'node-handle'; node: FlowNode; rect: Rect }
+  | { kind: 'region-handle'; context: ModelContext; rect: Rect }
+  | { kind: 'stroke-handle'; resizable: ResizableStrokes; rect: Rect };
+
+// Something the selection, or the node under the pointer, offers a press beyond the object
+// itself: a port, a corner handle, a bend grip.
+export interface Affordance {
+  kind: Extract<PressTargetKind, 'port' | CornerHandles['kind'] | 'selected-edge-grip'>;
+  point: Point;
+}
+
+export type CanvasCursor = 'default' | 'crosshair' | 'pointer' | 'move' | 'nwse-resize' | 'grab';
+
+// Whether a cursor promises that a drag starting under it carries what is there — moves,
+// resizes or bends it — rather than clicking, creating, sweeping a marquee or panning. The session
+// tests hold every cursor to this, so a cursor added above has to say which it is.
+export const CURSOR_GRABS: Record<CanvasCursor, boolean> = {
+  default: false,
+  crosshair: false,
+  pointer: false,
+  move: true,
+  'nwse-resize': true,
+  grab: false,
+};
 
 // A move is measured on what was pressed, so that is what lands on the grid.
 function moveReferenceOf(pressed: MoveGesture['pressed']): MoveReference {
@@ -737,6 +768,25 @@ export class CanvasView {
     return transformPoint(mid, locus.transform);
   }
 
+  // What a press at `world` would land on, by kind: the one answer the press, the hover cursor
+  // and the context menu share.
+  pressTargetKindAt(world: Point, shiftKey = false): PressTargetKind {
+    return this.pressTargetAt(world, { creating: this.createsOnPress(shiftKey) }).kind;
+  }
+
+  // Where every affordance on screen sits, from the geometry its press is tested against: the
+  // corner handles of a sole selection, a lone edge's bend grip, then the ports of the selected
+  // and hovered nodes.
+  affordances(): Affordance[] {
+    const handles = this.cornerHandles();
+    const corners = handles ? resizeCornersOf(handles.rect).map(({ x, y }) => ({ kind: handles.kind, point: { x, y } })) : [];
+    const loneEdge = this.edgeSelectedAlone();
+    const grip = loneEdge ? this.edgeAnchor(loneEdge) : null;
+    const grips = loneEdge && grip && this.edgeGripContains(loneEdge, grip) ? [{ kind: 'selected-edge-grip' as const, point: grip }] : [];
+    const ports = [...this.nodesShowingPorts()].flatMap((node) => this.portPositions(node).map((point) => ({ kind: 'port' as const, point })));
+    return [...corners, ...grips, ...ports];
+  }
+
   select(node: FlowNode): void {
     this.selection = new Set([node]);
     this.selectedEdge = null;
@@ -1130,7 +1180,7 @@ export class CanvasView {
         this.pressNode(target.node, target.badge, world, screen, event.shiftKey);
         return;
       case 'ghost':
-        this.actions.materializeGhost(target.ghost);
+        this.gesture = { type: 'ghost-press', ghost: target.ghost, startScreen: screen, moved: false };
         return;
       case 'edge':
         this.pressEdge(target.edge, world, screen, event.shiftKey);
@@ -1158,17 +1208,13 @@ export class CanvasView {
   private pressTargetAt(world: Point, { creating }: { creating: boolean }): PressTarget {
     const port = this.hitPort(world);
     if (port) return { kind: 'port', ...port };
-    const strokeHandle = this.hitStrokeResizeHandle(world);
-    if (strokeHandle) return { kind: 'stroke-handle', ...strokeHandle };
+    const cornerHandle = this.hitCornerHandle(world);
+    if (cornerHandle) return cornerHandle;
     // A label is drawn over the nodes, so the selected edge's grip answers before they do.
     const loneEdge = this.edgeSelectedAlone();
     if (loneEdge && this.edgeGripContains(loneEdge, world)) {
       return { kind: 'selected-edge-grip', edge: loneEdge };
     }
-    const nodeHandle = this.hitResizeHandle(world);
-    if (nodeHandle) return { kind: 'node-handle', ...nodeHandle };
-    const regionHandle = this.hitRegionHandle(world);
-    if (regionHandle) return { kind: 'region-handle', ...regionHandle };
     const node = this.hitNode(world);
     const stroke = this.hitStrokeAbove(node, world);
     const pressedNode = stroke ? null : this.nodeAnsweringPress(node, world, creating);
@@ -1566,6 +1612,8 @@ export class CanvasView {
       const { edge } = gesture;
       const local = this.pointInEdgeModel(edge, world);
       if (extendEdgeBend(gesture, local, this.screenScaleOf(edge.from), screen, DRAG_THRESHOLD_PX)) this.requestRender();
+    } else if (gesture.type === 'ghost-press') {
+      hasBecomeDrag(gesture, screen);
     } else if (gesture.type === 'stroke-resize') {
       if (!hasBecomeDrag(gesture, screen)) return;
       const localDelta = {
@@ -1658,6 +1706,8 @@ export class CanvasView {
       this.actions.resizeDrawings(gesture.drawings, gesture.transform);
     } else if (gesture.type === 'edge-bend' && gesture.moved) {
       this.actions.bendEdge(gesture.edge, gesture.bend);
+    } else if (gesture.type === 'ghost-press' && !gesture.moved) {
+      this.actions.materializeGhost(gesture.ghost);
     }
     this.requestRender();
   }
@@ -2029,10 +2079,14 @@ export class CanvasView {
     return null;
   }
 
+  private nodesShowingPorts(): Set<FlowNode> {
+    const nodes = new Set([...this.selection]);
+    if (this.hoverNode) nodes.add(this.hoverNode);
+    return nodes;
+  }
+
   private hitPort(world: Point): { node: FlowNode; port: Point } | null {
-    const candidates = new Set([...this.selection]);
-    if (this.hoverNode) candidates.add(this.hoverNode);
-    for (const node of candidates) {
+    for (const node of this.nodesShowingPorts()) {
       const port = this.portOfNodeNear(node, world);
       if (port) return { node, port };
     }
@@ -2048,12 +2102,27 @@ export class CanvasView {
     return held && this.portOfNodeNear(held, world) ? held : null;
   }
 
-  private hitResizeHandle(world: Point): { node: FlowNode; corner: ResizeCorner } | null {
+  private cornerHandles(): CornerHandles | null {
     const sole = this.soleSelection();
-    if (sole?.kind !== 'node') return null;
-    const { node } = sole;
-    const corner = hitResizeCorner(this.rect(node), world, HANDLE_HIT_RADIUS_PX / this.view.scale);
-    return corner ? { node, corner } : null;
+    if (sole?.kind === 'node') return { kind: 'node-handle', node: sole.node, rect: this.rect(sole.node) };
+    if (sole?.kind === 'strokes') return { kind: 'stroke-handle', resizable: sole.resizable, rect: this.strokeHandleRect(sole.resizable) };
+    if (sole?.kind !== 'region') return null;
+    const rect = this.regionRectOfContext(sole.context);
+    return rect ? { kind: 'region-handle', context: sole.context, rect } : null;
+  }
+
+  private hitCornerHandle(world: Point): PressTarget | null {
+    const handles = this.cornerHandles();
+    const corner = handles && hitResizeCorner(handles.rect, world, HANDLE_HIT_RADIUS_PX / this.view.scale);
+    if (!handles || !corner) return null;
+    switch (handles.kind) {
+      case 'node-handle':
+        return { kind: 'node-handle', node: handles.node, corner };
+      case 'region-handle':
+        return { kind: 'region-handle', context: handles.context, corner };
+      case 'stroke-handle':
+        return { kind: 'stroke-handle', resizable: handles.resizable, corner };
+    }
   }
 
   // Regions answer gestures only in the graph the canvas is showing: one inside an unfolded
@@ -2068,13 +2137,6 @@ export class CanvasView {
       regionRectDuringResize(context, resizing)
       ?? this.regionRectOfContext(context)
     );
-  }
-
-  private hitRegionHandle(world: Point): { context: ModelContext; corner: ResizeCorner } | null {
-    const sole = this.soleSelection();
-    if (sole?.kind !== 'region') return null;
-    const { context } = sole;
-    return hitRegionHandleAt(context, this.model, world, this.view.scale);
   }
 
   // The frame and the name label, never the interior: a region encloses nodes it does not own, so
@@ -2447,9 +2509,9 @@ export class CanvasView {
   // Corner handles belong to a selection of exactly one node, one stroke or one group; any other
   // selection is not resizable, and handles it would not answer would lie about what a press does.
   private resizeHandleRect(): Rect | null {
-    const sole = this.soleSelection();
-    if (sole?.kind === 'node') return this.isNodeVisible(sole.node) ? this.rect(sole.node) : null;
-    return sole?.kind === 'strokes' ? this.strokeHandleRect(sole.resizable) : null;
+    const handles = this.cornerHandles();
+    if (handles?.kind === 'node-handle') return this.isNodeVisible(handles.node) ? handles.rect : null;
+    return handles?.kind === 'stroke-handle' ? handles.rect : null;
   }
 
   // Every selected region gets the same dashed outline a node does, drawn on its frame rather
@@ -2773,14 +2835,6 @@ export class CanvasView {
       worldBoundsOf(this.strokeAsShown({ model: resizable.surface.model, id: stroke.id }, stroke), resizable.surface));
     const bounds = boundsOfRects(shownBounds)!;
     return resizable.strokes.length > 1 ? padRect(bounds, GROUP_OUTLINE_INFLATE) : bounds;
-  }
-
-  private hitStrokeResizeHandle(world: Point): { resizable: ResizableStrokes; corner: ResizeCorner } | null {
-    const sole = this.soleSelection();
-    if (sole?.kind !== 'strokes') return null;
-    const { resizable } = sole;
-    const corner = hitResizeCorner(this.strokeHandleRect(resizable), world, HANDLE_HIT_RADIUS_PX / this.view.scale);
-    return corner ? { resizable, corner } : null;
   }
 }
 

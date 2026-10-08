@@ -9,18 +9,20 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import fc from 'fast-check';
-import type { Tool } from '../src/client/canvas/canvas-view.js';
+import { CURSOR_GRABS, type CanvasCursor, type PressTargetKind, type Tool } from '../src/client/canvas/canvas-view.js';
 import type { Point } from '../src/client/geometry.js';
 import { createHeadlessEditor, disposeHeadlessEditor, type HeadlessEditor } from './editor-harness.js';
 import { SESSION_FLOW_PATH, sessionWorkspaceFiles } from './session-fixtures.js';
 import {
   gesturesIn,
   isHistoryAction,
+  MAX_PICK_INDEX,
   pathBetween,
   performAction,
   resolveTarget,
   sessionAction,
   targetPick,
+  TARGET_KINDS,
   TYPED_NAMES,
   type SessionAction,
   type TargetPick,
@@ -48,13 +50,18 @@ const PROBE_DRAG: Point = { x: 48, y: 32 };
 // At right angles to the first, for what only moves across a line — an edge's grip bends it only
 // away from its chord, so a drag along the edge rightly leaves it straight.
 const ACROSS_PROBE_DRAG: Point = { x: -32, y: 48 };
-const CURSORS_THAT_GRAB = new Set(['move', 'nwse-resize']);
 const TOOLS_THAT_KEEP_OBJECTS_GRABBABLE: Tool[] = ['node', 'context'];
 
 // Sessions that once broke a rule, shrunk by fast-check to the fewest steps that still broke it.
 // They run ahead of the random ones on every run, so a bug that took a deep search to find stays
 // caught by the default one.
 const ON_A_STROKE: TargetPick = { kind: 'stroke', index: 0, nudge: { x: 0, y: 0 } };
+// The affordances a lone selection shows, by their place in `CanvasView.affordances`: the corner
+// handles first (north-west, north-east, south-west, south-east), then a selected node's ports
+// (top, right, bottom, left).
+const CORNER_HANDLES = 4;
+const SOUTH_EAST_HANDLE = 3;
+const RIGHT_PORT_OF_A_SELECTED_NODE = CORNER_HANDLES + 1;
 const FIRST_NODE_TO_EMPTY_CANVAS: SessionAction = {
   type: 'drag',
   from: { kind: 'node', index: 0, nudge: { x: 0, y: 0 } },
@@ -76,11 +83,11 @@ const SESSION_REGRESSIONS: [SessionAction[]][] = [
   // Clearing the graph's name wrote a file without its required name.
   [[{ type: 'rename-graph', name: TYPED_NAMES.indexOf('') }]],
   // A click on a selected node's port, without dragging, made a node and an edge to it.
-  [[{ type: 'click', target: nodePick(0), shift: false }, { type: 'click', target: { kind: 'node-port', index: 0, nudge: { x: 3, y: 0 } }, shift: false }]],
+  [[{ type: 'click', target: nodePick(0), shift: false }, { type: 'click', target: affordancePick(RIGHT_PORT_OF_A_SELECTED_NODE, { x: 3, y: 0 }), shift: false }]],
   // Dragging an edge to where an unlabelled one already ran duplicated it.
   [[
     { type: 'click', target: nodePick(0), shift: false },
-    { type: 'drag', from: { kind: 'node-port', index: 0, nudge: { x: 3, y: 0 } }, to: nodePick(2), shift: false },
+    { type: 'drag', from: affordancePick(RIGHT_PORT_OF_A_SELECTED_NODE, { x: 3, y: 0 }), to: nodePick(2), shift: false },
   ]],
   // A node deleted inside an unfolded frame stayed selected, and a paste brought it back.
   [[
@@ -115,11 +122,13 @@ const SESSION_REGRESSIONS: [SessionAction[]][] = [
     { type: 'click', target: nodePick(3), shift: true },
     { type: 'menu', target: nodePick(0), choice: 1 },
   ]],
+  // Pressing a ghost made it a node on the press, so Escape before letting go could not take it back.
+  [[{ type: 'abandoned-drag', from: { kind: 'ghost', index: 0, nudge: { x: 0, y: 0 } }, by: { x: 0, y: 0 } }]],
   // A click on a member-derived region's corner handle gave it a drawn area: resizes acted
   // without a drag threshold, and the region's `pos` was written on press.
   [[
     { type: 'click', target: { kind: 'region-border', index: 1, nudge: { x: 0, y: 0 } }, shift: false },
-    { type: 'click', target: { kind: 'region-corner', index: 1, nudge: { x: 0, y: 0 } }, shift: false },
+    { type: 'click', target: affordancePick(SOUTH_EAST_HANDLE), shift: false },
   ]],
 ];
 const TOOL_PARITY_REGRESSIONS: [SessionAction[], TargetPick, Tool][] = [
@@ -133,6 +142,31 @@ afterEach(() => disposeHeadlessEditor());
 function nodePick(index: number): TargetPick {
   return { kind: 'node', index, nudge: { x: 0, y: 0 } };
 }
+
+function affordancePick(index: number, nudge: Point = { x: 0, y: 0 }): TargetPick {
+  return { kind: 'affordance', index, nudge };
+}
+
+function cursorGrabs(cursor: string): boolean {
+  return CURSOR_GRABS[cursor as CanvasCursor] === true;
+}
+
+// Every kind of thing a press can land on, as the view names them. A record, so a kind added to
+// the view's PressTarget does not compile here until it is listed — and once it is, the coverage
+// test below fails until a session target can reach it.
+const EVERY_PRESS_TARGET: Record<PressTargetKind, true> = {
+  'port': true,
+  'stroke-handle': true,
+  'selected-edge-grip': true,
+  'node-handle': true,
+  'region-handle': true,
+  'node': true,
+  'ghost': true,
+  'edge': true,
+  'region': true,
+  'stroke': true,
+  'canvas': true,
+};
 
 class SessionBroke extends Error {
   constructor(step: number, action: SessionAction, violations: Violation[]) {
@@ -158,6 +192,40 @@ describe('the fixture every session starts from', () => {
     expect(fileViolations(editor.workspace.snapshot())).toEqual([]);
   });
 });
+
+describe('the session targets', () => {
+  // The sessions find only what they can aim at. Each pick is tried as the sessions use it — on
+  // the fixture as it opens, and then on each affordance clicking it puts on screen, as a
+  // grab-affordance step does — and every kind of press target must turn up.
+  it('reach every kind of thing a press can land on', async () => {
+    const reached = new Set<PressTargetKind>();
+    for (const kind of TARGET_KINDS) {
+      for (let index = 0; index <= MAX_PICK_INDEX; index++) {
+        const editor = await openSession();
+        try {
+          for (const kindReached of await pressTargetsReachedFrom(editor, { kind, index, nudge: { x: 0, y: 0 } })) reached.add(kindReached);
+        } finally {
+          disposeHeadlessEditor();
+        }
+      }
+    }
+    const unreached = (Object.keys(EVERY_PRESS_TARGET) as PressTargetKind[]).filter((kind) => !reached.has(kind));
+    expect(unreached).toEqual([]);
+  }, SESSION_TIMEOUT_MS);
+});
+
+async function pressTargetsReachedFrom(editor: HeadlessEditor, pick: TargetPick): Promise<PressTargetKind[]> {
+  const { view } = editor.core;
+  const point = resolveTarget(editor, pick);
+  if (!point) return [];
+  const reached = [view.pressTargetKindAt(point)];
+  await performAction(editor, { type: 'click', target: pick, shift: false });
+  for (let index = 0; index <= MAX_PICK_INDEX; index++) {
+    const affordance = resolveTarget(editor, affordancePick(index));
+    if (affordance) reached.push(view.pressTargetKindAt(affordance));
+  }
+  return reached;
+}
 
 describe('a random session', () => {
   it('leaves every file valid, every selection live, every edit undoable in one step, and does what each step asked', async () => {
@@ -226,8 +294,8 @@ describe('the cursor', () => {
             const cursor = editor.cursor();
             const before = editor.workspace.snapshot();
             const changed = await draggingChangesFiles(editor, point, PROBE_DRAG);
-            const grabbed = changed || (CURSORS_THAT_GRAB.has(cursor) && await draggingChangesFiles(editor, point, ACROSS_PROBE_DRAG));
-            if (CURSORS_THAT_GRAB.has(cursor) && !grabbed) {
+            const grabbed = changed || (cursorGrabs(cursor) && await draggingChangesFiles(editor, point, ACROSS_PROBE_DRAG));
+            if (cursorGrabs(cursor) && !grabbed) {
               throw new Error(`with the ${tool} tool the cursor over ${pick.kind} was "${cursor}", but dragging from there changed nothing`);
             }
             if (tool === 'select' && cursor === 'default' && changed) {
@@ -292,7 +360,6 @@ async function draggingChangesFiles(editor: HeadlessEditor, from: Point, by: Poi
   return contentChanged(before, editor.workspace.snapshot());
 }
 
-// A real press always follows a hover, which is what shows a node's ports.
 // A drag that set nodes down on the top level with no region in hand and no frame unfolded — the
 // case where a node's drawn rectangle is its file position and R13 alone decides its regions.
 function isPlainNodeDrop(editor: HeadlessEditor, action: SessionAction): boolean {
@@ -304,6 +371,7 @@ function isPlainNodeDrop(editor: HeadlessEditor, action: SessionAction): boolean
     && core.expansions.openVisibleNodeIds().length === 0;
 }
 
+// A real press always follows a hover, which is what shows a node's ports.
 async function dragFromCleanSelection(editor: HeadlessEditor, tool: Tool, point: Point, path: Point[]) {
   editor.core.view.clearSelection();
   editor.setTool(tool);

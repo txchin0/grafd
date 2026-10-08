@@ -113,3 +113,33 @@ describe('drawing with the pen', () => {
     expect(editor.workspace.file(layerPath)).toBeNull();
   });
 });
+
+describe('a ghost', () => {
+  const FLOW_WITH_GHOST = `---
+name: Ghosts
+---
+
+A
+  id: a-1
+  pos: 200, 200, 200, 88
+  -> Missing
+`;
+
+  async function openWithGhost(): Promise<{ editor: HeadlessEditor; ghostCenter: Point }> {
+    const editor = await createHeadlessEditor({ [FLOW_PATH]: FLOW_WITH_GHOST }, { open: FLOW_PATH });
+    const { pos } = editor.core.view.model.ghosts[0];
+    return { editor, ghostCenter: { x: pos.x + pos.w / 2, y: pos.y + pos.h / 2 } };
+  }
+
+  it('becomes a node when clicked', async () => {
+    const { editor, ghostCenter } = await openWithGhost();
+    await editor.click(ghostCenter);
+    expect(nodeOnDisk(editor, 'Missing')).toBeDefined();
+  });
+
+  it('stays a ghost when the press is dragged away', async () => {
+    const { editor, ghostCenter } = await openWithGhost();
+    await editor.drag([ghostCenter, { x: ghostCenter.x + 40, y: ghostCenter.y + 30 }]);
+    expect(nodeOnDisk(editor, 'Missing')).toBeUndefined();
+  });
+});

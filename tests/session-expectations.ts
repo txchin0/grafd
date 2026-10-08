@@ -19,8 +19,8 @@ import { contentChanged, contentOf, differingPaths, type FileSnapshot, type Viol
 const SNAP = 8;
 // A pasted stroke's points are stored to a tenth of a unit, and a pasted offset is rounded.
 const PASTE_TOLERANCE = 1;
-// The same rounding lets a stroke that only moved measure a little wider or taller.
-const STROKE_SIZE_TOLERANCE = 0.5;
+// The same rounding can leave two points carried by one move a tenth of a unit apart.
+const RIGID_MOVE_TOLERANCE = 0.15;
 const VIEWPORT = { width: 1280, height: 800 };
 
 export interface SessionStep {
@@ -168,7 +168,7 @@ function shiftClickThatChangedMany(step: SessionStep): Violation[] {
 function draggedThingsOffThePointer(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
   const isDrag = step.action.type === 'drag' || step.action.type === 'nudge';
   if (!isDrag || step.tool !== 'select' || !step.trace.path || !contentChanged(step.before, step.after)) return [];
-  if (createdAnything(was, now) || resizedAnything(was, now)) return [];
+  if (createdAnything(was, now) || reshapedAnything(was, now)) return [];
   const pointer = travelOf(step.trace.path);
   return translationsOf(was, now)
     .filter(({ delta }) => Math.abs(delta.x - pointer.x) > SNAP || Math.abs(delta.y - pointer.y) > SNAP)
@@ -178,7 +178,7 @@ function draggedThingsOffThePointer(step: SessionStep, was: GraphState, now: Gra
 // R28b: a dragged region takes along the drawings lying wholly inside its frame, a group only whole.
 function regionDragThatLeftDrawings(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
   const isDrag = step.action.type === 'drag' || step.action.type === 'nudge';
-  if (!isDrag || createdAnything(was, now) || resizedAnything(was, now)) return [];
+  if (!isDrag || createdAnything(was, now) || reshapedAnything(was, now)) return [];
   const violations: Violation[] = [];
   for (const entry of step.selectionAfter) {
     if (!entry.startsWith('region:')) continue;
@@ -189,8 +189,8 @@ function regionDragThatLeftDrawings(step: SessionStep, was: GraphState, now: Gra
     for (const [id, stroke] of was.strokes) {
       if (!strokeAndGroupInside(id, frame, was)) continue;
       const moved = now.strokes.get(id);
-      if (!moved) continue;
-      const travel = { x: moved.points[0].x - stroke.points[0].x, y: moved.points[0].y - stroke.points[0].y };
+      const travel = moved ? rigidTranslation(stroke, moved) : null;
+      if (!travel) continue;
       if (Math.abs(travel.x - delta.x) > PASTE_TOLERANCE || Math.abs(travel.y - delta.y) > PASTE_TOLERANCE) {
         violations.push({ invariant: 'a dragged region takes the drawings inside it', detail: `region ${name} moved ${delta.x},${delta.y} but stroke ${id} inside it moved ${travel.x},${travel.y}` });
       }
@@ -348,21 +348,34 @@ function createdAnything(was: GraphState, now: GraphState): boolean {
   return [...now.nodeIds].some((id) => !was.nodeIds.has(id)) || [...now.strokes.keys()].some((id) => !was.strokes.has(id));
 }
 
-// A resize is told from a move by a change of size: a node's, a stroke's, or a region's drawn area
-// against the frame it had — a resized region always ends with a drawn area (R30).
-function resizedAnything(was: GraphState, now: GraphState): boolean {
+// Anything changed in shape rather than only moved: a node or a region's drawn area resized
+// against the frame it had — a resized region always ends with a drawn area (R30) — or a stroke
+// whose points did not all travel together. Judging a stroke by every point rather than by its
+// size means any transform other than a move counts, whatever it does to the bounds.
+function reshapedAnything(was: GraphState, now: GraphState): boolean {
   const resizedNode = [...now.topNodes].some(([id, node]) => sizeChanged(was.topNodes.get(id)?.pos, node.pos));
   const resizedRegion = [...now.regions].some(([name, region]) => sizeChanged(was.regions.get(name)?.frame, region.pos));
-  const resizedStroke = [...now.strokes].some(([id, stroke]) => {
+  const reshapedStroke = [...now.strokes].some(([id, stroke]) => {
     const before = was.strokes.get(id);
-    return before !== undefined && sizeChanged(strokeBounds(before), strokeBounds(stroke), STROKE_SIZE_TOLERANCE);
+    return before !== undefined && rigidTranslation(before, stroke) === null;
   });
-  return resizedNode || resizedRegion || resizedStroke;
+  return resizedNode || resizedRegion || reshapedStroke;
 }
 
-function sizeChanged(before: Rect | null | undefined, after: Rect | null | undefined, tolerance = 0): boolean {
+function sizeChanged(before: Rect | null | undefined, after: Rect | null | undefined): boolean {
   if (!before || !after) return false;
-  return Math.abs(before.w - after.w) > tolerance || Math.abs(before.h - after.h) > tolerance;
+  return before.w !== after.w || before.h !== after.h;
+}
+
+// How far a stroke moved when every one of its points moved that far; null when it changed in any
+// other way.
+function rigidTranslation(before: Stroke, after: Stroke): Point | null {
+  if (before.points.length !== after.points.length) return null;
+  const offset = { x: after.points[0].x - before.points[0].x, y: after.points[0].y - before.points[0].y };
+  const carried = before.points.every((point, index) =>
+    Math.abs(after.points[index].x - point.x - offset.x) <= RIGID_MOVE_TOLERANCE
+    && Math.abs(after.points[index].y - point.y - offset.y) <= RIGID_MOVE_TOLERANCE);
+  return carried ? offset : null;
 }
 
 function travelOf(path: readonly Point[]): Point {
@@ -384,9 +397,8 @@ function translationsOf(was: GraphState, now: GraphState): { what: string; delta
   }
   for (const [id, stroke] of now.strokes) {
     const old = was.strokes.get(id);
-    if (!old || old.points.length !== stroke.points.length) continue;
-    const delta = { x: stroke.points[0].x - old.points[0].x, y: stroke.points[0].y - old.points[0].y };
-    if (delta.x !== 0 || delta.y !== 0) moves.push({ what: `stroke ${id}`, delta });
+    const delta = old ? rigidTranslation(old, stroke) : null;
+    if (delta && (delta.x !== 0 || delta.y !== 0)) moves.push({ what: `stroke ${id}`, delta });
   }
   return moves;
 }
