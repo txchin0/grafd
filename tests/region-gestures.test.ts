@@ -15,7 +15,9 @@ import {
   type RegionResizeSnapshot,
 } from '../src/client/canvas/region-gestures.js';
 import type { ModelContext } from '../src/client/flow-doc.js';
-import { parseFlow } from '../src/shared/flow-format.js';
+import { parseFlow, type Rect } from '../src/shared/flow-format.js';
+import type { Point } from '../src/client/geometry.js';
+import type { ResizeHandle } from '../src/client/canvas/resize-handles.js';
 import { buildModel } from '../src/client/flow-doc.js';
 
 const identity = (value: number) => value;
@@ -124,16 +126,20 @@ describe('applyRegionMove', () => {
   });
 });
 
+function resizeSnapshot(
+  context: ModelContext,
+  handle: ResizeHandle,
+  startRect: Rect,
+  startWorld: Point,
+  { hadDrawnArea = true, displayStartRect = startRect }: { hadDrawnArea?: boolean; displayStartRect?: Rect } = {},
+): RegionResizeSnapshot {
+  return { context, handle, startRect: { ...startRect }, displayStartRect, displayRect: { ...displayStartRect }, startWorld, hadDrawnArea };
+}
+
 describe('applyRegionResize', () => {
   it('resizes without a minimum size', () => {
     const context = contextNamed(DRAWN, 'Auth');
-    const gesture: RegionResizeSnapshot = {
-      context,
-      handle: 'se',
-      startRect: { ...context.block.pos! },
-      startWorld: { x: 200, y: 120 },
-      hadDrawnArea: true,
-    };
+    const gesture = resizeSnapshot(context, 'se', context.block.pos!, { x: 200, y: 120 });
     applyRegionResize(gesture, { x: 40, y: 30 }, identity);
     expect(context.block.pos).toEqual({ x: 0, y: 0, w: 40, h: 30 });
   });
@@ -142,41 +148,57 @@ describe('applyRegionResize', () => {
     const context = contextNamed(DRAWN, 'Auth');
     const start = { ...context.block.pos! };
     const snapTo10 = (value: number) => Math.round(value / 10) * 10;
-    applyRegionResize({ context, handle: 'w', startRect: start, startWorld: { x: 0, y: 7 }, hadDrawnArea: true }, { x: -33, y: 90 }, snapTo10);
+    applyRegionResize(resizeSnapshot(context, 'w', start, { x: 0, y: 7 }), { x: -33, y: 90 }, snapTo10);
     expect(context.block.pos).toEqual({ x: start.x - 30, y: start.y, w: start.w + 30, h: start.h });
+  });
+
+  // While a subgraph is unfolded nearby the frame is painted around warped members, away from
+  // where the file lays it out. The file moves only the dragged side; so does the painted frame.
+  it('writes from the layout frame and paints from the displayed one, moving the dragged side alike', () => {
+    const context = contextNamed(DRAWN, 'Auth');
+    const layout = { ...context.block.pos! };
+    const displayed = { x: layout.x - 56, y: layout.y - 16, w: layout.w + 56, h: layout.h + 16 };
+    const gesture = resizeSnapshot(context, 'n', layout, { x: 100, y: displayed.y }, { displayStartRect: displayed });
+
+    applyRegionResize(gesture, { x: 130, y: displayed.y + 30 }, snap8);
+
+    expect(context.block.pos).toEqual({ x: layout.x, y: layout.y + 32, w: layout.w, h: layout.h - 32 });
+    expect(gesture.displayRect).toEqual({ x: displayed.x, y: displayed.y + 32, w: displayed.w, h: displayed.h - 32 });
   });
 });
 
 describe('regionRectDuringResize', () => {
-  it('returns the live pos for the region being resized', () => {
+  it('returns the dragged rectangle for the region being resized', () => {
     const context = contextNamed(DRAWN, 'Auth');
-    context.block.pos = { x: 0, y: 0, w: 40, h: 30 };
-    const gesture = { context, handle: 'se' as const, startRect: { x: 0, y: 0, w: 200, h: 120 }, startWorld: { x: 0, y: 0 } };
+    const gesture = resizeSnapshot(context, 'se', { x: 0, y: 0, w: 200, h: 120 }, { x: 200, y: 120 });
+    applyRegionResize(gesture, { x: 40, y: 30 }, identity);
     expect(regionRectDuringResize(context, gesture)).toEqual({ x: 0, y: 0, w: 40, h: 30 });
   });
 
   it('returns null for a different region', () => {
     const context = contextNamed(DRAWN, 'Auth');
     const other = contextNamed(DRAWN, 'Auth');
-    const gesture = { context, handle: 'se' as const, startRect: { x: 0, y: 0, w: 200, h: 120 }, startWorld: { x: 0, y: 0 } };
+    const gesture = resizeSnapshot(context, 'se', { x: 0, y: 0, w: 200, h: 120 }, { x: 0, y: 0 });
     expect(regionRectDuringResize(other, gesture)).toBeNull();
   });
 });
 
 describe('regionRectsWithDrawnResize', () => {
-  it('paints the drawn rectangle while shrinking past members', () => {
+  it('paints the dragged rectangle while shrinking past members', () => {
     const context = contextNamed(DRAWN, 'Auth');
     const frozen = new Map([[context.block, { x: 0, y: 0, w: 200, h: 120 }]]);
-    context.block.pos = { x: 0, y: 0, w: 40, h: 30 };
-    const painted = regionRectsWithDrawnResize(context, frozen);
+    const gesture = resizeSnapshot(context, 'se', { x: 0, y: 0, w: 200, h: 120 }, { x: 200, y: 120 });
+    applyRegionResize(gesture, { x: 40, y: 30 }, identity);
+    const painted = regionRectsWithDrawnResize(gesture, frozen);
     expect(painted.get(context.block)).toEqual({ x: 0, y: 0, w: 40, h: 30 });
   });
 
-  it('leaves the frozen map unchanged when there is no drawn pos', () => {
+  it('paints the frame as it was until the drag moves it', () => {
     const context = contextNamed(MEMBER_DERIVED, 'Auth');
-    const frozen = new Map([[context.block, { x: 32, y: 32, w: 136, h: 80 }]]);
-    const painted = regionRectsWithDrawnResize(context, frozen);
-    expect(painted).toBe(frozen);
+    const frame = { x: 32, y: 32, w: 136, h: 80 };
+    const gesture = resizeSnapshot(context, 'se', frame, { x: 0, y: 0 }, { hadDrawnArea: false });
+    const painted = regionRectsWithDrawnResize(gesture, new Map([[context.block, frame]]));
+    expect(painted.get(context.block)).toEqual(frame);
   });
 });
 
@@ -205,13 +227,7 @@ describe('rollback', () => {
 
   it('restores pos after an abandoned resize', () => {
     const context = contextNamed(DRAWN, 'Auth');
-    const gesture: RegionResizeSnapshot = {
-      context,
-      handle: 'se',
-      startRect: { x: 0, y: 0, w: 200, h: 120 },
-      startWorld: { x: 200, y: 120 },
-      hadDrawnArea: true,
-    };
+    const gesture = resizeSnapshot(context, 'se', { x: 0, y: 0, w: 200, h: 120 }, { x: 200, y: 120 });
     applyRegionResize(gesture, { x: 10, y: 10 }, identity);
     rollbackRegionResize(gesture);
     expect(context.block.pos).toEqual({ x: 0, y: 0, w: 200, h: 120 });
@@ -219,13 +235,7 @@ describe('rollback', () => {
 
   it('takes back the drawn area an abandoned resize gave a member-derived region', () => {
     const context = contextNamed(MEMBER_DERIVED, 'Auth');
-    const gesture: RegionResizeSnapshot = {
-      context,
-      handle: 'se',
-      startRect: { x: 32, y: 32, w: 136, h: 80 },
-      startWorld: { x: 168, y: 112 },
-      hadDrawnArea: false,
-    };
+    const gesture = resizeSnapshot(context, 'se', { x: 32, y: 32, w: 136, h: 80 }, { x: 168, y: 112 }, { hadDrawnArea: false });
     applyRegionResize(gesture, { x: 200, y: 140 }, identity);
     expect(context.block.pos).toEqual({ x: 32, y: 32, w: 168, h: 108 });
     rollbackRegionResize(gesture);

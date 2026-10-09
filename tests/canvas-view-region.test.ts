@@ -16,6 +16,7 @@ import type { Point } from '../src/client/geometry.js';
 import { ExpansionLayer } from '../src/client/canvas/expansion.js';
 import type { CanvasActions, RegionTarget } from '../src/client/canvas/canvas-view.js';
 import { createCanvasMock, stubCanvasGlobals } from './canvas-mock.js';
+import { padRect, REGION_MEMBER_PADDING } from '../src/shared/rect-math.js';
 
 // One region drawn around A alone, wide enough that B can be dragged into it and A out of it.
 const REGIONED_FLOW = `---
@@ -301,6 +302,78 @@ N
   pos: 200, 200, 200, 88
 `;
 
+// SHARED_MEMBER_FLOW, but the outer region has no drawn area: it is the bounds of Inside and Deep,
+// so it would stretch after Deep wherever Inner took it, unless Deep left it.
+const DERIVED_OUTER_FLOW = `---
+name: DerivedOuter
+---
+
+context: Zone
+  nodes:
+    - Inside
+    - Deep
+
+context: Inner
+  pos: 400, 320, 200, 120
+  nodes:
+    - Deep
+
+Inside
+  id: in-1
+  pos: 200, 200, 200, 88
+
+Deep
+  id: deep-1
+  pos: 440, 360, 100, 50
+`;
+
+// An area reserved before anything was put in it.
+const RESERVED_FLOW = `---
+name: Reserved
+---
+
+context: Reserved
+  pos: 0, 0, 400, 200
+`;
+
+// A region drawn tight around Beta, with Delta's subgraph beside it: unfolded, Delta's frame warps
+// Beta up and to the left, and the frame painted around Beta with it — on screen only.
+const WARPED_MEMBER_FLOW = `---
+name: Warped
+---
+
+context: Nested
+  pos: 384, 88, 256, 152
+  nodes:
+    - Beta
+
+context: Around
+  nodes:
+    - Gamma
+
+Beta
+  id: beta-1
+  pos: 420, 120, 180, 80
+
+Gamma
+  id: gamma-1
+  pos: 640, 400, 180, 80
+
+Delta
+  id: delta-1
+  pos: 900, 300, 180, 80
+  expand: Delta
+
+graph: Delta
+  Inner
+    id: inner-1
+    pos: 0, 0, 160, 72
+
+  Second
+    id: second-1
+    pos: 260, 0, 160, 72
+`;
+
 let CanvasView: typeof import('../src/client/canvas/canvas-view.js').CanvasView;
 
 beforeAll(async () => {
@@ -337,13 +410,14 @@ function stubActions(): CanvasActions {
   };
 }
 
-function openedCanvas(flowText: string, tool: 'select' | 'node' | 'context' = 'select') {
+function openedCanvas(flowText: string, tool: 'select' | 'node' | 'context' = 'select', unfoldedIds: string[] = []) {
   const doc = parseFlow(flowText);
   assignMissingIds(doc);
   const model = buildModel(doc, null);
   model.sourcePath = 'regions.flow';
 
   const layer = new ExpansionLayer({ onNeedsRender: () => {}, readExternalFile: async () => null });
+  layer.restoreOpen(unfoldedIds);
   const actions = stubActions();
   const canvas = createCanvasMock();
   const view = new CanvasView(canvas, actions, layer);
@@ -652,6 +726,33 @@ describe('moving a region over a contained region', () => {
   });
 });
 
+describe('moving a region out of the region around it', () => {
+  // Pressing Inner's left border, well inside Zone, and dragging it clear of Zone's frame.
+  const INNER_BORDER = { x: 400, y: 380 };
+  const CLEAR_OF_ZONE = { x: 1400, y: 380 };
+
+  it('takes its members out of the drawn region they left (R13, R31a)', () => {
+    const { actions, canvas } = openedCanvas(SHARED_MEMBER_FLOW);
+    dragOnCanvas(canvas, INNER_BORDER, CLEAR_OF_ZONE);
+
+    expect(asNames(regionChangesFrom(actions, 'regionMoved'))).toEqual([['Zone', 'Deep', 'leaves']]);
+  });
+
+  it('takes its members out of a region with no drawn area, rather than stretching it (R18)', () => {
+    const { actions, canvas } = openedCanvas(DERIVED_OUTER_FLOW);
+    dragOnCanvas(canvas, INNER_BORDER, CLEAR_OF_ZONE);
+
+    expect(asNames(regionChangesFrom(actions, 'regionMoved'))).toEqual([['Zone', 'Deep', 'leaves']]);
+  });
+
+  it('keeps them while it stays inside', () => {
+    const { actions, canvas } = openedCanvas(SHARED_MEMBER_FLOW);
+    dragOnCanvas(canvas, INNER_BORDER, { x: 200, y: 380 });
+
+    expect(regionChangesFrom(actions, 'regionMoved')).toEqual([]);
+  });
+});
+
 describe('resizing a region', () => {
   it('shuts out a member the drawn rectangle no longer covers (R31)', () => {
     const { doc, actions, canvas } = openedCanvas(ZONE_FLOW);
@@ -670,12 +771,82 @@ describe('resizing a region', () => {
     expect(contextBlockNamed(doc, 'Zone')!.pos).toEqual({ x: 0, y: 0, w: 24, h: 8 });
   });
 
+  // A region with no members has its `pos` as its frame; the resize starts from a copy of it, or
+  // each pointer move would resize again from where the last one left it.
+  it('follows the pointer across several moves when the region has no members', () => {
+    const { doc, canvas } = openedCanvas(RESERVED_FLOW);
+    pressAt(canvas, { x: 0, y: 100 });
+    listenerFor(canvas, 'pointerdown')({ button: 0, pointerId: 1, clientX: 400, clientY: 200, shiftKey: false, detail: 1 });
+    listenerFor(canvas, 'pointermove')({ pointerId: 1, clientX: 380, clientY: 190 });
+    listenerFor(canvas, 'pointermove')({ pointerId: 1, clientX: 352, clientY: 176 });
+    listenerFor(canvas, 'pointerup')({ pointerId: 1, clientX: 352, clientY: 176, detail: 1 });
+
+    expect(contextBlockNamed(doc, 'Reserved')!.pos).toEqual({ x: 0, y: 0, w: 352, h: 176 });
+  });
+
   it('rolls back when the gesture is cancelled', () => {
     const { doc, actions, canvas } = openedCanvas(ZONE_FLOW);
     pressAt(canvas, { x: 0, y: 300 });
     cancelledDrag(canvas, { x: 800, y: 600 }, { x: 300, y: 250 });
     expect(contextBlockNamed(doc, 'Zone')!.pos).toEqual({ x: 0, y: 0, w: 800, h: 600 });
     expect(actions.regionResized).not.toHaveBeenCalled();
+  });
+});
+
+describe('resizing a region while a subgraph is unfolded beside it', () => {
+  function warpedCanvas() {
+    const opened = openedCanvas(WARPED_MEMBER_FLOW, 'select', ['delta-1']);
+    const block = contextBlockNamed(opened.doc, 'Nested')!;
+    const displayed = opened.view.regionRectOfBlock(block)!;
+    // The premise: the warp has carried the painted frame off the one the file lays out.
+    expect(displayed.x).toBeLessThan(block.pos!.x);
+    opened.view.selectRegion('Nested');
+    return { ...opened, block, displayed };
+  }
+
+  function sideHandle(view: InstanceType<typeof CanvasView>, side: string): Point {
+    return view.affordances().find((affordance) => affordance.handle === side)!.point;
+  }
+
+  // The warp is view-only: what the file gets is its own frame with the dragged side moved.
+  it('moves only the dragged side of the frame the file holds', () => {
+    const { view, canvas, block } = warpedCanvas();
+    const before = { ...block.pos! };
+    const handle = sideHandle(view, 'n');
+    dragOnCanvas(canvas, handle, { x: handle.x, y: handle.y + 40 });
+
+    expect(block.pos).toEqual({ x: before.x, y: before.y + 40, w: before.w, h: before.h - 40 });
+  });
+
+  it('keeps a member the frame it wrote still encloses, wherever the warp shows it', () => {
+    const { view, canvas, actions } = warpedCanvas();
+    const handle = sideHandle(view, 'w');
+    dragOnCanvas(canvas, handle, { x: handle.x + 32, y: handle.y });
+
+    expect(regionChangesFrom(actions, 'regionResized')).toEqual([]);
+  });
+});
+
+describe('moving the last member out of a region with no drawn area while a subgraph is unfolded', () => {
+  // R18a keeps the emptied region where it was, as a drawn area — the frame the file had, not the
+  // one the warp painted.
+  it('leaves it the frame the file laid it out at', () => {
+    const { doc, view, canvas, nodeNamed } = openedCanvas(WARPED_MEMBER_FLOW, 'select', ['delta-1']);
+    const gamma = nodeNamed('Gamma');
+    const laidOut = padRect(gamma.pos!, REGION_MEMBER_PADDING);
+    const shown = view.regionRectOfBlock(contextBlockNamed(doc, 'Around')!)!;
+    expect(shown).not.toEqual(laidOut);
+
+    // Around is drawn around Gamma alone, so its middle is where Gamma is shown.
+    const grabbed = { x: shown.x + shown.w / 2, y: shown.y + shown.h / 2 };
+    const dropped = { x: grabbed.x, y: grabbed.y + 800 };
+    listenerFor(canvas, 'pointerdown')({ button: 0, pointerId: 1, clientX: grabbed.x, clientY: grabbed.y, shiftKey: false, detail: 1 });
+    listenerFor(canvas, 'pointermove')({ pointerId: 1, clientX: dropped.x, clientY: dropped.y });
+    // The frame painted while dragging is what places Gamma's display rect where it was dropped.
+    view.refreshDisplayGeometry();
+    listenerFor(canvas, 'pointerup')({ pointerId: 1, clientX: dropped.x, clientY: dropped.y, detail: 1 });
+
+    expect(contextBlockNamed(doc, 'Around')!.pos).toEqual(laidOut);
   });
 });
 

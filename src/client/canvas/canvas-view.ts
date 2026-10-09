@@ -37,10 +37,12 @@ import {
   displayRects,
   findNodeById,
   isSameEdge,
+  framesOfUndrawnRegions,
   keepEmptiedRegionsInPlace,
+  layoutRegionRectOf,
   membersAfterChanges,
   membershipChangesForCombinedMove,
-  membershipChangesForRegion,
+  membershipChangesForResize,
   regionRectOf,
   type FlowModel,
   type GhostNode,
@@ -222,6 +224,9 @@ type MoveGesture = CombinedMoveSnapshot & DragStart & {
   // from the members a moving region carries along.
   selectedNodes: FlowNode[];
   regionRects: Map<ContextBlock, Rect>;
+  // The frame each region without a drawn area had in the file's layout, which it keeps if the
+  // move takes away its last member (R18a). `regionRects` are frames as painted, warp included.
+  undrawnRegionFrames: Map<ContextBlock, Rect>;
   movingDrawings: MovingDrawing[];
   // How far each carried drawing has travelled so far, in its own model's units, keyed by its
   // stored key. Painted as an offset; the layer is written only when the drag lands.
@@ -1308,11 +1313,16 @@ export class CanvasView {
   }
 
   private beginRegionResize(context: ModelContext, handle: ResizeHandle, world: Point, screen: Point): Gesture {
+    // Copied: the frame of a region with no members is its `pos` object itself, which the resize
+    // writes into.
+    const displayStartRect = { ...this.regionRectOfContext(context)! };
     return {
       type: 'region-resize',
       context,
       handle,
-      startRect: { ...this.regionRectOfContext(context)! },
+      startRect: { ...layoutRegionRectOf(context)! },
+      displayStartRect,
+      displayRect: { ...displayStartRect },
       startWorld: world,
       hadDrawnArea: context.block.pos !== null,
       frozenRegionRects: this.freezeRegionRects(),
@@ -1446,6 +1456,7 @@ export class CanvasView {
       movingRegions,
       startRects,
       regionRects: this.freezeRegionRects(),
+      undrawnRegionFrames: new Map(modelsOnScreen(this.model).flatMap((model) => [...framesOfUndrawnRegions(model)])),
       startWorld: world,
       startScreen: screen,
       moved: false,
@@ -1556,16 +1567,13 @@ export class CanvasView {
   private regionRectsForPainting(): ReadonlyMap<ContextBlock, Rect> | undefined {
     const gesture = this.gesture;
     if (gesture?.type === 'move') {
-      // A pure node drag paints every frame frozen, as it has always done (R13, R18). A pure
-      // region drag paints everything live, so a pos-free region follows the members it carries.
+      // Stationary frames stay frozen, since they are what every moved node is measured against
+      // (R13, R18); moving frames paint live, so a pos-free one follows the members it carries.
       if (gesture.movingRegions.length === 0) return gesture.regionRects;
-      if (gesture.selectedNodes.length === 0) return undefined;
-      // A mixed drag freezes the stationary frames the free nodes are measured against, while
-      // the moving frames paint live so their outlines track the drag.
       return regionRectsWithDrawnMove(gesture.movingRegions, this.model, gesture.regionRects);
     }
-    if (gesture?.type === 'region-resize' && gesture.context.block.pos) {
-      return regionRectsWithDrawnResize(gesture.context, gesture.frozenRegionRects);
+    if (gesture?.type === 'region-resize') {
+      return regionRectsWithDrawnResize(gesture, gesture.frozenRegionRects);
     }
     return undefined;
   }
@@ -1730,7 +1738,7 @@ export class CanvasView {
         const movedNodes = [...gesture.startPositions.keys()];
         const membershipChanges = this.membershipChangesFor(gesture);
         // Written with the move, which writes the block's file in the same step (R18a).
-        keepEmptiedRegionsInPlace(gesture.regionRects, (block) => membersAfterChanges(block, membershipChanges));
+        keepEmptiedRegionsInPlace(gesture.undrawnRegionFrames, (block) => membersAfterChanges(block, membershipChanges));
         if (gesture.movingRegions.length > 0) {
           this.actions.regionMoved(
             gesture.movingRegions.map((context) => this.regionTargetOf(context)),
@@ -1820,12 +1828,7 @@ export class CanvasView {
   private commitRegionResize(gesture: Extract<Gesture, { type: 'region-resize' }>): void {
     // Measured against the rectangle the user dragged rather than the drawn union, so shrinking
     // past a member is what shuts it out even though the region still encloses it.
-    const changes = membershipChangesForRegion(
-      this.model,
-      gesture.context,
-      gesture.context.block.pos!,
-      { canRemove: true },
-    );
+    const changes = membershipChangesForResize(this.model, gesture.context);
     this.actions.regionResized(this.regionTargetOf(gesture.context), changes);
   }
 

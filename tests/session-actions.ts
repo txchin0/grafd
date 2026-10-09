@@ -5,7 +5,7 @@
 // move and delete things, and fast-check can shrink it without the aims going stale.
 
 import fc from 'fast-check';
-import type { Tool } from '../src/client/canvas/canvas-view.js';
+import type { PressTargetKind, Tool } from '../src/client/canvas/canvas-view.js';
 import { regionRectOf } from '../src/client/flow-doc.js';
 import { collapseToSingleLine, type FlowNode } from '../src/shared/flow-format.js';
 import type { Point } from '../src/client/geometry.js';
@@ -132,6 +132,8 @@ export interface ActionTrace {
   textRequest: TextEditRequest | null;
   // The corner or side a grab-affordance step dragged, when the affordance was a resize handle.
   grabbedHandle: ResizeHandle | null;
+  // What the press that began a drag landed on, as the view settled it just before pressing.
+  pressedKind: PressTargetKind | null;
 }
 
 export const MAX_PICK_INDEX = 7;
@@ -250,7 +252,7 @@ export function choosableItems(menu: readonly MenuItem[]): { label: string; onSe
 }
 
 function emptyTrace(): ActionTrace {
-  return { path: null, menuAt: null, menuItem: null, editedNode: null, typed: null, textRequest: null, grabbedHandle: null };
+  return { path: null, menuAt: null, menuItem: null, editedNode: null, typed: null, textRequest: null, grabbedHandle: null, pressedKind: null };
 }
 
 export async function performAction(editor: HeadlessEditor, action: SessionAction): Promise<ActionTrace> {
@@ -278,6 +280,7 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       const to = resolveTarget(editor, action.to);
       if (!from || !to) return trace;
       trace.path = pathBetween(from, to);
+      trace.pressedKind = editor.core.view.pressTargetKindAt(from, action.shift);
       await editor.drag(trace.path, { shiftKey: action.shift });
       return trace;
     }
@@ -285,6 +288,7 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       const from = resolveTarget(editor, action.from);
       if (!from) return trace;
       trace.path = pathBetween(from, { x: from.x + action.by.x, y: from.y + action.by.y });
+      trace.pressedKind = editor.core.view.pressTargetKindAt(from, action.shift);
       await editor.drag(trace.path, { shiftKey: action.shift });
       return trace;
     }
@@ -317,6 +321,7 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       if (!from) return trace;
       trace.grabbedHandle = itemAt(editor.core.view.affordances(), action.affordance)?.handle ?? null;
       trace.path = pathBetween(from, { x: from.x + action.by.x, y: from.y + action.by.y });
+      trace.pressedKind = editor.core.view.pressTargetKindAt(from);
       await editor.drag(trace.path);
       return trace;
     }

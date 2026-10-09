@@ -160,6 +160,20 @@ describe('clipboard with regions', () => {
     );
   });
 
+  it('steps each repeated paste further from the originals, starting over on a new copy', () => {
+    const harness = harnessFor(MAIN);
+    harness.setSelection([harness.nodeNamed('Login')], []);
+    harness.clipboard.copy();
+    harness.clipboard.paste();
+    harness.clipboard.paste();
+    expect(harness.nodeNamed('Login 2').pos).toEqual({ x: 224, y: 224, w: 200, h: 88 });
+    expect(harness.nodeNamed('Login 3').pos).toEqual({ x: 248, y: 248, w: 200, h: 88 });
+
+    harness.clipboard.copy();
+    harness.clipboard.paste();
+    expect(harness.nodeNamed('Login 4').pos).toEqual({ x: 224, y: 224, w: 200, h: 88 });
+  });
+
   it('pastes a region whose members were not copied as empty', () => {
     const harness = harnessFor(MAIN);
     harness.setSelection([], [harness.regionNamed('Cart')]);

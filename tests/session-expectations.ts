@@ -127,6 +127,7 @@ export function expectationViolations(step: SessionStep): Violation[] {
     ...draggedThingsOffThePointer(step, was, now),
     ...regionDragThatLeftDrawings(step, was, now),
     ...regionsMadeUnreachable(step, was, now),
+    ...emptiedRegionsMovedOffTheirFrame(step, was, now),
     ...edgesDuplicated(step, was, now),
     ...pasteAwayFromThePointer(step, was, now),
     ...copiesLeftUnselected(step, was, now),
@@ -223,6 +224,28 @@ function regionsMadeUnreachable(step: SessionStep, was: GraphState, now: GraphSt
     .flatMap(([name]) => violation('a region stays on the canvas', `region ${name} is still in the file but no longer has a frame to see or select it by`));
 }
 
+// R18a again: the frame an emptied region keeps is the one the file gave it. An unfolded frame
+// warps the nodes around it on screen, and the frame painted around them with it, but the warp is
+// view-only and never reaches disk. A resize shapes the area it leaves, so it is judged by the
+// side-drag rule instead.
+function emptiedRegionsMovedOffTheirFrame(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
+  if (isHistoryAction(step.action) || step.trace.pressedKind === 'region-handle') return [];
+  return [...now.regions].flatMap(([name, region]) => {
+    const before = was.regions.get(name);
+    if (!before?.frame || before.pos || !region.pos || region.members.length > 0) return [];
+    if (sameRect(region.pos, roundedRect(before.frame))) return [];
+    return violation('an emptied region keeps the frame the file gave it', `region ${name} was laid out at ${JSON.stringify(before.frame)} but kept ${JSON.stringify(region.pos)}`);
+  });
+}
+
+function roundedRect(rect: Rect): Rect {
+  return { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) };
+}
+
+function sameRect(a: Rect, b: Rect): boolean {
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+}
+
 // A second edge identical to an unlabelled one already there says nothing new.
 function edgesDuplicated(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
   const violations: Violation[] = [];
@@ -247,6 +270,34 @@ function pasteAwayFromThePointer(step: SessionStep, was: GraphState, now: GraphS
   const at = step.trace.menuAt;
   if (Math.abs(pasted.x - at.x) <= PASTE_TOLERANCE && Math.abs(pasted.y - at.y) <= PASTE_TOLERANCE) return [];
   return violation('paste here lands at the pointer', `asked to paste at ${Math.round(at.x)},${Math.round(at.y)}; the copy's top-left landed at ${Math.round(pasted.x)},${Math.round(pasted.y)}`);
+}
+
+// Pasting the same copy again from the keyboard lands each paste a step further on than the last,
+// so no paste hides exactly under the one before it. Unlike the rules above this one remembers an
+// earlier step — the last keyboard paste's landing — so a session keeps one checker for its whole
+// run; copying or cutting afresh starts the cascade over.
+export function createRepeatedPasteCheck(): (step: SessionStep) => Violation[] {
+  let lastLanding: Point | null = null;
+  return (step) => {
+    if (refillsTheClipboard(step)) lastLanding = null;
+    if (!isKeyboardPaste(step)) return [];
+    const landing = boundsOfAdded(graphStateOf(step.before, step.flowPath), graphStateOf(step.after, step.flowPath));
+    if (!landing) return [];
+    const previous = lastLanding;
+    lastLanding = landing;
+    if (!previous || previous.x !== landing.x || previous.y !== landing.y) return [];
+    return violation('pasting again never lands on the last paste', `two pastes in a row both landed at ${landing.x},${landing.y}`);
+  };
+}
+
+function refillsTheClipboard(step: SessionStep): boolean {
+  const { action, trace } = step;
+  const copyCommand = action.type === 'command' && (action.command === 'copy' || action.command === 'cut');
+  return copyCommand || /^(Copy|Cut)$/.test(trace.menuItem ?? '');
+}
+
+function isKeyboardPaste(step: SessionStep): boolean {
+  return step.action.type === 'command' && step.action.command === 'paste';
 }
 
 // Pasted or duplicated copies are what is selected afterwards, so they can be moved straight away.
@@ -427,7 +478,7 @@ function sideDragThatMovedOtherSides(step: SessionStep, was: GraphState, now: Gr
   const handle = step.trace.grabbedHandle;
   if (step.action.type !== 'grab-affordance' || !handle || !isResizeEdge(handle)) return [];
   return reshapedRects(was, now).flatMap(({ what, before, after, holdsText, tolerance }) => {
-    const moved = sidesHeldBy(handle, holdsText).filter((side) => Math.abs(sideOf(after, side) - sideOf(before, side)) > tolerance);
+    const moved = sidesHeldBy(handle, holdsText).filter((side) => !sideStayed(before, after, side, handle, tolerance));
     return moved.length === 0 ? [] : violation('a side drag moves only that side', `dragging the ${handle} side moved the ${moved.join(', ')} side of ${what}: ${JSON.stringify(before)} to ${JSON.stringify(after)}`);
   });
 }
@@ -437,9 +488,27 @@ type RectSide = 'left' | 'right' | 'top' | 'bottom';
 function sidesHeldBy(handle: ResizeEdge, holdsText: boolean): RectSide[] {
   const axes = axesOf(handle);
   const held: RectSide[] = axes.x !== 0
-    ? [axes.x === 1 ? 'left' : 'right', 'top', ...(holdsText ? [] : ['bottom' as const])]
-    : [axes.y === 1 ? 'top' : 'bottom', 'left', ...(holdsText ? [] : ['right' as const])];
+    ? [oppositeSideOf(handle), 'top', ...(holdsText ? [] : ['bottom' as const])]
+    : [oppositeSideOf(handle), 'left', ...(holdsText ? [] : ['right' as const])];
   return held;
+}
+
+function oppositeSideOf(handle: ResizeEdge): RectSide {
+  const axes = axesOf(handle);
+  if (axes.x !== 0) return axes.x === 1 ? 'left' : 'right';
+  return axes.y === 1 ? 'top' : 'bottom';
+}
+
+// A region has no minimum size, so its dragged side can be taken past the opposite one, which
+// turns the rectangle over: the side that stayed is then the other end of its axis.
+function sideStayed(before: Rect, after: Rect, side: RectSide, handle: ResizeEdge, tolerance: number): boolean {
+  const stayedAt = sideOf(before, side);
+  const endsItCanBe = side === oppositeSideOf(handle) ? endsOfAxisOf(side) : [side];
+  return endsItCanBe.some((end) => Math.abs(sideOf(after, end) - stayedAt) <= tolerance);
+}
+
+function endsOfAxisOf(side: RectSide): RectSide[] {
+  return side === 'left' || side === 'right' ? ['left', 'right'] : ['top', 'bottom'];
 }
 
 function sideOf(rect: Rect, side: RectSide): number {
@@ -463,9 +532,15 @@ function reshapedRects(was: GraphState, now: GraphState): { what: string; before
     const before = was.topNodes.get(id)?.pos;
     if (before && node.pos && sizeChanged(before, node.pos)) reshaped.push({ what: `node ${node.name}`, before, after: node.pos, holdsText: false, tolerance: EXACT_SIDE_TOLERANCE });
   }
+  // A region is measured from the frame the file gave it — its drawn area grown to hold its
+  // members, or their bounds when it has none — since that is what a resize starts from. The one
+  // painted can differ while a subgraph is unfolded, and that difference must never be written.
   for (const [name, region] of now.regions) {
-    const before = was.regions.get(name)?.pos;
-    if (before && region.pos && sizeChanged(before, region.pos)) reshaped.push({ what: `region ${name}`, before, after: region.pos, holdsText: false, tolerance: EXACT_SIDE_TOLERANCE });
+    const before = was.regions.get(name);
+    const posChanged = region.pos && !(before?.pos && sameRect(before.pos, region.pos));
+    if (before?.frame && region.pos && posChanged && sizeChanged(before.frame, region.pos)) {
+      reshaped.push({ what: `region ${name}`, before: before.frame, after: region.pos, holdsText: false, tolerance: EXACT_SIDE_TOLERANCE });
+    }
   }
   const changedStrokes = [...now.strokes.keys()].filter((id) => was.strokes.has(id) && drawingTravel(id, was, now) === null);
   const changedTexts = [...now.texts.keys()].filter((id) => was.texts.has(id) && drawingTravel(id, was, now) === null);

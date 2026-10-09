@@ -4,6 +4,7 @@
 
 import { parseFlow, serializeFlow, type FlowDocument, type FlowNode } from '../src/shared/flow-format.js';
 import { allNodes, buildModel, contextBlockNamed, regionRectOf } from '../src/client/flow-doc.js';
+import { movingRegionGroupFor } from '../src/client/canvas/region-gestures.js';
 import { rectContainsRect } from '../src/shared/rect-math.js';
 import { lintFlowFile } from '../src/shared/flow-lint.js';
 import { lintCanvasLayer } from '../src/shared/canvas-layer-lint.js';
@@ -71,21 +72,33 @@ function layerFileViolations(path: string, text: string, flowText: string | null
 
 // R13–R16: a node a drag sets down is a member of exactly the regions whose frame, as it stood
 // when the drag began, fully encloses it — however many regions overlap there and whatever else
-// the drag carried along. Judged on the files alone, so it applies only to a step that translated
-// top-level nodes and nothing else of the graph: region drags follow R28–R29 instead, which is why
-// the caller holds this back whenever the step left a region selected.
-export function dropMembershipViolations(before: FileSnapshot, after: FileSnapshot, path: string): Violation[] {
+// the drag carried along. That holds for a node a dragged region carried as much as for one dragged
+// on its own, so it is judged against every region the drag left standing: the regions it moved
+// follow R28–R29 instead, and they are the ones selected plus every region whose frame lay inside
+// one of those when the drag began (R28a). Judged on the files alone, so it applies only to a step
+// that translated top-level nodes and resized nothing.
+export function dropMembershipViolations(
+  before: FileSnapshot,
+  after: FileSnapshot,
+  path: string,
+  selectedRegionNames: ReadonlySet<string>,
+): Violation[] {
   const beforeText = before.get(path);
   const afterText = after.get(path);
   if (!beforeText || !afterText) return [];
   const beforeDoc = parseFlow(beforeText);
   const afterDoc = parseFlow(afterText);
   const moved = translatedNodes(beforeDoc, afterDoc);
-  if (moved.length === 0 || regionAreasChanged(beforeDoc, afterDoc)) return [];
+  if (moved.length === 0 || regionsResized(beforeDoc, afterDoc)) return [];
   const framesAtDragStart = buildModel(beforeDoc, null);
+  const movingRegions = movingRegionGroupFor(
+    framesAtDragStart,
+    framesAtDragStart.contexts.filter((context) => selectedRegionNames.has(context.block.name)),
+  );
   const violations: Violation[] = [];
   for (const node of moved) {
     for (const context of framesAtDragStart.contexts) {
+      if (movingRegions.includes(context)) continue;
       const frame = regionRectOf(framesAtDragStart, context);
       if (!frame || !node.pos) continue;
       const enclosed = rectContainsRect(frame, node.pos);
@@ -118,9 +131,15 @@ function translatedNodes(beforeDoc: FlowDocument, afterDoc: FlowDocument): FlowN
   return moved;
 }
 
-function regionAreasChanged(beforeDoc: FlowDocument, afterDoc: FlowDocument): boolean {
-  const areasOf = (doc: FlowDocument) => JSON.stringify(buildModel(doc, null).contexts.map((context) => [context.block.name, context.block.pos]));
-  return areasOf(beforeDoc) !== areasOf(afterDoc);
+// A region keeping the frame its last member left it (R18a) gains a drawn area; that is not a resize.
+function regionsResized(beforeDoc: FlowDocument, afterDoc: FlowDocument): boolean {
+  const beforeBlocks = buildModel(beforeDoc, null).contexts.map((context) => context.block);
+  return beforeBlocks.some((block) => {
+    const afterBlock = contextBlockNamed(afterDoc, block.name);
+    if (!afterBlock) return true;
+    if (!block.pos || !afterBlock.pos) return false;
+    return block.pos.w !== afterBlock.pos.w || block.pos.h !== afterBlock.pos.h;
+  });
 }
 
 // The selection only ever holds things that exist: nodes some loaded document still contains,

@@ -68,6 +68,9 @@ export interface Clipboard {
 
 export function createClipboard(options: ClipboardOptions): Clipboard {
   let groups: ClipboardGroup[] = [];
+  // How many pastes with no pointer position this clipboard's content has had. Each lands one step
+  // further from the originals than the last, so repeated pastes cascade instead of stacking.
+  let unplacedPasteCount = 0;
 
   function groupFor(byScope: Map<string, CopiedGroup>, owner: DocumentOwner, scope: string | null): CopiedGroup {
     const { path } = owner;
@@ -111,6 +114,7 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
       visuals: options.captureVisuals(group.owner, group.nodes),
       drawings: group.drawings,
     }));
+    unplacedPasteCount = 0;
   }
 
   function cut(): void {
@@ -188,9 +192,17 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
   }
 
   // Paste at the pointer puts the top-left corner of everything copied under it, the rest kept in
-  // formation — whatever order it was selected in; with no pointer position it offsets like a
-  // duplicate instead.
-  function offsetToward(world: Point | undefined): Point {
+  // formation — whatever order it was selected in; with no pointer position it steps away from the
+  // originals like a duplicate instead, one step further on each paste.
+  function pasteOffset(world: Point | undefined): Point {
+    const pointerOffset = world ? offsetPlacingTopLeftAt(world) : null;
+    if (pointerOffset) return pointerOffset;
+    unplacedPasteCount += 1;
+    const distance = DUPLICATE_STEP * unplacedPasteCount;
+    return { x: distance, y: distance };
+  }
+
+  function offsetPlacingTopLeftAt(world: Point): Point | null {
     const corners = groups
       .flatMap((group) => [
         ...group.nodes.map((node) => node.pos),
@@ -198,7 +210,7 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
         ...group.drawings.drawings.flatMap(drawingAnchorPoints),
       ])
       .filter((pos): pos is Point => pos != null);
-    if (!world || corners.length === 0) return { x: DUPLICATE_STEP, y: DUPLICATE_STEP };
+    if (corners.length === 0) return null;
     const topLeft = { x: Math.min(...corners.map((corner) => corner.x)), y: Math.min(...corners.map((corner) => corner.y)) };
     return { x: Math.round(world.x - topLeft.x), y: Math.round(world.y - topLeft.y) };
   }
@@ -213,7 +225,7 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
     // A group whose original document is no longer loaded falls back to the open flow, where
     // the user can at least see what they pasted.
     const fallback: DocumentOwner = { doc: flow.doc, path: flow.path };
-    const offset = offsetToward(world);
+    const offset = pasteOffset(world);
     const pastedNodes: FlowNode[] = [];
     const pastedRegions: ContextBlock[] = [];
     const pastedDrawings: StoredDrawing[] = [];

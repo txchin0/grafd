@@ -152,6 +152,17 @@ export function regionRectOf(model: FlowModel, context: ModelContext): Rect | nu
   return regionRectFrom(context.block.pos, memberRects);
 }
 
+// Where a region sits in the file's own layout: regionRectOf with every member at its authored
+// `pos` rather than where the canvas shows it. An unfolded frame grows its host and warps the
+// nodes around it on screen only, so a frame that is written back as a block's `pos` is measured
+// here — the display frame would carry the warp onto disk.
+export function layoutRegionRectOf(context: ModelContext): Rect | null {
+  const memberRects = context.members
+    .map((member) => member.pos)
+    .filter((rect): rect is Rect => rect != null);
+  return regionRectFrom(context.block.pos, memberRects);
+}
+
 // The other contexts a dragged region carries: every one whose whole frame lies inside its
 // frame. Measured against the frames as they stand at gesture start, via the same regionRectOf
 // the painter draws and the hit-test reads, so what moves is exactly what the user sees enclosed.
@@ -294,9 +305,26 @@ export function membershipChangesForRegion(
   frame: Rect,
   { canRemove }: { canRemove: boolean },
 ): MembershipChange[] {
+  return membershipChangesWithin(model, context, frame, canRemove, (node) => displayRectOf(model, node));
+}
+
+// What a resize did to its region's membership (R31), measured against the `pos` it wrote. That
+// rectangle is in the file's layout, so the nodes are too: the warp around an unfolded frame
+// moves them on screen only, and the members a file lists must agree with the frame it holds.
+export function membershipChangesForResize(model: FlowModel, context: ModelContext): MembershipChange[] {
+  return membershipChangesWithin(model, context, context.block.pos!, true, (node) => node.pos!);
+}
+
+function membershipChangesWithin(
+  model: FlowModel,
+  context: ModelContext,
+  frame: Rect,
+  canRemove: boolean,
+  rectOf: (node: FlowNode) => Rect,
+): MembershipChange[] {
   const changes: MembershipChange[] = [];
   for (const node of model.nodes) {
-    const inside = rectContainsRect(frame, displayRectOf(model, node));
+    const inside = rectContainsRect(frame, rectOf(node));
     const isMember = context.members.includes(node);
     if (inside && !isMember) changes.push({ block: context.block, node, joins: true });
     else if (!inside && isMember && canRemove) changes.push({ block: context.block, node, joins: false });
@@ -304,45 +332,12 @@ export function membershipChangesForRegion(
   return changes;
 }
 
-// What a region-move gesture did to membership. The group that travelled sweeps the non-members
-// each frame comes to rest over into its own membership (R28a, R29), and the carried nodes —
-// every member of the group, deduped — join any stationary region whose frame fully contains
-// them where they landed. A move can only ever add: every member travelled with its own frame,
-// so none can be shut out, and a stationary region never sweeps or drops anything else.
-export function membershipChangesForRegionMove(
-  model: FlowModel,
-  group: readonly ModelContext[],
-): MembershipChange[] {
-  const groupBlocks = new Set(group.map((entry) => entry.block));
-  const carriedNodes = [...new Set(group.flatMap((entry) => entry.members))].filter((node) =>
-    model.nodes.includes(node),
-  );
-  const changes: MembershipChange[] = [];
-  for (const context of model.contexts) {
-    const frame = regionRectOf(model, context);
-    if (!frame) continue;
-    if (groupBlocks.has(context.block)) {
-      changes.push(...membershipChangesForRegion(model, context, frame, { canRemove: false }));
-      continue;
-    }
-    for (const node of carriedNodes) {
-      if (context.members.includes(node)) continue;
-      if (rectContainsRect(frame, displayRectOf(model, node))) {
-        changes.push({ block: context.block, node, joins: true });
-      }
-    }
-  }
-  return changes;
-}
-
-// What a mixed selection move did to membership — the union of the two existing contracts.
-// Each moved node plays one role: it is carried when a moving region lists it (its frame
-// travelled with it, so it can never have been shut out), or free when only the selection
-// moved it. Moved regions sweep non-members they come to rest over (R29, add-only, live frame);
-// a carried node joins any stationary region it lands in (existing region-move rule, live
-// frame, join-only); a free node gets the full R13 test against the frozen frame each region
-// had when the drag began — a pos-free region's live frame would follow it, so no member could
-// ever leave it (R18).
+// What a move did to membership, whether it carried regions, nodes, or both. Moved regions sweep
+// the non-members they come to rest over (R29, add-only, live frame). Every node the move carried —
+// listed by a moving region, or selected — gets the R13 test from each stationary region: it is a
+// member exactly when it came to rest inside the frame that region had when the drag began. Frozen,
+// because a pos-free region's live frame follows its moving members, so none could ever leave it,
+// and a drawn one would be stretched by them instead (R18, R31a).
 export function membershipChangesForCombinedMove(
   model: FlowModel,
   movingRegions: readonly ModelContext[],
@@ -350,12 +345,8 @@ export function membershipChangesForCombinedMove(
   frozenRegionRects: ReadonlyMap<ContextBlock, Rect>,
 ): MembershipChange[] {
   const movingBlocks = new Set(movingRegions.map((entry) => entry.block));
-  const carriedNodes = [...new Set(movingRegions.flatMap((entry) => entry.members))].filter((node) =>
-    model.nodes.includes(node),
-  );
-  const freeNodes = selectedNodes.filter(
-    (node) => model.nodes.includes(node) && !carriedNodes.includes(node),
-  );
+  const movedNodes = [...new Set([...movingRegions.flatMap((entry) => entry.members), ...selectedNodes])]
+    .filter((node) => model.nodes.includes(node));
   const changes: MembershipChange[] = [];
   for (const context of model.contexts) {
     if (movingBlocks.has(context.block)) {
@@ -364,19 +355,11 @@ export function membershipChangesForCombinedMove(
       continue;
     }
     const frozenFrame = frozenRegionRects.get(context.block);
-    for (const node of freeNodes) {
-      if (!frozenFrame) continue;
+    if (!frozenFrame) continue;
+    for (const node of movedNodes) {
       const inside = rectContainsRect(frozenFrame, displayRectOf(model, node));
       const isMember = context.members.includes(node);
       if (inside !== isMember) changes.push({ block: context.block, node, joins: inside });
-    }
-    const frame = regionRectOf(model, context);
-    if (!frame) continue;
-    for (const node of carriedNodes) {
-      if (context.members.includes(node)) continue;
-      if (rectContainsRect(frame, displayRectOf(model, node))) {
-        changes.push({ block: context.block, node, joins: true });
-      }
     }
   }
   return changes;
@@ -400,12 +383,13 @@ export function regionFramesOf(model: FlowModel): Map<ContextBlock, Rect> {
   return frames;
 }
 
-// The frame each region with no drawn area shows now — what `keepEmptiedRegionsInPlace` needs
-// to remember from before an edit takes members away.
+// The frame each region with no drawn area has now, in the file's layout — what
+// `keepEmptiedRegionsInPlace` needs to remember from before an edit takes members away, since it
+// writes that frame as the block's `pos`.
 export function framesOfUndrawnRegions(model: FlowModel): Map<ContextBlock, Rect> {
   const frames = new Map<ContextBlock, Rect>();
   for (const context of model.contexts) {
-    const frame = context.block.pos ? null : regionRectOf(model, context);
+    const frame = context.block.pos ? null : layoutRegionRectOf(context);
     if (frame) frames.set(context.block, frame);
   }
   return frames;

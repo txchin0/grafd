@@ -1,5 +1,6 @@
 // The workspace the random sessions start from. It holds one of every kind of thing a press can
-// land on — nodes inside and outside regions, a drawn region and one sized by its members, edges,
+// land on — nodes inside and outside regions, a drawn region, one sized by its members and one
+// nested inside another that lists its member too, edges,
 // a subgraph host, an edge to a node that does not exist yet (drawn as a ghost), loose strokes and
 // a group of them, text loose, wrapped, inside a region, inside a subgraph and grouped with a stroke — so that a sequence of gestures has every pairing of kind and destination within
 // reach. A kind added to the canvas belongs here too, or no session ever touches it; the coverage
@@ -18,6 +19,11 @@ context: Drawn
   pos: 0, 0, 700, 360
   nodes:
     - Alpha
+    - Beta
+
+context: Nested
+  pos: 384, 88, 256, 152
+  nodes:
     - Beta
 
 context: Loose

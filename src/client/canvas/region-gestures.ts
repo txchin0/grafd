@@ -27,7 +27,15 @@ export interface RegionMoveSnapshot {
 export interface RegionResizeSnapshot {
   context: ModelContext;
   handle: ResizeHandle;
+  // The frame in the file's layout when the press began (`layoutRegionRectOf`) — what the
+  // resize writes from. The painted frame can differ from it while a subgraph is unfolded nearby,
+  // since the warp displaces the members it is drawn around, and the warp never reaches disk.
   startRect: Rect;
+  // The frame as painted when the press began, and as painted now: its dragged sides move exactly
+  // as far as the written ones, so the outline neither jumps when the drag begins nor drifts from
+  // the pointer during it.
+  displayStartRect: Rect;
+  displayRect: Rect;
   startWorld: Point;
   // Whether the block had an authored `pos` when the press began. One without acquires it on the
   // first movement, and an abandoned resize takes it away again.
@@ -154,25 +162,40 @@ export function applyRegionMove(gesture: RegionMoveSnapshot, world: Point, snap:
 // No minimum size: a region is an area the user reserved, and nothing about it needs to stay
 // big enough to hold anything (R31). Its members do not move, so shrinking past one shuts it out.
 export function applyRegionResize(gesture: RegionResizeSnapshot, world: Point, snap: SnapCoord): void {
-  const dx = world.x - gesture.startWorld.x;
-  const dy = world.y - gesture.startWorld.y;
   const start = gesture.startRect;
+  const axes = axesOf(gesture.handle);
+  const travel = {
+    x: draggedSideTravel(start.x, start.w, axes.x, world.x - gesture.startWorld.x, snap),
+    y: draggedSideTravel(start.y, start.h, axes.y, world.y - gesture.startWorld.y, snap),
+  };
   // A region with no drawn area acquires one the moment it is resized: the user is reserving
   // space, which is the only thing that ever authors a block's `pos`.
   const frame = gesture.context.block.pos ??= { ...start };
-  const axes = axesOf(gesture.handle);
-  const [fromX, toX] = sidesAlong(start.x, start.w, axes.x, dx, snap);
-  const [fromY, toY] = sidesAlong(start.y, start.h, axes.y, dy, snap);
-  Object.assign(frame, normalizedRect({ x: fromX, y: fromY }, { x: toX, y: toY }));
+  Object.assign(frame, withDraggedSidesMoved(start, axes, travel));
+  gesture.displayRect = withDraggedSidesMoved(gesture.displayStartRect, axes, travel);
 }
 
-// One axis of a resized rectangle: the side the handle drags follows the pointer onto the grid,
-// the other stays; an axis the handle does not drag keeps both sides exactly where they were.
-function sidesAlong(start: number, extent: number, side: AxisSide, travel: number, snap: SnapCoord): [number, number] {
+// How far the side a handle drags along one axis moves: onto the grid wherever the pointer takes
+// it. Zero on an axis the handle does not drag.
+function draggedSideTravel(start: number, extent: number, side: AxisSide, pointerTravel: number, snap: SnapCoord): number {
+  if (side === 0) return 0;
+  const follows = side === -1 ? start : start + extent;
+  return snap(follows + pointerTravel) - follows;
+}
+
+// The rectangle with each dragged side moved by its axis's travel and every other side where it
+// was; a side dragged past the one opposite it turns the rectangle over rather than inverting it.
+function withDraggedSidesMoved(rect: Rect, axes: { x: AxisSide; y: AxisSide }, travel: Point): Rect {
+  const [fromX, toX] = sidesAlong(rect.x, rect.w, axes.x, travel.x);
+  const [fromY, toY] = sidesAlong(rect.y, rect.h, axes.y, travel.y);
+  return normalizedRect({ x: fromX, y: fromY }, { x: toX, y: toY });
+}
+
+function sidesAlong(start: number, extent: number, side: AxisSide, travel: number): [number, number] {
   if (side === 0) return [start, start + extent];
   const stays = side === -1 ? start + extent : start;
   const follows = side === -1 ? start : start + extent;
-  return [stays, snap(follows + travel)];
+  return [stays, follows + travel];
 }
 
 export function rollbackRegionMove(gesture: RegionMoveSnapshot): void {
@@ -192,23 +215,21 @@ export function rollbackRegionResize(gesture: RegionResizeSnapshot): void {
   else Object.assign(block.pos!, gesture.startRect);
 }
 
-// While a resize is in progress, trust the live `block.pos` rather than `regionRectOf`, which
-// unions member bounds and would stick the frame until release.
+// While a resize is in progress, paint the rectangle being dragged rather than `regionRectOf`,
+// which unions member bounds and would stick the frame until release.
 export function regionRectDuringResize(
   context: ModelContext,
-  gesture: Pick<RegionResizeSnapshot, 'context'> | null,
+  gesture: Pick<RegionResizeSnapshot, 'context' | 'displayRect'> | null,
 ): Rect | null {
-  return gesture?.context === context ? gesture.context.block.pos ?? null : null;
+  return gesture?.context === context ? gesture.displayRect : null;
 }
 
-// Paint every region from the frozen map, swapping in the drawn rectangle for the one resizing.
+// Paint every region from the frozen map, swapping in the dragged rectangle for the one resizing.
 export function regionRectsWithDrawnResize(
-  resizing: ModelContext,
+  gesture: Pick<RegionResizeSnapshot, 'context' | 'displayRect'>,
   frozenRects: ReadonlyMap<ContextBlock, Rect>,
 ): ReadonlyMap<ContextBlock, Rect> {
-  const drawn = resizing.block.pos;
-  if (!drawn) return frozenRects;
-  return new Map([...frozenRects, [resizing.block, { ...drawn }]]);
+  return new Map([...frozenRects, [gesture.context.block, { ...gesture.displayRect }]]);
 }
 
 // Paint a mixed move: stationary regions keep the frozen frame the user aimed at (R13, R18),

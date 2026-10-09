@@ -27,7 +27,7 @@ import {
   type SessionAction,
   type TargetPick,
 } from './session-actions.js';
-import { expectationViolations, graphOnScreen, selectionOf } from './session-expectations.js';
+import { createRepeatedPasteCheck, expectationViolations, graphOnScreen, selectionOf } from './session-expectations.js';
 import {
   contentChanged,
   contentOf,
@@ -50,6 +50,9 @@ const PROBE_DRAG: Point = { x: 48, y: 32 };
 // At right angles to the first, for what only moves across a line — an edge's grip bends it only
 // away from its chord, so a drag along the edge rightly leaves it straight.
 const ACROSS_PROBE_DRAG: Point = { x: -32, y: 48 };
+// Both of those again, reversed, for what only moves one way along a line — a resize handle on a
+// node already at its smallest only grows it, so a drag inward rightly changes nothing.
+const FURTHER_PROBE_DRAGS: Point[] = [ACROSS_PROBE_DRAG, reversed(PROBE_DRAG), reversed(ACROSS_PROBE_DRAG)];
 const TOOLS_THAT_KEEP_OBJECTS_GRABBABLE: Tool[] = ['node', 'context', 'text'];
 
 // Sessions that once broke a rule, shrunk by fast-check to the fewest steps that still broke it.
@@ -63,8 +66,12 @@ const ON_A_STROKE: TargetPick = { kind: 'stroke', index: 0, nudge: { x: 0, y: 0 
 const CORNER_HANDLES = 4;
 const SIDE_HANDLES = 4;
 const NORTH_WEST_HANDLE = 0;
+const SOUTH_WEST_HANDLE = 2;
 const SOUTH_EAST_HANDLE = 3;
+const NORTH_SIDE_HANDLE = CORNER_HANDLES;
 const WEST_SIDE_HANDLE = CORNER_HANDLES + 3;
+// Too short a region keeps no left or right side handle, so its bottom one comes next after the top.
+const SOUTH_SIDE_HANDLE_OF_A_FLAT_REGION = CORNER_HANDLES + 1;
 const TOP_PORT_OF_A_SELECTED_NODE = CORNER_HANDLES + SIDE_HANDLES;
 const RIGHT_PORT_OF_A_SELECTED_NODE = CORNER_HANDLES + SIDE_HANDLES + 1;
 const FIRST_NODE_TO_EMPTY_CANVAS: SessionAction = {
@@ -79,6 +86,9 @@ const CURSOR_REGRESSIONS: [SessionAction[], Tool, TargetPick][] = [
   // With an edge now running across the region's border, the cursor promised a region move while
   // the press selected the edge.
   [[FIRST_NODE_TO_EMPTY_CANVAS], 'select', { kind: 'region-border', index: 0, nudge: { x: 0, y: 0 } }],
+  // A ghost made real comes in at the smallest height, so its top side only grows it, and both
+  // probes dragged that side inward.
+  [[{ type: 'click', target: { kind: 'ghost', index: 0, nudge: { x: 0, y: 0 } }, shift: false }], 'select', affordancePick(NORTH_SIDE_HANDLE)],
 ];
 const SESSION_REGRESSIONS: [SessionAction[]][] = [
   // A name starting with `#` turned its node's own line into a comment.
@@ -108,6 +118,13 @@ const SESSION_REGRESSIONS: [SessionAction[]][] = [
     { type: 'click', target: nodePick(0), shift: true },
     { type: 'command', command: 'copy' },
     { type: 'menu', target: { kind: 'empty', index: 0, nudge: { x: 0, y: 0 } }, choice: 1 },
+  ]],
+  // Pasting again landed the new copy exactly on top of the last one.
+  [[
+    { type: 'click', target: nodePick(0), shift: false },
+    { type: 'command', command: 'copy' },
+    { type: 'command', command: 'paste' },
+    { type: 'command', command: 'paste' },
   ]],
   // Shift-clicking an edge dropped everything else that was selected.
   [[{ type: 'click', target: nodePick(0), shift: false }, { type: 'click', target: { kind: 'edge-line', index: 0, nudge: { x: 0, y: 0 } }, shift: true }]],
@@ -146,6 +163,18 @@ const SESSION_REGRESSIONS: [SessionAction[]][] = [
   [[{ type: 'grab-affordance', owner: textPick(1), affordance: WEST_SIDE_HANDLE, by: { x: 41, y: 0 } }]],
   // A text shrunk by a corner to almost nothing lost its proportions to the rounding of its size.
   [[{ type: 'grab-affordance', owner: textPick(3), affordance: NORTH_WEST_HANDLE, by: { x: 0, y: 70 } }]],
+  // With Delta unfolded, resizing region Nested by its top side wrote the frame the warp painted
+  // around Beta, moving its left side too.
+  [[
+    { type: 'click', target: { kind: 'badge', index: 7, nudge: { x: 0, y: 0 } }, shift: false },
+    { type: 'grab-affordance', owner: { kind: 'region-border', index: 4, nudge: { x: 0, y: 0 } }, affordance: NORTH_SIDE_HANDLE, by: { x: 0, y: 6 } },
+  ]],
+  // A region left with no members had its own `pos` as the rectangle a resize started from, so
+  // every pointer move resized it again from where the last one left it.
+  [[
+    { type: 'grab-affordance', owner: { kind: 'region-border', index: 4, nudge: { x: 0, y: 0 } }, affordance: SOUTH_WEST_HANDLE, by: { x: 0, y: -117 } },
+    { type: 'grab-affordance', owner: { kind: 'region-border', index: 1, nudge: { x: 0, y: 0 } }, affordance: SOUTH_SIDE_HANDLE_OF_A_FLAT_REGION, by: { x: 0, y: -25 } },
+  ]],
 ];
 const TOOL_PARITY_REGRESSIONS: [SessionAction[], TargetPick, Tool][] = [
   // The node and region tools drew a new node or region over a stroke instead of dragging it.
@@ -252,6 +281,7 @@ describe('a random session', () => {
     await fc.assert(
       fc.asyncProperty(fc.array(sessionAction, { minLength: 1, maxLength: MAX_SESSION_LENGTH }), async (actions) => {
         const editor = await openSession();
+        const repeatedPasteViolations = createRepeatedPasteCheck();
         try {
           for (const [step, action] of actions.entries()) {
             const before = editor.workspace.snapshot();
@@ -261,24 +291,26 @@ describe('a random session', () => {
             const trace = await performAction(editor, action);
             const after = editor.workspace.snapshot();
             const stepsAdded = editor.core.session.undoDepth - depthBefore;
+            const sessionStep = {
+              editor,
+              flowPath: SESSION_FLOW_PATH,
+              action,
+              trace,
+              tool: editor.tool(),
+              before,
+              after,
+              selectionBefore,
+              selectionAfter: selectionOf(editor, SESSION_FLOW_PATH),
+              graphBefore,
+              stepsAdded,
+            };
             const violations = [
               ...fileViolations(after),
               ...selectionViolations(editor),
-              ...expectationViolations({
-                editor,
-                flowPath: SESSION_FLOW_PATH,
-                action,
-                trace,
-                tool: editor.tool(),
-                before,
-                after,
-                selectionBefore,
-                selectionAfter: selectionOf(editor, SESSION_FLOW_PATH),
-                graphBefore,
-                stepsAdded,
-              }),
+              ...expectationViolations(sessionStep),
+              ...repeatedPasteViolations(sessionStep),
             ];
-            if (isPlainNodeDrop(editor, action)) violations.push(...dropMembershipViolations(before, after, SESSION_FLOW_PATH));
+            if (isTopLevelDrag(editor, action)) violations.push(...dropMembershipViolations(before, after, SESSION_FLOW_PATH, selectedRegionNames(editor)));
             if (contentChanged(before, after) && !isHistoryAction(action)) {
               const growth = { stepsAdded, gestures: gesturesIn(action) };
               violations.push(...(await undoViolations(editor, before, after, growth)));
@@ -314,7 +346,7 @@ describe('the cursor', () => {
             const cursor = editor.cursor();
             const before = editor.workspace.snapshot();
             const changed = await draggingChangesFiles(editor, point, PROBE_DRAG);
-            const grabbed = changed || (cursorGrabs(cursor) && await draggingChangesFiles(editor, point, ACROSS_PROBE_DRAG));
+            const grabbed = changed || (cursorGrabs(cursor) && await anyDragChangesFiles(editor, point, FURTHER_PROBE_DRAGS));
             if (cursorGrabs(cursor) && !grabbed) {
               throw new Error(`with the ${tool} tool the cursor over ${pick.kind} was "${cursor}", but dragging from there changed nothing`);
             }
@@ -380,15 +412,29 @@ async function draggingChangesFiles(editor: HeadlessEditor, from: Point, by: Poi
   return contentChanged(before, editor.workspace.snapshot());
 }
 
-// A drag that set nodes down on the top level with no region in hand and no frame unfolded — the
-// case where a node's drawn rectangle is its file position and R13 alone decides its regions.
-function isPlainNodeDrop(editor: HeadlessEditor, action: SessionAction): boolean {
+async function anyDragChangesFiles(editor: HeadlessEditor, from: Point, drags: Point[]): Promise<boolean> {
+  for (const by of drags) {
+    if (await draggingChangesFiles(editor, from, by)) return true;
+  }
+  return false;
+}
+
+function reversed(drag: Point): Point {
+  return { x: -drag.x, y: -drag.y };
+}
+
+// A drag that set nodes down on the top level with no frame unfolded — the case where a node's
+// drawn rectangle is its file position, so the files alone say which regions it came to rest in.
+function isTopLevelDrag(editor: HeadlessEditor, action: SessionAction): boolean {
   const { core } = editor;
   const isDrag = action.type === 'drag' || action.type === 'nudge';
   return isDrag
-    && core.view.selectedRegions.size === 0
     && core.openFlow()?.scope == null
     && core.expansions.openVisibleNodeIds().length === 0;
+}
+
+function selectedRegionNames(editor: HeadlessEditor): Set<string> {
+  return new Set([...editor.core.view.selectedRegions].map((context) => context.block.name));
 }
 
 // A real press always follows a hover, which is what shows a node's ports.

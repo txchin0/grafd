@@ -47,8 +47,8 @@ import {
   hostsOfExpansion,
   membershipChangesForCombinedMove,
   membershipChangesForNewNode,
-  membershipChangesForRegionMove,
   nodesIn,
+  regionFramesOf,
   regionRectOf,
   removeUnreadableUpdates,
   renameGraphBlock,
@@ -771,11 +771,12 @@ context: Right
   });
 });
 
-describe('membershipChangesForRegionMove', () => {
+describe('membershipChangesForCombinedMove on a region move', () => {
+  // No fixture here moves a stationary region's member, so its frame now is its frame at drag start.
   function changesFor(groupNames: string[], text: string) {
     const model = buildModel(docFrom(text), null);
     const group = model.contexts.filter((entry) => groupNames.includes(entry.block.name));
-    return membershipChangesForRegionMove(model, group);
+    return membershipChangesForCombinedMove(model, group, [], regionFramesOf(model));
   }
 
   // The frames stand at their post-move rest, which is what a finished drag leaves behind: the
@@ -941,23 +942,6 @@ Stranger
   pos: 1260, 230, 30, 30
 `);
     expect(changes.map((change) => [change.block.name, change.node.name, change.joins])).toEqual([['B', 'N', true]]);
-  });
-
-  it('never removes a carried node from a stationary region it left', () => {
-    const changes = changesFor(['A'], `context: A
-  pos: 0, 0, 800, 600
-  nodes:
-    - N
-
-context: B
-  pos: 900, 0, 400, 300
-  nodes:
-    - N
-
-N
-  pos: 1400, 500, 200, 88
-`);
-    expect(changes).toEqual([]);
   });
 });
 
@@ -2329,7 +2313,9 @@ describe('membershipChangesForCombinedMove', () => {
     expect(changes).toEqual([{ block: other.block, node: wanderer, joins: false }]);
   });
 
-  it('treats a selected member of a moved region as carried, never removable from a stationary region', () => {
+  // R13 holds for a carried node as for a free one: the stationary region would otherwise stretch
+  // after it (R18) or hold a member outside its drawn area (R31a).
+  it('takes a carried node out of a stationary region it came to rest outside', () => {
     const doc = docFrom(`---
 name: Combined
 ---
@@ -2357,13 +2343,14 @@ Wanderer
     const zone = model.contexts.find((context) => context.block.name === 'Zone')!;
     const other = model.contexts.find((context) => context.block.name === 'Other')!;
     const wanderer = model.nodes.find((node) => node.name === 'Wanderer')!;
-    // Wanderer is selected AND a member of the moving Zone, so the move carries it: it keeps its
-    // stationary membership in Other even though the selection also moved it.
+    // Wanderer is selected AND a member of the moving Zone, so the move carries it out of Other.
     const frozen = frozenRectsOf(model);
     zone.block.pos = { x: 400, y: 400, w: 800, h: 600 };
     wanderer.pos = { x: 1400, y: 500, w: 200, h: 88 };
     const changes = membershipChangesForCombinedMove(model, [zone], [wanderer], frozen);
-    expect(changes.filter((change) => change.block === other.block && change.joins === false)).toEqual([]);
+    expect(changes.filter((change) => change.block === other.block)).toEqual([
+      { block: other.block, node: wanderer, joins: false },
+    ]);
   });
 });
 
