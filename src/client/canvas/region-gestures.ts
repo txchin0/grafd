@@ -4,7 +4,7 @@
 import type { ContextBlock, FlowNode, Rect } from '../../shared/flow-format.js';
 import { contextsContainedIn, regionRectOf, type FlowModel, type ModelContext } from '../flow-doc.js';
 import { normalizedRect, type Point } from '../geometry.js';
-import type { ResizeCorner } from './resize-handles.js';
+import { axesOf, type AxisSide, type ResizeHandle } from './resize-handles.js';
 
 export interface RegionMoveSnapshot {
   context: ModelContext;
@@ -26,7 +26,7 @@ export interface RegionMoveSnapshot {
 
 export interface RegionResizeSnapshot {
   context: ModelContext;
-  corner: ResizeCorner;
+  handle: ResizeHandle;
   startRect: Rect;
   startWorld: Point;
   // Whether the block had an authored `pos` when the press began. One without acquires it on the
@@ -160,15 +160,19 @@ export function applyRegionResize(gesture: RegionResizeSnapshot, world: Point, s
   // A region with no drawn area acquires one the moment it is resized: the user is reserving
   // space, which is the only thing that ever authors a block's `pos`.
   const frame = gesture.context.block.pos ??= { ...start };
-  const opposite = {
-    x: gesture.corner[1] === 'w' ? start.x + start.w : start.x,
-    y: gesture.corner[0] === 'n' ? start.y + start.h : start.y,
-  };
-  const dragged = {
-    x: snap((gesture.corner[1] === 'w' ? start.x : start.x + start.w) + dx),
-    y: snap((gesture.corner[0] === 'n' ? start.y : start.y + start.h) + dy),
-  };
-  Object.assign(frame, normalizedRect(opposite, dragged));
+  const axes = axesOf(gesture.handle);
+  const [fromX, toX] = sidesAlong(start.x, start.w, axes.x, dx, snap);
+  const [fromY, toY] = sidesAlong(start.y, start.h, axes.y, dy, snap);
+  Object.assign(frame, normalizedRect({ x: fromX, y: fromY }, { x: toX, y: toY }));
+}
+
+// One axis of a resized rectangle: the side the handle drags follows the pointer onto the grid,
+// the other stays; an axis the handle does not drag keeps both sides exactly where they were.
+function sidesAlong(start: number, extent: number, side: AxisSide, travel: number, snap: SnapCoord): [number, number] {
+  if (side === 0) return [start, start + extent];
+  const stays = side === -1 ? start + extent : start;
+  const follows = side === -1 ? start : start + extent;
+  return [stays, snap(follows + travel)];
 }
 
 export function rollbackRegionMove(gesture: RegionMoveSnapshot): void {

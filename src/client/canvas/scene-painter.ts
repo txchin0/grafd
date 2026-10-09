@@ -33,10 +33,13 @@ import {
   type EdgeBendOverrides,
   type EdgeGeometryMap,
 } from './edge-layout.js';
-import { STROKE_LINE_WIDTHS, transformedStroke, type StrokeTransform } from '../../shared/canvas-drawings.js';
+import { STROKE_KIND, STROKE_LINE_WIDTHS, type CanvasDrawing } from '../../shared/canvas-drawings.js';
+import type { DrawingTransform } from '../../shared/drawing-geometry.js';
 import { storedDrawingKey } from './drawing-selection.js';
 import type { ExpansionLayer, FrameExpansion } from './expansion.js';
-import { inkStroke, strokeInkColor } from './stroke-painter.js';
+import { drawingInkColor, inkStroke } from './stroke-painter.js';
+import { inkText } from './text-painter.js';
+import { canvasLineMeasurer, drawingAsCarried } from './text-drawing-layout.js';
 import { BADGE_DIAMETER, BADGE_SYMBOLS, nodeBadges } from './node-badges.js';
 import { outlinePathData, shapeOutline, shapeTextBox, type ShapeOutline } from './node-shapes.js';
 import {
@@ -128,9 +131,9 @@ export interface ScenePainterOptions {
   // (R18); a resize in progress paints the drawn rectangle being dragged, not the union with
   // members that would otherwise stick the frame at their bounds. Everything else derives per pass.
   regionRects?: ReadonlyMap<ContextBlock, Rect>;
-  // How each stroke a gesture is moving or resizing has been carried so far, in its own model's
+  // How each drawing a gesture is moving or resizing has been carried so far, in its own model's
   // units, keyed by `storedDrawingKey`. The layer is written only when the drag lands.
-  drawingTransforms?: ReadonlyMap<string, StrokeTransform> | null;
+  drawingTransforms?: ReadonlyMap<string, DrawingTransform> | null;
   // The bend an edge being dragged would take, painted before anything is written.
   edgeBends?: EdgeBendOverrides | null;
 }
@@ -152,7 +155,7 @@ export class ScenePainter {
   private readonly edgeGeometry: EdgeGeometryMap;
   private readonly expansions: ExpansionLayer;
   private readonly regionRects: ReadonlyMap<ContextBlock, Rect> | null;
-  private readonly drawingTransforms: ReadonlyMap<string, StrokeTransform> | null;
+  private readonly drawingTransforms: ReadonlyMap<string, DrawingTransform> | null;
   private readonly edgeBends: EdgeBendOverrides | null;
 
   constructor(options: ScenePainterOptions) {
@@ -188,15 +191,20 @@ export class ScenePainter {
     for (const ghost of model.ghosts) this.drawGhost(ghost, { clickable: !model.embedded });
     // Last, over the solid node fills: a circle or underline drawn around a node must stay as
     // visible once committed as it was under the pen.
-    this.drawStrokes(model);
+    this.drawDrawings(model);
   }
 
-  private drawStrokes(model: FlowModel): void {
-    for (const stored of model.visuals?.strokes() ?? []) {
+  private drawDrawings(model: FlowModel): void {
+    for (const stored of model.visuals?.drawings() ?? []) {
       const transform = this.drawingTransforms?.get(storedDrawingKey(model, stored.id));
-      const stroke = transform ? transformedStroke(stored, transform) : stored;
-      inkStroke(this.ctx, stroke.points, strokeInkColor(stroke.color), STROKE_LINE_WIDTHS[stroke.width]);
+      this.drawDrawing(transform ? drawingAsCarried(stored, transform, canvasLineMeasurer(this.ctx)) : stored);
     }
+  }
+
+  private drawDrawing(drawing: CanvasDrawing): void {
+    const color = drawingInkColor(drawing.color);
+    if (drawing.kind === STROKE_KIND) inkStroke(this.ctx, drawing.points, color, STROKE_LINE_WIDTHS[drawing.width]);
+    else if (drawing.id !== this.hiddenTitles.drawingId) inkText(this.ctx, drawing, color);
   }
 
   // A region is an enclosure, not a container: hachure fill and a dashed outline, so it reads as

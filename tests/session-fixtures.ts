@@ -1,7 +1,7 @@
 // The workspace the random sessions start from. It holds one of every kind of thing a press can
 // land on — nodes inside and outside regions, a drawn region and one sized by its members, edges,
 // a subgraph host, an edge to a node that does not exist yet (drawn as a ghost), loose strokes and
-// a group of them — so that a sequence of gestures has every pairing of kind and destination within
+// a group of them, text loose, wrapped, inside a region, inside a subgraph and grouped with a stroke — so that a sequence of gestures has every pairing of kind and destination within
 // reach. A kind added to the canvas belongs here too, or no session ever touches it; the coverage
 // test in editor-sessions.test.ts fails until one is.
 
@@ -65,9 +65,16 @@ const SESSION_LAYER = {
     { id: 'grouped-a', kind: 'stroke', width: 'thin', points: [[1300, 100], [1360, 140], [1420, 120]] },
     { id: 'grouped-b', kind: 'stroke', width: 'thick', points: [[1300, 220], [1380, 260], [1440, 240]] },
     { id: 'inside-region', kind: 'stroke', width: 'medium', points: [[300, 260], [360, 300], [420, 280]] },
+    { id: 'loose-text', kind: 'text', text: 'A note', box: [760, 640, 70, 25] },
+    { id: 'region-text', kind: 'text', color: 'blue', text: 'Two\nlines', box: [280, 30, 60, 50] },
+    { id: 'inner-text', kind: 'text', graph: 'Delta', text: 'Inside', box: [0, 120, 60, 25] },
+    { id: 'captioned', kind: 'text', text: 'Caption', box: [1300, 420, 80, 25] },
+    { id: 'wrapped-text', kind: 'text', text: 'Several words wrapped', box: [760, 720, 90, 75], size: 20, wrap: true },
+    { id: 'underline', kind: 'stroke', width: 'thin', points: [[1300, 455], [1380, 455]] },
   ],
   groups: [
     { id: 'pair', members: [{ kind: 'drawing', id: 'grouped-a' }, { kind: 'drawing', id: 'grouped-b' }] },
+    { id: 'mixed', members: [{ kind: 'drawing', id: 'captioned' }, { kind: 'drawing', id: 'underline' }] },
   ],
 };
 

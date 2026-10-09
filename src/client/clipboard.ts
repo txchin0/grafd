@@ -10,7 +10,7 @@
 // Strokes ride the same groups too, in the same scope coordinates as the nodes beside them, so a
 // paste keeps a stroke where it was drawn relative to them.
 
-import { strokePointsOf, type CarriedDrawings } from '../shared/canvas-drawings.js';
+import { drawingAnchorPoints, type CarriedDrawings } from '../shared/canvas-drawings.js';
 import type { CapturedVisuals } from '../shared/canvas-layer.js';
 import type { ContextBlock, FlowNode } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
@@ -195,7 +195,7 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
       .flatMap((group) => [
         ...group.nodes.map((node) => node.pos),
         ...group.regions.map((region) => region.pos),
-        ...group.drawings.drawings.flatMap((drawing) => strokePointsOf(drawing.points) ?? []),
+        ...group.drawings.drawings.flatMap(drawingAnchorPoints),
       ])
       .filter((pos): pos is Point => pos != null);
     if (!world || corners.length === 0) return { x: DUPLICATE_STEP, y: DUPLICATE_STEP };

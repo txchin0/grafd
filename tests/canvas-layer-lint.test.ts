@@ -76,8 +76,28 @@ describe('lintCanvasLayer on drawings', () => {
 
   const GOOD = { id: 'ok', kind: 'stroke', graph: 'Steps', color: 'red', width: 'thin', points: [[0, 0], [1, 1]] };
 
-  it('passes valid strokes, and drawings of kinds it does not know', () => {
-    expect(rulesOf(layerWithDrawings([GOOD, { id: 'note', kind: 'text' }]), FLOW_WITH_BLOCK)).toEqual([]);
+  const GOOD_TEXT = { id: 'words', kind: 'text', graph: 'Steps', color: 'blue', text: 'Hello\nthere', box: [0, 0, 60, 50], size: 20, wrap: true };
+
+  it('passes valid strokes and text, and drawings of kinds it does not know', () => {
+    expect(rulesOf(layerWithDrawings([GOOD, GOOD_TEXT, { id: 'pin', kind: 'sticker' }]), FLOW_WITH_BLOCK)).toEqual([]);
+  });
+
+  it('flags text it cannot draw, and text in a colour it does not know', () => {
+    const text = layerWithDrawings([
+      { ...GOOD_TEXT, id: 'blank', text: '  ' },
+      { ...GOOD_TEXT, id: 'flat', box: [0, 0, 60, 0] },
+      { ...GOOD_TEXT, id: 'mauve', color: 'mauve' },
+      { ...GOOD_TEXT, id: 'lost', graph: 'Gone' },
+      { ...GOOD_TEXT, id: 'sized', size: -2, wrap: 'yes' },
+    ]);
+    expect(rulesOf(text, FLOW_WITH_BLOCK)).toEqual([
+      'warning invalid-text',
+      'warning invalid-text',
+      'warning invalid-text-color',
+      'info unknown-drawing-graph',
+      'warning invalid-text-size',
+      'warning invalid-text-wrap',
+    ]);
   });
 
   it('flags each problem on the drawing\'s own line', () => {

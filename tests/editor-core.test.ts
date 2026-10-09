@@ -114,6 +114,76 @@ describe('drawing with the pen', () => {
   });
 });
 
+describe('writing with the text tool', () => {
+  const PLACED_AT = { x: 520, y: 600 };
+
+  function textsOnDisk(editor: HeadlessEditor): Record<string, unknown>[] {
+    const layerText = editor.workspace.file(canvasLayerPathOf(FLOW_PATH));
+    return layerText ? JSON.parse(layerText).drawings : [];
+  }
+
+  async function writeText(editor: HeadlessEditor, typed: string): Promise<void> {
+    editor.setTool('text');
+    await editor.click(PLACED_AT);
+    await editor.finishText(typed);
+  }
+
+  it('writes nothing until the text is typed, then one undoable text where the click was', async () => {
+    const editor = await openRegionedFlow();
+    editor.setTool('text');
+    await editor.click(PLACED_AT);
+    expect(editor.openText()).toMatchObject({ kind: 'new', topLeft: PLACED_AT });
+    expect(editor.workspace.file(canvasLayerPathOf(FLOW_PATH))).toBeNull();
+
+    await editor.finishText('Hello\nworld\n\n');
+    const [text] = textsOnDisk(editor);
+    expect(text).toMatchObject({ kind: 'text', text: 'Hello\nworld' });
+    expect((text.box as number[]).slice(0, 2)).toEqual([PLACED_AT.x, PLACED_AT.y]);
+    expect(editor.core.view.selectedDrawings.map((drawing) => drawing.id)).toEqual([text.id]);
+
+    editor.core.undo();
+    await editor.settle();
+    expect(editor.workspace.file(canvasLayerPathOf(FLOW_PATH))).toBeNull();
+  });
+
+  it('makes nothing of a text left blank', async () => {
+    const editor = await openRegionedFlow();
+    await writeText(editor, '  \n ');
+    expect(editor.workspace.file(canvasLayerPathOf(FLOW_PATH))).toBeNull();
+    expect(editor.core.session.undoDepth).toBe(0);
+  });
+
+  it('edits a text in place on a double-click, and deletes one emptied out', async () => {
+    const editor = await openRegionedFlow();
+    await writeText(editor, 'First');
+    const [{ id, box }] = textsOnDisk(editor) as { id: string; box: number[] }[];
+    const middle = { x: box[0] + box[2] / 2, y: box[1] + box[3] / 2 };
+
+    editor.setTool('select');
+    await editor.doubleClick(middle);
+    expect(editor.openText()).toMatchObject({ kind: 'existing', drawing: { id } });
+    await editor.finishText('Second line\nand third');
+    const [edited] = textsOnDisk(editor) as { text: string; box: number[] }[];
+    expect(edited.text).toBe('Second line\nand third');
+    expect(edited.box.slice(0, 2)).toEqual(box.slice(0, 2));
+    expect(edited.box[3]).toBeCloseTo(box[3] * 2, 1);
+
+    await editor.doubleClick(middle);
+    await editor.finishText('');
+    expect(editor.workspace.file(canvasLayerPathOf(FLOW_PATH))).toBeNull();
+  });
+
+  it('keeps a text whose editor a click elsewhere closed untouched', async () => {
+    const editor = await openRegionedFlow();
+    await writeText(editor, 'Stays');
+    const before = editor.workspace.file(canvasLayerPathOf(FLOW_PATH));
+    const [{ box }] = textsOnDisk(editor) as { box: number[] }[];
+    await editor.doubleClick({ x: box[0] + box[2] / 2, y: box[1] + box[3] / 2 });
+    await editor.click({ x: -400, y: -400 });
+    expect(editor.workspace.file(canvasLayerPathOf(FLOW_PATH))).toBe(before);
+  });
+});
+
 describe('a ghost', () => {
   const FLOW_WITH_GHOST = `---
 name: Ghosts

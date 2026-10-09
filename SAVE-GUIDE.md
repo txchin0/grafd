@@ -82,7 +82,7 @@ When editing a `.flow` file:
 
 ### Canvas Layer Files
 
-Every visual style — a node's shape, an edge's colour, line style, arrowheads and bend, a freehand drawing, a group of drawings, anything else the editor lets a user decorate a graph with — is kept out of the `.flow`, in a JSON file beside it named after it with `.canvas.json` appended:
+Every visual style — a node's shape, an edge's colour, line style, arrowheads and bend, a freehand drawing, free text written on the canvas, a group of drawings, anything else the editor lets a user decorate a graph with — is kept out of the `.flow`, in a JSON file beside it named after it with `.canvas.json` appended:
 
 ```
 auth/login.flow               # the graph: meaning, identity, layout
@@ -97,7 +97,7 @@ The canvas layer means nothing to you and its content is not part of the format.
 - **Delete** `X.flow` → also delete `X.flow.canvas.json`.
 - **Create** `X.flow` where an `X.flow.canvas.json` already sits with no `.flow` beside it → delete that leftover first; it belongs to a graph that no longer exists.
 - Keeping node `id`s keeps node styling. Relabelling or retargeting an edge drops its look (colour, line style, arrowheads, bend) — expected; the linter lists the leftover entry as `info`, which needs no action.
-- Drawings made inside a `graph:` block are filed under the block's name. Renaming or removing the block leaves them unshown — also expected, also reported as `info`.
+- Drawings (freehand strokes and free text) made inside a `graph:` block are filed under the block's name. Renaming or removing the block leaves them unshown — also expected, also reported as `info`.
 
 ### Inference Rules
 

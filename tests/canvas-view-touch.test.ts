@@ -52,6 +52,8 @@ function createSurface() {
   const actions = {
     createNode: vi.fn(),
     createStroke: vi.fn(),
+    placeText: vi.fn(),
+    editText: vi.fn(),
     resizeDrawings: vi.fn(),
     quickCreateNode: vi.fn(),
     nodeClicked: vi.fn(),

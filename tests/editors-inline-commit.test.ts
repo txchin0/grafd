@@ -108,6 +108,7 @@ const ELEMENT_IDS = [
   'ee-end-head',
   'ee-straighten',
   'title-editor',
+  'text-drawing-editor',
   'region-name-editor',
   'region-name-input',
   'region-name-error',
@@ -121,7 +122,7 @@ let region: RegionTarget;
 
 function createContextStub() {
   const view = {
-    hiddenTitles: { nodeId: null, regionName: null },
+    hiddenTitles: { nodeId: null, regionName: null, drawingId: null },
     titlePlacementOf: vi.fn(() => PLACEMENT),
     regionTitlePlacementOfTarget: vi.fn(() => PLACEMENT),
     worldRectToScreen: vi.fn((rect: Rect) => ({ ...rect })),
@@ -160,6 +161,7 @@ function createContextStub() {
     applyShapeEdit: vi.fn(),
     edgeStyleOf: vi.fn(() => ({ color: null, line: null, startHead: 'none', endHead: 'arrow', bend: null })),
     applyEdgeStyleEdit: vi.fn(),
+    commitText: vi.fn(),
   } as unknown as EditorContext;
 }
 

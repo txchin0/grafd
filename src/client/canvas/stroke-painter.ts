@@ -6,8 +6,8 @@
 import { midpointOf, type Point } from '../geometry.js';
 import { canvasPalette, resolveLayerColor } from '../theme.js';
 
-// A stroke without a colour of its own takes the theme's ink, so it reads in every theme.
-export function strokeInkColor(layerColor: string | null): string {
+// A drawing without a colour of its own takes the theme's ink, so it reads in every theme.
+export function drawingInkColor(layerColor: string | null): string {
   return layerColor ? resolveLayerColor(layerColor) : canvasPalette.ink;
 }
 

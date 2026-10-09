@@ -20,7 +20,7 @@ import { lintCanvasLayer } from '../src/shared/canvas-layer-lint.js';
 import { parseFlow } from '../src/shared/flow-format.js';
 
 function stroke(id: string, graph: string | null = null): Stroke {
-  return { id, graph, color: null, width: 'medium', points: [{ x: 0, y: 0 }, { x: 4, y: 4 }] };
+  return { kind: 'stroke', id, graph, color: null, width: 'medium', points: [{ x: 0, y: 0 }, { x: 4, y: 4 }] };
 }
 
 function layerWithStrokes(...ids: string[]): CanvasLayer {

@@ -129,7 +129,7 @@ describe('applyRegionResize', () => {
     const context = contextNamed(DRAWN, 'Auth');
     const gesture: RegionResizeSnapshot = {
       context,
-      corner: 'se',
+      handle: 'se',
       startRect: { ...context.block.pos! },
       startWorld: { x: 200, y: 120 },
       hadDrawnArea: true,
@@ -137,20 +137,28 @@ describe('applyRegionResize', () => {
     applyRegionResize(gesture, { x: 40, y: 30 }, identity);
     expect(context.block.pos).toEqual({ x: 0, y: 0, w: 40, h: 30 });
   });
+
+  it('moves only the side a side handle drags, onto the grid, and leaves the other axis exactly as it was', () => {
+    const context = contextNamed(DRAWN, 'Auth');
+    const start = { ...context.block.pos! };
+    const snapTo10 = (value: number) => Math.round(value / 10) * 10;
+    applyRegionResize({ context, handle: 'w', startRect: start, startWorld: { x: 0, y: 7 }, hadDrawnArea: true }, { x: -33, y: 90 }, snapTo10);
+    expect(context.block.pos).toEqual({ x: start.x - 30, y: start.y, w: start.w + 30, h: start.h });
+  });
 });
 
 describe('regionRectDuringResize', () => {
   it('returns the live pos for the region being resized', () => {
     const context = contextNamed(DRAWN, 'Auth');
     context.block.pos = { x: 0, y: 0, w: 40, h: 30 };
-    const gesture = { context, corner: 'se' as const, startRect: { x: 0, y: 0, w: 200, h: 120 }, startWorld: { x: 0, y: 0 } };
+    const gesture = { context, handle: 'se' as const, startRect: { x: 0, y: 0, w: 200, h: 120 }, startWorld: { x: 0, y: 0 } };
     expect(regionRectDuringResize(context, gesture)).toEqual({ x: 0, y: 0, w: 40, h: 30 });
   });
 
   it('returns null for a different region', () => {
     const context = contextNamed(DRAWN, 'Auth');
     const other = contextNamed(DRAWN, 'Auth');
-    const gesture = { context, corner: 'se' as const, startRect: { x: 0, y: 0, w: 200, h: 120 }, startWorld: { x: 0, y: 0 } };
+    const gesture = { context, handle: 'se' as const, startRect: { x: 0, y: 0, w: 200, h: 120 }, startWorld: { x: 0, y: 0 } };
     expect(regionRectDuringResize(other, gesture)).toBeNull();
   });
 });
@@ -199,7 +207,7 @@ describe('rollback', () => {
     const context = contextNamed(DRAWN, 'Auth');
     const gesture: RegionResizeSnapshot = {
       context,
-      corner: 'se',
+      handle: 'se',
       startRect: { x: 0, y: 0, w: 200, h: 120 },
       startWorld: { x: 200, y: 120 },
       hadDrawnArea: true,
@@ -213,7 +221,7 @@ describe('rollback', () => {
     const context = contextNamed(MEMBER_DERIVED, 'Auth');
     const gesture: RegionResizeSnapshot = {
       context,
-      corner: 'se',
+      handle: 'se',
       startRect: { x: 32, y: 32, w: 136, h: 80 },
       startWorld: { x: 168, y: 112 },
       hadDrawnArea: false,

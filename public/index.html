@@ -60,9 +60,10 @@
             <button id="tool-node-button" type="button" title="Add-node tool (N / 2) — drag to create a node">▢ Node</button>
             <button id="tool-context-button" type="button" title="Region tool (C / 3) — drag to enclose nodes in a region">◇ Region</button>
             <button id="tool-draw-button" type="button" title="Draw tool (D / 4) — draw freehand on the canvas">✎ Draw</button>
+            <button id="tool-text-button" type="button" title="Text tool (T / 5) — click to write text anywhere on the canvas">T Text</button>
           </div>
           <div id="draw-style" hidden>
-            <div id="draw-color" class="choice-row" role="group" aria-label="Stroke colour"></div>
+            <div id="draw-color" class="choice-row" role="group" aria-label="Drawing colour"></div>
             <div id="draw-width" class="choice-row" role="group" aria-label="Stroke width"></div>
           </div>
           <div id="view-controls">
@@ -163,6 +164,8 @@
 
         <input id="title-editor" class="hidden" spellcheck="false" autocomplete="off" />
 
+        <textarea id="text-drawing-editor" class="hidden" spellcheck="false" autocomplete="off" rows="1" aria-label="Text"></textarea>
+
         <div id="region-name-editor" class="hidden">
           <input id="region-name-input" spellcheck="false" autocomplete="off" placeholder="Region name" />
           <span id="region-name-error"></span>
@@ -187,15 +190,17 @@
           <button id="help-close" type="button" class="quiet-button" title="Close" aria-label="Close shortcuts">✕</button>
           <h2>Shortcuts</h2>
           <table>
-            <tr><td>V / 1, N / 2, C / 3, D / 4</td><td>switch between the Select, Add-node, Region and Draw tools</td></tr>
+            <tr><td>V / 1, N / 2, C / 3, D / 4, T / 5</td><td>switch between the Select, Add-node, Region, Draw and Text tools</td></tr>
             <tr><td>Drag empty canvas (C)</td><td>draw a region around the nodes it encloses</td></tr>
             <tr><td>Drag anywhere (D)</td><td>draw freehand in the picked colour and width — inside an open subgraph, the drawing belongs to it</td></tr>
-            <tr><td>Click / drag a drawing / its corners</td><td>select / move / resize it (Delete removes it, a colour swatch recolours it)</td></tr>
+            <tr><td>Click empty canvas (T)</td><td>write text there — Enter starts a new line, Ctrl+Enter, Esc or clicking away finishes</td></tr>
+            <tr><td>Double-click a text</td><td>edit it in place (emptying it deletes it)</td></tr>
+            <tr><td>Click / drag a drawing / its corners or sides</td><td>select / move / resize it — text grows and shrinks with its corners, top and bottom, and wraps to the width its left and right sides give it (Delete removes it, a colour swatch recolours it)</td></tr>
             <tr><td>Ctrl+G / Ctrl+Shift+G</td><td>group the selected drawings, so they select, move and resize as one / ungroup them</td></tr>
-            <tr><td>Drag a region's frame / corners</td><td>move it, with its members and the drawings inside it / resize it (its interior still multi-selects)</td></tr>
+            <tr><td>Drag a region's frame / corners or sides</td><td>move it, with its members and the drawings inside it / resize it (its interior still multi-selects)</td></tr>
             <tr><td>Drag empty canvas</td><td>multi-select (Select tool) / create a node (Add-node tool)</td></tr>
             <tr><td>Click a node</td><td>edit title &amp; description</td></tr>
-            <tr><td>Drag a node / its corners</td><td>move / resize</td></tr>
+            <tr><td>Drag a node / its corners or sides</td><td>move / resize (a side moves only that side)</td></tr>
             <tr><td>Hover a node, drag a port ○</td><td>draw an edge (drop on empty space to spawn a node)</td></tr>
             <tr><td>Double-click a node's title</td><td>rename it on the node (Enter saves, Esc cancels)</td></tr>
             <tr><td>Double-click an edge</td><td>edit its label</td></tr>

@@ -62,3 +62,7 @@ export function distinctDrawingMoves(moves: readonly DrawingMove[]): DrawingMove
     return true;
   });
 }
+
+export function storedDrawingOf(selection: DrawingSelection): StoredDrawing {
+  return { path: selection.model.sourcePath ?? '', scope: selection.model.sourceScope, id: selection.id };
+}

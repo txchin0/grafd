@@ -1,6 +1,7 @@
 // Dresses a view-model in its file's canvas layer: which shape each node draws as, how each
-// edge is drawn (colour, line, heads, bend), and the strokes drawn in the model's graph scope. Resolved per model build, like traits, so painting and edge layout
-// read answers rather than re-deriving edge keys every frame.
+// edge is drawn (colour, line, heads, bend), and the drawings made in the model's graph scope.
+// Resolved per model build, like traits, so painting and edge layout read answers rather than
+// re-deriving edge keys every frame.
 
 import {
   documentIdentities,
@@ -10,7 +11,7 @@ import {
   type Drawing,
 } from '../shared/canvas-layer.js';
 import { defaultEdgeStyle, edgeStyleOf, type EdgeStyle } from '../shared/canvas-edge-style.js';
-import { strokesInScope, type Stroke } from '../shared/canvas-drawings.js';
+import { drawingsInScope, type CanvasDrawing } from '../shared/canvas-drawings.js';
 import { drawingGroupsOf, type Group } from '../shared/canvas-groups.js';
 import type { FlowDocument } from '../shared/flow-format.js';
 import { edgeIdentityOf, type FlowModel, type ModelEdge, type ModelVisuals } from './flow-doc.js';
@@ -31,36 +32,36 @@ function visualsFor(model: FlowModel, layer: CanvasLayer | null): ModelVisuals {
   return {
     shapeOf: (node) => nodeShapeOf(layer, node.id),
     edgeStyleOf: (edge): EdgeStyle => edgeStyleOf(layer, layer ? keyOf(edge) : null, edge.kind),
-    strokes: strokeReaderFor(layer, model.sourceScope),
-    strokeGroupOf: strokeGroupReaderFor(layer),
+    drawings: drawingReaderFor(layer, model.sourceScope),
+    drawingGroupOf: drawingGroupReaderFor(layer),
   };
 }
 
-// Kept like the strokes are, until a layer edit replaces the `groups` list.
-function strokeGroupReaderFor(layer: CanvasLayer | null): (strokeId: string) => string[] {
+// Kept like the drawings are, until a layer edit replaces the `groups` list.
+function drawingGroupReaderFor(layer: CanvasLayer | null): (drawingId: string) => string[] {
   let readFrom: Group[] | null = null;
   let groupOf = new Map<string, string[]>();
-  return (strokeId) => {
+  return (drawingId) => {
     if (layer && layer.groups !== readFrom) {
       readFrom = layer.groups;
       groupOf = drawingGroupsOf(layer);
     }
-    return groupOf.get(strokeId) ?? [strokeId];
+    return groupOf.get(drawingId) ?? [drawingId];
   };
 }
 
-// Strokes are read on every frame, so the parse is kept until the list changes. Every layer edit
+// Drawings are read on every frame, so the parse is kept until the list changes. Every layer edit
 // replaces the `drawings` array rather than editing it, which is what makes identity enough.
-function strokeReaderFor(layer: CanvasLayer | null, scope: string | null): () => Stroke[] {
+function drawingReaderFor(layer: CanvasLayer | null, scope: string | null): () => CanvasDrawing[] {
   let readFrom: Drawing[] | null = null;
-  let strokes: Stroke[] = [];
+  let drawings: CanvasDrawing[] = [];
   return () => {
     if (!layer) return [];
     if (layer.drawings !== readFrom) {
       readFrom = layer.drawings;
-      strokes = strokesInScope(layer, scope);
+      drawings = drawingsInScope(layer, scope);
     }
-    return strokes;
+    return drawings;
   };
 }
 

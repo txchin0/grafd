@@ -64,6 +64,7 @@ const elements = {
   toolNodeButton: elementById<HTMLButtonElement>('tool-node-button'),
   toolContextButton: elementById<HTMLButtonElement>('tool-context-button'),
   toolDrawButton: elementById<HTMLButtonElement>('tool-draw-button'),
+  toolTextButton: elementById<HTMLButtonElement>('tool-text-button'),
   drawStyle: elementById<HTMLDivElement>('draw-style'),
   drawColor: elementById<HTMLDivElement>('draw-color'),
   drawWidth: elementById<HTMLDivElement>('draw-width'),
@@ -95,6 +96,7 @@ const core = createEditorCore({
       openRegionEditor: (region) => editors.openRegionEditor(region),
       openTitleEditor: (node) => editors.openTitleEditor(node),
       openRegionNameEditor: (region, rename) => editors.openRegionNameEditor(region, rename),
+      openTextEditor: (request) => editors.openTextEditor(request),
       closeAll: () => editors.closeAll(),
       reposition: () => editors.reposition(),
       refreshFromDoc: () => editors.refreshFromDoc(),
@@ -214,6 +216,7 @@ const editors: Editors = createEditors({
   },
   edgeStyleOf: (edge) => core.layerSync.edgeStyleOf(core.ownerOf(edge.from), edge),
   applyEdgeStyleEdit: core.applyEdgeStyleEdit,
+  commitText: core.commitText,
 });
 
 function linkContext(): LinkContext {
@@ -319,15 +322,19 @@ function setTool(tool: Tool): void {
   elements.toolNodeButton.classList.toggle('active', tool === 'node');
   elements.toolContextButton.classList.toggle('active', tool === 'context');
   elements.toolDrawButton.classList.toggle('active', tool === 'draw');
+  elements.toolTextButton.classList.toggle('active', tool === 'text');
   showDrawStyleWhenRelevant();
 }
 
-// The pen's colour and width show while drawing, and while strokes are selected — a swatch
-// picked outside the draw tool then recolours them as well. With the pen in hand it only sets
-// the pen: strokes still selected from before are not what the user is choosing a colour for.
+// The pen's colour and width show while drawing or writing, and while drawings are selected — a
+// swatch picked outside the draw tool then recolours them as well. With the pen in hand it only
+// sets the pen: drawings still selected from before are not what the user is choosing a colour
+// for. Text has a colour but no line, so the width row stays out of the text tool's way.
 function showDrawStyleWhenRelevant(): void {
-  const relevant = currentTool === 'draw' || view.selectedDrawings.length > 0;
+  const relevant = currentTool === 'draw' || currentTool === 'text' || view.selectedDrawings.length > 0;
   if (elements.drawStyle.hidden === relevant) elements.drawStyle.hidden = !relevant;
+  const widthRelevant = currentTool !== 'text';
+  if (elements.drawWidth.hidden === widthRelevant) elements.drawWidth.hidden = !widthRelevant;
 }
 
 const drawColorPicker = createColorSwatches(elements.drawColor, (color) => {
@@ -352,6 +359,7 @@ function wireViewControls(): void {
   elements.toolNodeButton.addEventListener('click', () => setTool('node'));
   elements.toolContextButton.addEventListener('click', () => setTool('context'));
   elements.toolDrawButton.addEventListener('click', () => setTool('draw'));
+  elements.toolTextButton.addEventListener('click', () => setTool('text'));
   elements.zoomIn.addEventListener('click', () => view.stepZoom(1));
   elements.zoomOut.addEventListener('click', () => view.stepZoom(-1));
   elements.zoomLevel.addEventListener('click', () => view.setZoom(1));
@@ -433,6 +441,8 @@ function wireKeyboard(): void {
       setTool('context');
     } else if (!ctrl && (event.key.toLowerCase() === 'd' || event.key === '4')) {
       setTool('draw');
+    } else if (!ctrl && (event.key.toLowerCase() === 't' || event.key === '5')) {
+      setTool('text');
     } else if (event.key === '?') {
       elements.helpOverlay.classList.toggle('hidden');
     }

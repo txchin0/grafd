@@ -1,5 +1,5 @@
-// What the canvas's drawing gestures write. A stroke is stored in the canvas layer of the file
-// that owns the graph it was drawn in, filed under that graph's scope — a stroke drawn inside an
+// What the canvas's drawing gestures write. A stroke or a text is stored in the canvas layer of
+// the file that owns the graph it was made in, filed under that graph's scope — one made inside an
 // unfolded frame belongs to the subgraph the frame shows, whichever file that lives in.
 //
 // Every operation is one undoable action, or joins the action already open: a stroke dragged or
@@ -8,17 +8,20 @@
 
 import { canvasLayerPathOf, type CanvasLayer } from '../shared/canvas-layer.js';
 import {
+  STROKE_KIND,
   addStroke,
+  addTextDrawing,
   drawingsToCopy,
   pasteDrawings as pasteDrawingsInto,
   removeDrawings,
   setDrawingColor,
+  setTextDrawing,
   transformDrawings,
-  translationBy,
   type CarriedDrawings,
   type Stroke,
-  type StrokeTransform,
 } from '../shared/canvas-drawings.js';
+import { isStretch, translationBy, type DrawingTransform } from '../shared/drawing-geometry.js';
+import { TEXT_KIND, textDrawingOf, type TextDrawing } from '../shared/canvas-text.js';
 import { groupDrawings as groupDrawingsIn, ungroupDrawings as ungroupDrawingsIn } from '../shared/canvas-groups.js';
 import { newUuid, type FlowNode } from '../shared/flow-format.js';
 import type { DrawStyle } from './canvas/canvas-view.js';
@@ -34,10 +37,21 @@ import type { CanvasLayerSync } from './canvas-layer-sync.js';
 import type { EditSession } from './edit-session.js';
 import type { FlowModel } from './flow-doc.js';
 import type { Point } from './geometry.js';
+import { relaidOutText, textBoxFor, type LineMeasurer } from './canvas/text-drawing-layout.js';
 
 export interface CreationTarget {
   owner: DocumentOwner;
   scope: string | null;
+}
+
+// A text about to be written, its point and size in the coordinate space of the graph under
+// `frameHost`.
+export interface NewText {
+  text: string;
+  topLeft: Point;
+  frameHost: FlowNode | null;
+  color: string | null;
+  fontPx: number;
 }
 
 // Strokes copied out of one graph, ready to be pasted into any.
@@ -61,13 +75,20 @@ export interface DrawingOpsOptions {
   documentOwnerAt(path: string): DocumentOwner | null;
   rerenderAfterEditTo(owner: DocumentOwner): void;
   notify(text: string): void;
+  // Text is measured where it is painted, so the box written is the box the painter fills.
+  measureLine(): LineMeasurer;
 }
 
 export interface DrawingOps {
   createStroke(points: Point[], frameHost: FlowNode | null, style: DrawStyle): void;
+  // Where the new text is stored, or null when nothing could be written.
+  createText(newText: NewText): StoredDrawing | null;
+  // Rewrites a text in place: its top-left corner, size and wrap width stay, and its box fits the
+  // new words.
+  setText(selection: DrawingSelection, text: string): void;
   moveDrawings(moves: readonly DrawingMove[]): void;
   // Every stroke stretched by the same transform: a lone stroke, or a group as one.
-  resizeDrawings(selections: readonly DrawingSelection[], transform: StrokeTransform): void;
+  resizeDrawings(selections: readonly DrawingSelection[], transform: DrawingTransform): void;
   deleteDrawings(selections: readonly DrawingSelection[]): void;
   recolorDrawings(selections: readonly DrawingSelection[], color: string | null): void;
   // Whether the strokes can form one group: at least two, all drawn in the same graph.
@@ -91,8 +112,34 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
   function createStroke(points: Point[], frameHost: FlowNode | null, style: DrawStyle): void {
     const target = options.creationTargetFor(frameHost);
     if (points.length === 0 || !target) return;
-    const stroke: Stroke = { id: newUuid(), graph: target.scope, color: style.color, width: style.width, points };
+    const stroke: Stroke = { kind: STROKE_KIND, id: newUuid(), graph: target.scope, color: style.color, width: style.width, points };
     reportWrite(target.owner, writeIntoScope(target, (layer) => addStroke(layer, stroke)));
+  }
+
+  function createText({ text, topLeft, frameHost, color, fontPx }: NewText): StoredDrawing | null {
+    const target = options.creationTargetFor(frameHost);
+    if (!target) return null;
+    const box = textBoxFor(text, topLeft, fontPx, options.measureLine());
+    const drawing: TextDrawing = { kind: TEXT_KIND, id: newUuid(), graph: target.scope, color, text, box, size: fontPx, wrap: false };
+    const written = writeIntoScope(target, (layer) => addTextDrawing(layer, drawing));
+    reportWrite(target.owner, written);
+    return written ? { path: target.owner.path, scope: target.scope, id: drawing.id } : null;
+  }
+
+  function setText(selection: DrawingSelection, text: string): void {
+    const current = selection.model.visuals?.drawings().find((drawing) => drawing.id === selection.id);
+    if (current?.kind !== TEXT_KIND) return;
+    const rewritten = relaidOutText({ ...current, text }, options.measureLine());
+    writeEachFile([selection], (layer) => setTextDrawing(layer, rewritten));
+  }
+
+  // A stretch that gave text a width to wrap to leaves its height to the wrapped lines, which
+  // only a measurement can count. Text scaled evenly keeps the lines it had.
+  function relayOutStretchedTexts(layer: CanvasLayer, ids: ReadonlySet<string>, measure: LineMeasurer): void {
+    for (const drawing of layer.drawings) {
+      const text = typeof drawing.id === 'string' && ids.has(drawing.id) ? textDrawingOf(drawing) : null;
+      if (text) setTextDrawing(layer, relaidOutText(text, measure));
+    }
   }
 
   // Checked before the block is created, so drawings that cannot be stored leave no trace.
@@ -105,11 +152,11 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
   }
 
   function moveDrawings(moves: readonly DrawingMove[]): void {
-    const transformsByPath = new Map<string, { model: FlowModel; transforms: Map<string, StrokeTransform> }>();
+    const transformsByPath = new Map<string, { model: FlowModel; transforms: Map<string, DrawingTransform> }>();
     for (const move of distinctDrawingMoves(moves)) {
       const path = move.model.sourcePath;
       if (path == null) continue;
-      const entry = transformsByPath.get(path) ?? { model: move.model, transforms: new Map<string, StrokeTransform>() };
+      const entry = transformsByPath.get(path) ?? { model: move.model, transforms: new Map<string, DrawingTransform>() };
       entry.transforms.set(move.id, translationBy(move.offset));
       transformsByPath.set(path, entry);
     }
@@ -120,8 +167,12 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
     });
   }
 
-  function resizeDrawings(selections: readonly DrawingSelection[], transform: StrokeTransform): void {
-    writeEachFile(selections, (layer, ids) => transformDrawings(layer, new Map([...ids].map((id) => [id, transform]))));
+  function resizeDrawings(selections: readonly DrawingSelection[], transform: DrawingTransform): void {
+    const measure = options.measureLine();
+    writeEachFile(selections, (layer, ids) => {
+      transformDrawings(layer, new Map([...ids].map((id) => [id, transform])));
+      if (isStretch(transform)) relayOutStretchedTexts(layer, ids, measure);
+    });
   }
 
   function deleteDrawings(selections: readonly DrawingSelection[]): void {
@@ -147,7 +198,7 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
   }
 
   function isAnyGrouped(selections: readonly DrawingSelection[]): boolean {
-    return selections.some((selection) => (selection.model.visuals?.strokeGroupOf(selection.id).length ?? 1) > 1);
+    return selections.some((selection) => (selection.model.visuals?.drawingGroupOf(selection.id).length ?? 1) > 1);
   }
 
   function ungroupDrawings(selections: readonly DrawingSelection[]): void {
@@ -217,6 +268,8 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
 
   return {
     createStroke,
+    createText,
+    setText,
     moveDrawings,
     resizeDrawings,
     deleteDrawings,

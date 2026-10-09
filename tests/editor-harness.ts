@@ -14,6 +14,7 @@ import type { Workspace, WorkspaceDelegate } from '../src/client/workspace.js';
 import type { MenuItem } from '../src/client/context-menu.js';
 import type { Point } from '../src/client/geometry.js';
 import type { Tool } from '../src/client/canvas/canvas-view.js';
+import type { TextEditRequest } from '../src/client/text-drawing-editor.js';
 import { companionLayerOf, isFlowPath } from '../src/shared/canvas-layer.js';
 import { VIEWPORT } from './canvas-mock.js';
 
@@ -123,6 +124,10 @@ export interface HeadlessEditor {
   rightClick(world: Point): Promise<void>;
   chooseMenuItem(label: string): Promise<void>;
   cursor(): string;
+  // The text the inline text editor is open on, if it is; `finishText` types into it and finishes
+  // (Ctrl+Enter), committing what was typed as the real editor does.
+  openText(): TextEditRequest | null;
+  finishText(text: string): Promise<void>;
   // How many ids the editor has minted so far, and a way to mint the same ones again — for
   // comparing an operation with a replay of it from the same starting point.
   idsIssued(): number;
@@ -142,7 +147,11 @@ export async function createHeadlessEditor(
 
   const { canvas, listeners } = createHeadlessCanvas();
   const menus: MenuItem[][] = [];
-  const core = createEditorCore({ canvas, shell: createInertShell(menus) });
+  const textEditor = new StandInTextEditor({
+    commit: (request, text) => core.commitText(request, text),
+    shownText: (request) => (request.kind === 'existing' ? core.view.laidOutText(request.drawing)?.text.text ?? '' : ''),
+  });
+  const core = createEditorCore({ canvas, shell: createInertShell(menus, textEditor) });
   const workspace = new MemoryWorkspace(files);
   await core.switchWorkspace(workspace, { preferredPath: open });
 
@@ -246,6 +255,12 @@ export async function createHeadlessEditor(
       await settle();
     },
     cursor: () => String(canvas.style.cursor ?? ''),
+    openText: () => textEditor.request,
+    async finishText(text) {
+      textEditor.type(text);
+      textEditor.close();
+      await settle();
+    },
     idsIssued: () => idsIssued,
     rewindIds: (to) => {
       idsIssued = to;
@@ -303,16 +318,47 @@ function countedUuid(count: number): `${string}-${string}-${string}-${string}-${
   return `00000000-0000-4000-8000-${count.toString(16).padStart(12, '0')}`;
 }
 
+// The inline text editor without its textarea: it opens holding what the real one would show —
+// an existing text's words, or nothing — and commits what it holds when it closes: on finishing,
+// on another editor opening, or on a canvas press closing every editor, exactly when the real one
+// would.
+class StandInTextEditor {
+  request: TextEditRequest | null = null;
+  private value = '';
+
+  constructor(private readonly page: {
+    commit(request: TextEditRequest, text: string): void;
+    shownText(request: TextEditRequest): string;
+  }) {}
+
+  open(request: TextEditRequest): void {
+    this.close();
+    this.request = request;
+    this.value = this.page.shownText(request);
+  }
+
+  type(text: string): void {
+    this.value = text;
+  }
+
+  close(): void {
+    const request = this.request;
+    this.request = null;
+    if (request) this.page.commit(request, this.value);
+  }
+}
+
 // The chrome a headless run has no use for: editors open into nothing and menus are recorded so
-// a test can pick from them.
-function createInertShell(menus: MenuItem[][]): EditorShell {
+// a test can pick from them. The text editor alone is stood in for, since it is what writes text.
+function createInertShell(menus: MenuItem[][], textEditor: StandInTextEditor): EditorShell {
   const editors: EditorOverlays = {
     openNodeEditor: () => {},
     openEdgeEditor: () => {},
     openRegionEditor: () => {},
     openTitleEditor: () => {},
     openRegionNameEditor: () => {},
-    closeAll: () => {},
+    openTextEditor: (request) => textEditor.open(request),
+    closeAll: () => textEditor.close(),
     reposition: () => {},
     refreshFromDoc: () => {},
   };

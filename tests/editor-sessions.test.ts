@@ -50,18 +50,23 @@ const PROBE_DRAG: Point = { x: 48, y: 32 };
 // At right angles to the first, for what only moves across a line — an edge's grip bends it only
 // away from its chord, so a drag along the edge rightly leaves it straight.
 const ACROSS_PROBE_DRAG: Point = { x: -32, y: 48 };
-const TOOLS_THAT_KEEP_OBJECTS_GRABBABLE: Tool[] = ['node', 'context'];
+const TOOLS_THAT_KEEP_OBJECTS_GRABBABLE: Tool[] = ['node', 'context', 'text'];
 
 // Sessions that once broke a rule, shrunk by fast-check to the fewest steps that still broke it.
 // They run ahead of the random ones on every run, so a bug that took a deep search to find stays
 // caught by the default one.
 const ON_A_STROKE: TargetPick = { kind: 'stroke', index: 0, nudge: { x: 0, y: 0 } };
 // The affordances a lone selection shows, by their place in `CanvasView.affordances`: the corner
-// handles first (north-west, north-east, south-west, south-east), then a selected node's ports
-// (top, right, bottom, left).
+// handles first (north-west, north-east, south-west, south-east), then the side handles (north,
+// east, south, west — every side of a node at the sessions' zoom is long enough to grab), then a
+// selected node's ports (top, right, bottom, left).
 const CORNER_HANDLES = 4;
+const SIDE_HANDLES = 4;
+const NORTH_WEST_HANDLE = 0;
 const SOUTH_EAST_HANDLE = 3;
-const RIGHT_PORT_OF_A_SELECTED_NODE = CORNER_HANDLES + 1;
+const WEST_SIDE_HANDLE = CORNER_HANDLES + 3;
+const TOP_PORT_OF_A_SELECTED_NODE = CORNER_HANDLES + SIDE_HANDLES;
+const RIGHT_PORT_OF_A_SELECTED_NODE = CORNER_HANDLES + SIDE_HANDLES + 1;
 const FIRST_NODE_TO_EMPTY_CANVAS: SessionAction = {
   type: 'drag',
   from: { kind: 'node', index: 0, nudge: { x: 0, y: 0 } },
@@ -130,6 +135,17 @@ const SESSION_REGRESSIONS: [SessionAction[]][] = [
     { type: 'click', target: { kind: 'region-border', index: 1, nudge: { x: 0, y: 0 } }, shift: false },
     { type: 'click', target: affordancePick(SOUTH_EAST_HANDLE), shift: false },
   ]],
+  // Dragging an edge from a node onto the ghost its own edge already pointed at made the ghost real
+  // and gave the node a second, identical edge to it.
+  [[
+    { type: 'click', target: nodePick(3), shift: false },
+    { type: 'drag', from: affordancePick(TOP_PORT_OF_A_SELECTED_NODE), to: { kind: 'ghost', index: 0, nudge: { x: 0, y: 0 } }, shift: false },
+  ]],
+  // Narrowing a text from its left side past one letter's width moved its right side: the floor
+  // was applied after the stretch, from the left.
+  [[{ type: 'grab-affordance', owner: textPick(1), affordance: WEST_SIDE_HANDLE, by: { x: 41, y: 0 } }]],
+  // A text shrunk by a corner to almost nothing lost its proportions to the rounding of its size.
+  [[{ type: 'grab-affordance', owner: textPick(3), affordance: NORTH_WEST_HANDLE, by: { x: 0, y: 70 } }]],
 ];
 const TOOL_PARITY_REGRESSIONS: [SessionAction[], TargetPick, Tool][] = [
   // The node and region tools drew a new node or region over a stroke instead of dragging it.
@@ -141,6 +157,10 @@ afterEach(() => disposeHeadlessEditor());
 
 function nodePick(index: number): TargetPick {
   return { kind: 'node', index, nudge: { x: 0, y: 0 } };
+}
+
+function textPick(index: number): TargetPick {
+  return { kind: 'text', index, nudge: { x: 0, y: 0 } };
 }
 
 function affordancePick(index: number, nudge: Point = { x: 0, y: 0 }): TargetPick {
@@ -156,7 +176,7 @@ function cursorGrabs(cursor: string): boolean {
 // test below fails until a session target can reach it.
 const EVERY_PRESS_TARGET: Record<PressTargetKind, true> = {
   'port': true,
-  'stroke-handle': true,
+  'drawing-handle': true,
   'selected-edge-grip': true,
   'node-handle': true,
   'region-handle': true,
@@ -164,7 +184,7 @@ const EVERY_PRESS_TARGET: Record<PressTargetKind, true> = {
   'ghost': true,
   'edge': true,
   'region': true,
-  'stroke': true,
+  'drawing': true,
   'canvas': true,
 };
 
@@ -281,7 +301,7 @@ describe('the cursor', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(sessionAction, { maxLength: MAX_PREFIX_LENGTH }),
-        fc.constantFrom<Tool>('select', 'node', 'context'),
+        fc.constantFrom<Tool>('select', 'node', 'context', 'text'),
         targetPick,
         async (prefix, tool, pick) => {
           const editor = await openSession();
@@ -313,8 +333,8 @@ describe('the cursor', () => {
 
 describe('the drawing tools', () => {
   // A tool decides what a press on empty canvas makes; it never takes away the user's grip on
-  // what is already there. Whatever the select tool lets you drag, the node and region tools let
-  // you drag the same way — except a frame's empty interior, which those tools draw into.
+  // what is already there. Whatever the select tool lets you drag, the node, region and text tools
+  // let you drag the same way — except a frame's empty interior, which those tools draw into.
   it('leave every grabbable object draggable as the select tool would drag it', async () => {
     await fc.assert(
       fc.asyncProperty(

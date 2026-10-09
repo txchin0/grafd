@@ -1,14 +1,33 @@
 // Free drawings on a graph's canvas layer. Each drawing is filed under the graph scope it was
-// drawn in — `graph` names the `graph:` block, and is absent for the file body — and its points
-// are in that scope's own `pos` coordinates, so it is drawn wherever the scope is: dived into, or
+// drawn in — `graph` names the `graph:` block, and is absent for the file body — and its geometry
+// is in that scope's own `pos` coordinates, so it is drawn wherever the scope is: dived into, or
 // unfolded inside a frame. `followIdentityChanges` (canvas-layer.ts) keeps `graph` in step with
 // block renames and removals.
 //
-// The only kind this editor draws is a freehand stroke. Drawings of other kinds, and fields this
-// editor does not know, are kept verbatim and simply not drawn.
+// This editor draws two kinds: a freehand stroke (its geometry is `points`) and free text (its
+// geometry is a `box`, canvas-text.ts). Drawings of other kinds, and fields this editor does not
+// know, are kept verbatim and simply not drawn.
 
 import { isLayerColor, type CanvasLayer, type Drawing } from './canvas-layer.js';
 import { groupsForCopies, pruneGroups, type Group } from './canvas-groups.js';
+import {
+  isTextSize,
+  storedTextLayout,
+  textBoxOf,
+  textDrawingOf,
+  textDrawingRecord,
+  type TextDrawing,
+} from './canvas-text.js';
+import {
+  applyDrawingTransform,
+  isFiniteNumber,
+  isStretch,
+  roundCoordinate,
+  transformedRect,
+  translationBy,
+  type DrawingPoint,
+  type DrawingTransform,
+} from './drawing-geometry.js';
 import { newUuid, type Rect } from './flow-format.js';
 
 export const STROKE_KIND = 'stroke';
@@ -19,46 +38,25 @@ export const DEFAULT_STROKE_WIDTH: StrokeWidth = 'medium';
 // In the scope's own units, so a stroke inside a scaled-down frame thins with everything else.
 export const STROKE_LINE_WIDTHS: Record<StrokeWidth, number> = { thin: 1.5, medium: 3, thick: 6 };
 
-// Stored to a tenth of a unit: finer than any screen shows, and it keeps a stroke's line short.
-const COORDINATE_PRECISION = 10;
-
-export interface StrokePoint {
-  x: number;
-  y: number;
-}
-
-// How a stroke's points are carried by a move or a resize: each axis scaled, then shifted —
-// `x' = x · scaleX + x`. Line width is style, not geometry, so a resized stroke keeps its own.
-export interface StrokeTransform {
-  scaleX: number;
-  scaleY: number;
-  x: number;
-  y: number;
-}
-
-export function translationBy(offset: StrokePoint): StrokeTransform {
-  return { scaleX: 1, scaleY: 1, x: offset.x, y: offset.y };
-}
-
-export function applyStrokeTransform(point: StrokePoint, transform: StrokeTransform): StrokePoint {
-  return { x: point.x * transform.scaleX + transform.x, y: point.y * transform.scaleY + transform.y };
-}
-
-export function transformedStroke(stroke: Stroke, transform: StrokeTransform): Stroke {
-  return { ...stroke, points: stroke.points.map((point) => applyStrokeTransform(point, transform)) };
-}
-
 export interface Stroke {
+  kind: typeof STROKE_KIND;
   id: string;
   graph: string | null;
   // A colour slot or `#rrggbb`; null draws in the theme's ink.
   color: string | null;
   width: StrokeWidth;
-  points: StrokePoint[];
+  points: DrawingPoint[];
 }
+
+// Every drawing this editor can draw, read from the layer.
+export type CanvasDrawing = Stroke | TextDrawing;
 
 export function isStrokeWidth(value: unknown): value is StrokeWidth {
   return (STROKE_WIDTHS as readonly unknown[]).includes(value);
+}
+
+export function drawingOf(drawing: Drawing): CanvasDrawing | null {
+  return strokeOf(drawing) ?? textDrawingOf(drawing);
 }
 
 // Null for anything that is not a drawable stroke. A bad colour or width only costs the stroke
@@ -69,6 +67,7 @@ export function strokeOf(drawing: Drawing): Stroke | null {
   const points = strokePointsOf(drawing.points);
   if (!points) return null;
   return {
+    kind: STROKE_KIND,
     id: drawing.id,
     graph: drawing.graph ?? null,
     color: isLayerColor(drawing.color) ? drawing.color : null,
@@ -77,9 +76,9 @@ export function strokeOf(drawing: Drawing): Stroke | null {
   };
 }
 
-export function strokePointsOf(raw: unknown): StrokePoint[] | null {
+export function strokePointsOf(raw: unknown): DrawingPoint[] | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
-  const points: StrokePoint[] = [];
+  const points: DrawingPoint[] = [];
   for (const pair of raw) {
     if (!isCoordinatePair(pair)) return null;
     points.push({ x: pair[0], y: pair[1] });
@@ -88,16 +87,14 @@ export function strokePointsOf(raw: unknown): StrokePoint[] | null {
 }
 
 function isCoordinatePair(value: unknown): value is [number, number] {
-  return Array.isArray(value)
-    && value.length === 2
-    && value.every((coordinate) => typeof coordinate === 'number' && Number.isFinite(coordinate));
+  return Array.isArray(value) && value.length === 2 && value.every(isFiniteNumber);
 }
 
-export function strokesInScope(layer: CanvasLayer | null, scope: string | null): Stroke[] {
+export function drawingsInScope(layer: CanvasLayer | null, scope: string | null): CanvasDrawing[] {
   if (!layer) return [];
   return layer.drawings
-    .map(strokeOf)
-    .filter((stroke): stroke is Stroke => stroke != null && stroke.graph === scope);
+    .map(drawingOf)
+    .filter((drawing): drawing is CanvasDrawing => drawing != null && drawing.graph === scope);
 }
 
 // The default width is never written, as the default node shape is not.
@@ -110,12 +107,36 @@ export function strokeDrawing(stroke: Stroke): Drawing {
   return drawing;
 }
 
-function storedCoordinatePair(point: StrokePoint): [number, number] {
+function storedCoordinatePair(point: DrawingPoint): [number, number] {
   return [roundCoordinate(point.x), roundCoordinate(point.y)];
 }
 
-function roundCoordinate(value: number): number {
-  return Math.round(value * COORDINATE_PRECISION) / COORDINATE_PRECISION;
+// Where a drawing's ink reaches: what selection outlines, marquees and frames measure.
+export function drawingBounds(drawing: CanvasDrawing): Rect {
+  return drawing.kind === STROKE_KIND ? strokeBounds(drawing) : drawing.box;
+}
+
+// The box a resize stretches: a stroke's points (its line width is style and stays), a text's box.
+export function drawingGeometryBox(drawing: CanvasDrawing): Rect {
+  return drawing.kind === STROKE_KIND ? strokePointBounds(drawing) : drawing.box;
+}
+
+export function transformedDrawing<Shown extends CanvasDrawing>(drawing: Shown, transform: DrawingTransform): Shown {
+  if (drawing.kind === STROKE_KIND) {
+    return { ...drawing, points: drawing.points.map((point) => applyDrawingTransform(point, transform)) };
+  }
+  return { ...drawing, ...transformedTextLayout(drawing, transform) };
+}
+
+// A text scaled evenly scales its size with its box. Stretched sideways, it keeps its size and
+// takes the stretched width as the width it wraps to — its height then follows from the wrapped
+// lines, which only a measurement can say, so the editor lays it out again afterwards.
+function transformedTextLayout(text: Pick<TextDrawing, 'box' | 'size' | 'wrap'>, transform: DrawingTransform): Pick<TextDrawing, 'box' | 'size' | 'wrap'> {
+  return {
+    box: transformedRect(text.box, transform),
+    size: text.size * transform.scaleY,
+    wrap: text.wrap || isStretch(transform),
+  };
 }
 
 // Where the ink reaches: the points' bounds grown by half the line on every side.
@@ -125,9 +146,9 @@ export function strokeBounds(stroke: Stroke): Rect {
   return { x: points.x - halfLine, y: points.y - halfLine, w: points.w + 2 * halfLine, h: points.h + 2 * halfLine };
 }
 
-// The box the points themselves span — what a resize stretches. Folded rather than spread into
-// Math.min, which runs out of stack on a long enough hand-written stroke.
-export function strokePointBounds(stroke: Stroke): Rect {
+// The box the points themselves span. Folded rather than spread into Math.min, which runs out of
+// stack on a long enough hand-written stroke.
+export function strokePointBounds(stroke: Pick<Stroke, 'points'>): Rect {
   let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
   for (const { x, y } of stroke.points) {
     minX = Math.min(minX, x);
@@ -138,8 +159,21 @@ export function strokePointBounds(stroke: Stroke): Rect {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+// The points a stored drawing's geometry passes through, whatever its kind — what a paste
+// anchors on. Empty for a drawing with no geometry this editor reads.
+export function drawingAnchorPoints(drawing: Drawing): DrawingPoint[] {
+  const points = strokePointsOf(drawing.points);
+  if (points) return points;
+  const box = textBoxOf(drawing.box);
+  return box ? [{ x: box.x, y: box.y }, { x: box.x + box.w, y: box.y + box.h }] : [];
+}
+
 export function addStroke(layer: CanvasLayer, stroke: Stroke): void {
   layer.drawings = [...layer.drawings, strokeDrawing(stroke)];
+}
+
+export function addTextDrawing(layer: CanvasLayer, text: TextDrawing): void {
+  layer.drawings = [...layer.drawings, textDrawingRecord(text)];
 }
 
 export function removeDrawings(layer: CanvasLayer, ids: ReadonlySet<string>): void {
@@ -147,13 +181,21 @@ export function removeDrawings(layer: CanvasLayer, ids: ReadonlySet<string>): vo
   pruneGroups(layer);
 }
 
-export function transformDrawings(layer: CanvasLayer, transforms: ReadonlyMap<string, StrokeTransform>): void {
+export function transformDrawings(layer: CanvasLayer, transforms: ReadonlyMap<string, DrawingTransform>): void {
   layer.drawings = layer.drawings.map((drawing) => {
     const transform = typeof drawing.id === 'string' ? transforms.get(drawing.id) : undefined;
-    const points = transform ? strokePointsOf(drawing.points) : null;
-    if (!transform || !points) return drawing;
-    return { ...drawing, points: points.map((point) => storedCoordinatePair(applyStrokeTransform(point, transform))) };
+    return transform ? withTransformedGeometry(drawing, transform) : drawing;
   });
+}
+
+// The stored drawing with whichever geometry it has carried by the transform. A drawing whose
+// geometry this editor cannot read is left exactly as it is.
+function withTransformedGeometry(drawing: Drawing, transform: DrawingTransform): Drawing {
+  const points = strokePointsOf(drawing.points);
+  if (points) return { ...drawing, points: points.map((point) => storedCoordinatePair(applyDrawingTransform(point, transform))) };
+  const text = textDrawingOf(drawing);
+  if (text) return { ...drawing, ...storedTextLayout(transformedTextLayout(text, transform)) };
+  return drawing;
 }
 
 export function setDrawingColor(layer: CanvasLayer, ids: ReadonlySet<string>, color: string | null): void {
@@ -163,6 +205,16 @@ export function setDrawingColor(layer: CanvasLayer, ids: ReadonlySet<string>, co
     if (color == null) delete recolored.color;
     else recolored.color = color;
     return recolored;
+  });
+}
+
+// Rewrites a text's words and layout in place, keeping every other field it was read with.
+export function setTextDrawing(layer: CanvasLayer, text: Pick<TextDrawing, 'id' | 'text' | 'box' | 'size' | 'wrap'>): void {
+  layer.drawings = layer.drawings.map((drawing) => {
+    if (drawing.id !== text.id) return drawing;
+    const rewritten: Drawing = { ...drawing, text: text.text, ...storedTextLayout(text) };
+    if (!text.wrap) delete rewritten.wrap;
+    return rewritten;
   });
 }
 
@@ -207,16 +259,14 @@ export function drawingsToCopy(layer: Pick<CanvasLayer, 'drawings' | 'groups'>, 
 
 // Places copies of carried drawings in `scope`, shifted by `offset`, each under a fresh id and
 // with fresh groups. Returns the copies' ids.
-export function pasteDrawings(layer: CanvasLayer, carried: CarriedDrawings, scope: string | null, offset: StrokePoint): string[] {
+export function pasteDrawings(layer: CanvasLayer, carried: CarriedDrawings, scope: string | null, offset: DrawingPoint): string[] {
   const copyIds = new Map<string, string>();
   const pastedIds: string[] = [];
   const shift = translationBy(offset);
   const copies = carried.drawings.map((drawing) => {
     const id = newUuid();
-    const copy: Drawing = { ...withoutGraph(drawing), id };
+    const copy: Drawing = { ...withTransformedGeometry(withoutGraph(drawing), shift), id };
     if (scope != null) copy.graph = scope;
-    const points = strokePointsOf(drawing.points);
-    if (points) copy.points = points.map((point) => storedCoordinatePair(applyStrokeTransform(point, shift)));
     if (typeof drawing.id === 'string') copyIds.set(drawing.id, id);
     pastedIds.push(id);
     return copy;

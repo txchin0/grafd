@@ -22,6 +22,7 @@ import {
   type Arrowhead,
 } from './canvas-edge-style.js';
 import { STROKE_KIND, STROKE_WIDTHS, isStrokeWidth, strokePointsOf } from './canvas-drawings.js';
+import { TEXT_KIND, isDrawableText, isTextSize, textBoxOf } from './canvas-text.js';
 import { DRAWING_MEMBER_KIND, groupMembersOf, type Group } from './canvas-groups.js';
 import { byLine, info, warning, type Diagnostic } from './flow-diagnostics.js';
 import { parseFlow, type FlowDocument } from './flow-format.js';
@@ -109,6 +110,7 @@ function drawingDiagnostics(layerText: string, flow: FlowDocument | null): Diagn
       seenIds.add(entry.id);
     }
     if (entry.kind === STROKE_KIND) diagnostics.push(...strokeDiagnostics(entry, line, blockNames));
+    if (entry.kind === TEXT_KIND) diagnostics.push(...textDiagnostics(entry, line, blockNames));
   });
   return diagnostics;
 }
@@ -148,24 +150,62 @@ function groupDiagnostics(layerText: string): Diagnostic[] {
   return diagnostics;
 }
 
+// What every kind of drawing is checked for — an id, the graph it is filed under, its colour — in
+// the words and codes of that kind.
+interface DrawingKindTerms {
+  noun: string;
+  invalidCode: string;
+  colorCode: string;
+}
+
+const STROKE_TERMS: DrawingKindTerms = { noun: 'stroke', invalidCode: 'invalid-stroke', colorCode: 'invalid-stroke-color' };
+const TEXT_TERMS: DrawingKindTerms = { noun: 'text', invalidCode: 'invalid-text', colorCode: 'invalid-text-color' };
+
 function strokeDiagnostics(stroke: Record<string, unknown>, line: number, blockNames: Set<string> | null): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
-  if (typeof stroke.id !== 'string' || stroke.id === '') {
-    diagnostics.push(warning('invalid-stroke', line, 'This stroke has no `id`, so it is not drawn.'));
-  }
+  const diagnostics = commonDrawingDiagnostics(stroke, line, blockNames, STROKE_TERMS);
   if (!strokePointsOf(stroke.points)) {
     diagnostics.push(warning('invalid-stroke', line, 'This stroke\'s `points` must be a non-empty list of [x, y] number pairs; it is not drawn.'));
   }
-  if (stroke.graph !== undefined && typeof stroke.graph !== 'string') {
-    diagnostics.push(warning('invalid-stroke', line, 'This stroke\'s `graph` must name a `graph:` block; it is not drawn.'));
-  } else if (typeof stroke.graph === 'string' && blockNames && !blockNames.has(stroke.graph)) {
-    diagnostics.push(info('unknown-drawing-graph', line, `No \`graph: ${stroke.graph}\` block is in the .flow any more; this stroke is never shown.`));
-  }
-  if (stroke.color !== undefined && !isLayerColor(stroke.color)) {
-    diagnostics.push(warning('invalid-stroke-color', line, `Invalid colour ${JSON.stringify(stroke.color)}; the stroke is drawn in the default ink. Use one of ${LAYER_COLOR_SLOTS.join(', ')}, or #rrggbb.`));
-  }
   if (stroke.width !== undefined && !isStrokeWidth(stroke.width)) {
     diagnostics.push(warning('unknown-stroke-width', line, `Unknown width ${JSON.stringify(stroke.width)}; the stroke is drawn medium. Widths: ${STROKE_WIDTHS.join(', ')}.`));
+  }
+  return diagnostics;
+}
+
+function textDiagnostics(text: Record<string, unknown>, line: number, blockNames: Set<string> | null): Diagnostic[] {
+  const diagnostics = commonDrawingDiagnostics(text, line, blockNames, TEXT_TERMS);
+  if (!isDrawableText(text.text)) {
+    diagnostics.push(warning('invalid-text', line, 'This text\'s `text` must be a string with something besides spaces in it; it is not drawn.'));
+  }
+  if (!textBoxOf(text.box)) {
+    diagnostics.push(warning('invalid-text', line, 'This text\'s `box` must be [x, y, width, height] with a positive width and height; it is not drawn.'));
+  }
+  if (text.size !== undefined && !isTextSize(text.size)) {
+    diagnostics.push(warning('invalid-text-size', line, `Invalid size ${JSON.stringify(text.size)}; the text is drawn as large as its box holds. A size is a positive number.`));
+  }
+  if (text.wrap !== undefined && typeof text.wrap !== 'boolean') {
+    diagnostics.push(warning('invalid-text-wrap', line, `Invalid wrap ${JSON.stringify(text.wrap)}; the text is not wrapped. \`wrap\` is true or false.`));
+  }
+  return diagnostics;
+}
+
+function commonDrawingDiagnostics(
+  drawing: Record<string, unknown>,
+  line: number,
+  blockNames: Set<string> | null,
+  { noun, invalidCode, colorCode }: DrawingKindTerms,
+): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  if (typeof drawing.id !== 'string' || drawing.id === '') {
+    diagnostics.push(warning(invalidCode, line, `This ${noun} has no \`id\`, so it is not drawn.`));
+  }
+  if (drawing.graph !== undefined && typeof drawing.graph !== 'string') {
+    diagnostics.push(warning(invalidCode, line, `This ${noun}'s \`graph\` must name a \`graph:\` block; it is not drawn.`));
+  } else if (typeof drawing.graph === 'string' && blockNames && !blockNames.has(drawing.graph)) {
+    diagnostics.push(info('unknown-drawing-graph', line, `No \`graph: ${drawing.graph}\` block is in the .flow any more; this ${noun} is never shown.`));
+  }
+  if (drawing.color !== undefined && !isLayerColor(drawing.color)) {
+    diagnostics.push(warning(colorCode, line, `Invalid colour ${JSON.stringify(drawing.color)}; the ${noun} is drawn in the default ink. Use one of ${LAYER_COLOR_SLOTS.join(', ')}, or #rrggbb.`));
   }
   return diagnostics;
 }

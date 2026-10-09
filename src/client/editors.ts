@@ -22,6 +22,7 @@ import * as FlowDoc from './flow-doc.js';
 import type { ModelEdge } from './flow-doc.js';
 import type { CanvasView, RegionTarget } from './canvas/canvas-view.js';
 import { createTitleEditor } from './title-editor.js';
+import { createTextDrawingEditor, type TextEditRequest } from './text-drawing-editor.js';
 import { createRegionNameEditor, type RenameRegion } from './region-name-editor.js';
 import { createReferenceRows } from './reference-rows.js';
 import type { LinkContext } from './reference-link.js';
@@ -69,6 +70,7 @@ export interface EditorContext {
   applyShapeEdit(node: FlowNode, shape: NodeShape): void;
   edgeStyleOf(edge: ModelEdge): EdgeStyle;
   applyEdgeStyleEdit(edge: ModelEdge, patch: EdgeStylePatch): void;
+  commitText(request: TextEditRequest, text: string): void;
 }
 
 export interface Editors {
@@ -77,6 +79,7 @@ export interface Editors {
   openRegionEditor(region: RegionTarget): void;
   openTitleEditor(node: FlowNode): void;
   openRegionNameEditor(region: RegionTarget, rename?: RenameRegion): void;
+  openTextEditor(request: TextEditRequest): void;
   closeAll(): void;
   reposition(): void;
   refreshFromDoc(): void;
@@ -134,6 +137,7 @@ export function createEditors(context: EditorContext): Editors {
   refuseReservedNameCharacters(elements.title);
   const titleEditor = createTitleEditor(context);
   const regionNameEditor = createRegionNameEditor(context);
+  const textEditor = createTextDrawingEditor(context);
 
   const referenceRows = createReferenceRows({
     rows: elements.referenceRows,
@@ -201,6 +205,7 @@ export function createEditors(context: EditorContext): Editors {
 
   function openTitleEditor(node: FlowNode): void {
     regionNameEditor.close();
+    textEditor.close();
     closeNodeEditor();
     closeEdgeEditor();
     closeRegionEditor();
@@ -212,6 +217,7 @@ export function createEditors(context: EditorContext): Editors {
     closeEdgeEditor();
     closeRegionEditor();
     titleEditor.close();
+    textEditor.close();
     regionNameEditor.open(region, rename);
   }
 
@@ -520,10 +526,16 @@ export function createEditors(context: EditorContext): Editors {
     elements.edgeEditor.classList.add('hidden');
   }
 
+  function openTextEditor(request: TextEditRequest): void {
+    closeAll();
+    textEditor.open(request);
+  }
+
   // A canvas click closes every editor in pointerdown, before the browser fires blur — so the
   // inline editors must commit here or the blur that would have committed never runs.
   function closeAll(): void {
     titleEditor.close();
+    textEditor.close();
     regionNameEditor.close();
     closeNodeEditor();
     closeEdgeEditor();
@@ -532,6 +544,7 @@ export function createEditors(context: EditorContext): Editors {
 
   function reposition(): void {
     titleEditor.reposition();
+    textEditor.reposition();
     regionNameEditor.reposition();
     if (editingRegion) {
       const rect = context.view.regionRectOfBlock(editingRegion.block);
@@ -565,6 +578,7 @@ export function createEditors(context: EditorContext): Editors {
   function refreshFromDoc(): void {
     titleEditor.refreshFromDoc();
     regionNameEditor.refreshFromDoc();
+    textEditor.refreshFromDoc();
     if (editingRegion) fillRegionFields(editingRegion);
     const node = editingNode();
     if (editingNodeId && !node) {
@@ -719,7 +733,18 @@ export function createEditors(context: EditorContext): Editors {
     context.deleteRegion(region);
   });
 
-  return { openNodeEditor, openEdgeEditor, openRegionEditor, openTitleEditor, openRegionNameEditor, closeAll, reposition, refreshFromDoc, editingNode };
+  return {
+    openNodeEditor,
+    openEdgeEditor,
+    openRegionEditor,
+    openTitleEditor,
+    openRegionNameEditor,
+    openTextEditor,
+    closeAll,
+    reposition,
+    refreshFromDoc,
+    editingNode,
+  };
 }
 
 function isHistoryShortcut(event: KeyboardEvent): boolean {

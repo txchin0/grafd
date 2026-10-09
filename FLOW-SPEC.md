@@ -822,7 +822,7 @@ Editor-owned properties are the one part of a `.flow` file that a future version
 
 Every visual style the editor offers is stored outside the `.flow`, in the graph's canvas layer: a JSON file named after its graph with `.canvas.json` appended (`auth/login.flow` → `auth/login.flow.canvas.json`). The editor writes it only while it holds something; a graph with no styling has no canvas layer.
 
-A canvas layer is entirely editor-owned. Its content is not part of this format — it records node shapes and how each edge is drawn (its colour, line style, arrowheads and bend), keyed by node `id` and by a key derived from each edge, free drawings, filed under the graph scope they were drawn in (the file body, or a `graph:` block by name), groups of drawings the editor moves as one, and whatever decoration later editor versions add — and nothing in it changes what a graph means. There is no style property in the `.flow` grammar: a `shape:` or `color:` line in a `.flow` is an unknown property, not a style.
+A canvas layer is entirely editor-owned. Its content is not part of this format — it records node shapes and how each edge is drawn (its colour, line style, arrowheads and bend), keyed by node `id` and by a key derived from each edge, free drawings and free text, filed under the graph scope they were made in (the file body, or a `graph:` block by name), groups of drawings the editor moves as one, and whatever decoration later editor versions add — and nothing in it changes what a graph means. There is no style property in the `.flow` grammar: a `shape:` or `color:` line in a `.flow` is an unknown property, not a style.
 
 **Rules for agents:**
 
@@ -831,7 +831,7 @@ A canvas layer is entirely editor-owned. Its content is not part of this format 
 - **Rename or move** a canvas layer together with its `.flow`, keeping the `.canvas.json` suffix on the new name. **Delete** it together with its `.flow`.
 - When creating a `.flow` at a path where a canvas layer already sits with no `.flow` beside it, **delete** that leftover first — it belongs to a graph that no longer exists.
 - Preserving node `id`s ([Section 11.2](#112-rules-for-agents)) is all it takes to preserve the styling of the nodes you keep. Edge styling is keyed by what the edge says, so an edge you relabel or retarget loses its style; that is expected, and the editor reports the leftover entry as unused rather than as an error.
-- Drawings made inside a `graph:` block are filed under the block's name, so a block you rename or remove leaves its drawings behind, unshown. That is expected too, and reported the same way.
+- Drawings (including free text) made inside a `graph:` block are filed under the block's name, so a block you rename or remove leaves its drawings behind, unshown. That is expected too, and reported the same way.
 
 ---
 
@@ -1109,7 +1109,7 @@ The format has a minimal set of reserved keywords:
 | Node reference    | By name, unique per graph                                                         | Edges, `expand`, and membership all read as prose; no identifiers in the parts a human writes |
 | Node identity     | An editor-assigned `id`, preserved by agents                                      | A rename is an id that stayed put — no structural guessing about which node used to be which |
 | Layout metadata   | Editor-owned `id` / `pos` properties on the node itself, no sidecar file          | A graph and its arrangement never separate when a file is copied, moved, or diffed; the cost is a few lines agents are told to ignore |
-| Visual styling    | A separate editor-owned canvas layer per graph (`<file>.flow.canvas.json`), never in the `.flow` | Styling is open-ended (shapes, colours, free drawings) and bulky, and means nothing to an agent; keeping it out of the `.flow` keeps the spec readable. Losing it costs only decoration, which is why it may separate from the graph when layout may not |
+| Visual styling    | A separate editor-owned canvas layer per graph (`<file>.flow.canvas.json`), never in the `.flow` | Styling is open-ended (shapes, colours, free drawings and text) and bulky, and means nothing to an agent; keeping it out of the `.flow` keeps the spec readable. Losing it costs only decoration, which is why it may separate from the graph when layout may not |
 | Indentation       | YAML-style, 2-space                                                               | Familiar, shallow nesting                        |
 | Edge syntax       | -> Target : "label"                                                               | Compact, colon-space forbidden in names          |
 | Subgraph entry targeting | Optional `{Inner}` suffix on the edge target                               | Keeps the edge anchored to the subgraph node while refining the entry point; braces are unused elsewhere, so no new keyword and no collision with the `[](path)` link form |

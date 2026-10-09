@@ -8,9 +8,11 @@ import type { Tool } from '../src/client/canvas/canvas-view.js';
 import type { Point } from '../src/client/geometry.js';
 import { allNodes, buildModel, regionRectOf, type FlowModel } from '../src/client/flow-doc.js';
 import { parseFlow, type Rect } from '../src/shared/flow-format.js';
-import { canvasLayerPathOf, parseCanvasLayer } from '../src/shared/canvas-layer.js';
-import { rectContainsRect } from '../src/shared/rect-math.js';
-import { strokeBounds, strokePointsOf, type Stroke } from '../src/shared/canvas-drawings.js';
+import { canvasLayerPathOf, isCanvasLayerPath, parseCanvasLayer } from '../src/shared/canvas-layer.js';
+import { isDrawableText, textDrawingOf, type TextDrawing } from '../src/shared/canvas-text.js';
+import { axesOf, isResizeEdge, type ResizeEdge } from '../src/client/canvas/resize-handles.js';
+import { boundsOfRects, rectContainsRect } from '../src/shared/rect-math.js';
+import { STROKE_KIND, drawingBounds, strokeBounds, strokePointBounds, strokePointsOf, type Stroke } from '../src/shared/canvas-drawings.js';
 import type { HeadlessEditor } from './editor-harness.js';
 import { isHistoryAction, type ActionTrace, type SessionAction } from './session-actions.js';
 import { contentChanged, contentOf, differingPaths, type FileSnapshot, type Violation } from './session-invariants.js';
@@ -21,6 +23,11 @@ const SNAP = 8;
 const PASTE_TOLERANCE = 1;
 // The same rounding can leave two points carried by one move a tenth of a unit apart.
 const RIGID_MOVE_TOLERANCE = 0.15;
+// A text box is stored to a tenth of a unit too, which can tilt a resized box's proportions by
+// that much over its height.
+const TEXT_PROPORTION_TOLERANCE = 0.02;
+// A node's or region's sides are stored exactly; a drawing's to a tenth of a unit.
+const EXACT_SIDE_TOLERANCE = 0.01;
 const VIEWPORT = { width: 1280, height: 800 };
 
 export interface SessionStep {
@@ -53,6 +60,7 @@ interface GraphState {
   topNodes: Map<string, { name: string; pos: Rect | null }>;
   regions: Map<string, { pos: Rect | null; members: string[]; frame: Rect | null }>;
   strokes: Map<string, Stroke>;
+  texts: Map<string, TextDrawing>;
   groups: string[][];
   edgesBySource: Map<string, string[]>;
 }
@@ -62,11 +70,14 @@ function graphStateOf(snapshot: FileSnapshot, flowPath: string): GraphState {
   const model = buildModel(doc, null);
   const layer = parseCanvasLayer(snapshot.get(canvasLayerPathOf(flowPath)) ?? null);
   const strokes = new Map<string, Stroke>();
+  const texts = new Map<string, TextDrawing>();
   for (const drawing of layer.drawings) {
     const points = strokePointsOf(drawing.points);
     if (drawing.graph == null && points && typeof drawing.id === 'string') {
-      strokes.set(drawing.id, { id: drawing.id, graph: null, color: null, width: 'medium', points });
+      strokes.set(drawing.id, { kind: STROKE_KIND, id: drawing.id, graph: null, color: null, width: 'medium', points });
     }
+    const text = textDrawingOf(drawing);
+    if (text && text.graph == null) texts.set(text.id, text);
   }
   return {
     model,
@@ -77,6 +88,7 @@ function graphStateOf(snapshot: FileSnapshot, flowPath: string): GraphState {
       { pos: context.block.pos, members: [...context.block.members], frame: regionRectOf(model, context) },
     ])),
     strokes,
+    texts,
     groups: layer.groups.map((group) => drawingIdsOfGroup(group)),
     edgesBySource: new Map(allNodes(doc).map((node) => [node.id ?? node.name, node.edges.map((spec) => JSON.stringify(spec))])),
   };
@@ -123,6 +135,10 @@ export function expectationViolations(step: SessionStep): Violation[] {
     ...selectAllThatMissedSomething(step),
     ...fitThatLeftSomethingOut(step),
     ...newNodesInTheWrongRegions(step, was, now),
+    ...newTextNotAsTyped(step, was, now),
+    ...editedTextNotAsTyped(step),
+    ...textResizedOtherThanWhole(step, was, now),
+    ...sideDragThatMovedOtherSides(step, was, now),
   ];
 }
 
@@ -186,13 +202,12 @@ function regionDragThatLeftDrawings(step: SessionStep, was: GraphState, now: Gra
     const delta = regionTravel(name, was, now);
     const frame = was.regions.get(name)?.frame;
     if (!delta || !frame || (delta.x === 0 && delta.y === 0)) continue;
-    for (const [id, stroke] of was.strokes) {
-      if (!strokeAndGroupInside(id, frame, was)) continue;
-      const moved = now.strokes.get(id);
-      const travel = moved ? rigidTranslation(stroke, moved) : null;
+    for (const id of [...was.strokes.keys(), ...was.texts.keys()]) {
+      if (!drawingAndGroupInside(id, frame, was)) continue;
+      const travel = drawingTravel(id, was, now);
       if (!travel) continue;
       if (Math.abs(travel.x - delta.x) > PASTE_TOLERANCE || Math.abs(travel.y - delta.y) > PASTE_TOLERANCE) {
-        violations.push({ invariant: 'a dragged region takes the drawings inside it', detail: `region ${name} moved ${delta.x},${delta.y} but stroke ${id} inside it moved ${travel.x},${travel.y}` });
+        violations.push({ invariant: 'a dragged region takes the drawings inside it', detail: `region ${name} moved ${delta.x},${delta.y} but drawing ${id} inside it moved ${travel.x},${travel.y}` });
       }
     }
   }
@@ -283,9 +298,9 @@ function selectAllThatMissedSomething(step: SessionStep): Violation[] {
   const missing = [
     ...view.model.nodes.filter((node) => !view.selection.has(node)).map((node) => `node ${node.name}`),
     ...view.model.contexts.filter((context) => !view.selectedRegions.has(context)).map((context) => `region ${context.block.name}`),
-    ...(view.model.visuals?.strokes() ?? [])
-      .filter((stroke) => !view.selectedDrawings.some((drawing) => drawing.id === stroke.id && drawing.model === view.model))
-      .map((stroke) => `stroke ${stroke.id}`),
+    ...(view.model.visuals?.drawings() ?? [])
+      .filter((laidOut) => !view.selectedDrawings.some((drawing) => drawing.id === laidOut.id && drawing.model === view.model))
+      .map((laidOut) => `drawing ${laidOut.id}`),
   ];
   return missing.length === 0 ? [] : violation('select all selects everything', `left out ${missing.join(', ')}`);
 }
@@ -306,15 +321,17 @@ function fitThatLeftSomethingOut(step: SessionStep): Violation[] {
         return frame && !rectOnScreen(frame);
       })
       .map((context) => `region ${context.block.name}`),
-    ...(view.model.visuals?.strokes() ?? []).filter((stroke) => !stroke.points.every(onScreen)).map((stroke) => `stroke ${stroke.id}`),
+    ...(view.model.visuals?.drawings() ?? []).filter((drawing) => !rectOnScreen(drawingBounds(drawing))).map((drawing) => `drawing ${drawing.id}`),
   ];
   return outside.length === 0 ? [] : violation('fit to content shows everything', `off screen after fitting: ${outside.join(', ')}`);
 }
 
 // R9a: a node made inside a region joins it; one made outside does not. R9b: a subgraph host also
-// stays in a region that held everything it was folded from.
+// stays in a region that held everything it was folded from. Judged where the node ended up, so a
+// grab-affordance step is left out: its click can make a ghost real, and its drag then resize that
+// node across a region's frame — and a resize never changes which regions a node belongs to.
 function newNodesInTheWrongRegions(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
-  if (isCopying(step) || isHistoryAction(step.action)) return [];
+  if (isCopying(step) || isHistoryAction(step.action) || step.action.type === 'grab-affordance') return [];
   const folded = [...was.topNodes].filter(([id]) => !now.topNodes.has(id)).map(([, node]) => node.name);
   const heldAllFolded = (members: readonly string[]) => folded.length > 0 && folded.every((name) => members.includes(name));
   const violations: Violation[] = [];
@@ -333,6 +350,150 @@ function newNodesInTheWrongRegions(step: SessionStep, was: GraphState, now: Grap
   return violations;
 }
 
+// A text typed into a new text's editor lands as typed, once, where the press was — less the blank
+// lines and spaces Enter and the space bar leave at its end. Nothing but blanks writes nothing.
+function newTextNotAsTyped(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
+  const request = step.trace.textRequest;
+  if (step.action.type !== 'type-text' || request?.kind !== 'new' || step.trace.typed == null) return [];
+  const typed = step.trace.typed.trimEnd();
+  const added = [...textsIn(step.after)].filter(([id]) => !textsIn(step.before).has(id)).map(([, text]) => text);
+  if (!isDrawableText(typed)) {
+    if (!contentChanged(step.before, step.after) && step.stepsAdded === 0) return [];
+    return violation('a blank text writes nothing', `finishing a new text as ${JSON.stringify(step.trace.typed)} changed ${differingPaths(contentOf(step.before), contentOf(step.after)).join(', ') || 'nothing'}`);
+  }
+  if (added.length !== 1 || added[0].text !== typed) {
+    return violation('a text lands as typed', `typed ${JSON.stringify(step.trace.typed)} and the layers gained ${JSON.stringify(added.map((text) => text.text))}`);
+  }
+  const landedOnScreen = request.frameHost == null && step.editor.core.openFlow()?.scope == null;
+  const landed = now.texts.get(added[0].id);
+  if (!landedOnScreen || !landed || was.texts.has(landed.id)) return [];
+  const offBy = Math.max(Math.abs(landed.box.x - request.topLeft.x), Math.abs(landed.box.y - request.topLeft.y));
+  if (offBy <= RIGID_MOVE_TOLERANCE) return [];
+  return violation('a text lands where it was placed', `placed at ${request.topLeft.x},${request.topLeft.y}, its box starts at ${landed.box.x},${landed.box.y}`);
+}
+
+// Typing into an existing text changes its words and nothing else of it: it stays where it starts
+// and as large as it was. Emptied, it is gone.
+function editedTextNotAsTyped(step: SessionStep): Violation[] {
+  const request = step.trace.textRequest;
+  if (step.action.type !== 'type-text' || request?.kind !== 'existing' || step.trace.typed == null) return [];
+  const typed = step.trace.typed.trimEnd();
+  const before = textsIn(step.before).get(request.drawing.id);
+  const after = textsIn(step.after).get(request.drawing.id);
+  if (!before) return [];
+  if (!isDrawableText(typed)) {
+    return after ? violation('an emptied text is deleted', `text ${before.id} was emptied but is still there`) : [];
+  }
+  if (!after || after.text !== typed) {
+    return violation('a text lands as typed', `text ${before.id} was typed as ${JSON.stringify(typed)} but reads ${JSON.stringify(after?.text ?? null)}`);
+  }
+  const moved = Math.abs(after.box.x - before.box.x) > RIGID_MOVE_TOLERANCE || Math.abs(after.box.y - before.box.y) > RIGID_MOVE_TOLERANCE;
+  const resized = Math.abs(after.size - before.size) > RIGID_MOVE_TOLERANCE;
+  if (!moved && !resized) return [];
+  return violation('editing a text keeps where it starts and its size', `text ${before.id} went from ${JSON.stringify(before.box)} to ${JSON.stringify(after.box)}`);
+}
+
+// A text resizes one of two ways, alone or in a group: whole, its size growing with its box, or
+// re-wrapped to a new width at the size it had. A box stretched any other way draws nothing like
+// what the user dragged.
+function textResizedOtherThanWhole(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
+  if (isHistoryAction(step.action) || step.action.type === 'type-text') return [];
+  return [...now.texts]
+    .filter(([id, text]) => {
+      const before = was.texts.get(id);
+      return before !== undefined && sizeChanged(before.box, text.box) && !scaledWhole(before, text) && !rewrapped(before, text);
+    })
+    .flatMap(([id, text]) => {
+      const before = was.texts.get(id)!;
+      return violation('a resized text scales whole or re-wraps', `text ${id} went from ${JSON.stringify(before.box)} at ${before.size} to ${JSON.stringify(text.box)} at ${text.size}`);
+    });
+}
+
+function scaledWhole(before: TextDrawing, after: TextDrawing): boolean {
+  const widthScale = after.box.w / before.box.w;
+  const isProportional = (scale: number) => Math.abs(scale - widthScale) / widthScale <= TEXT_PROPORTION_TOLERANCE;
+  return isProportional(after.box.h / before.box.h) && isProportional(after.size / before.size);
+}
+
+function rewrapped(before: TextDrawing, after: TextDrawing): boolean {
+  return after.wrap && Math.abs(after.size - before.size) <= RIGID_MOVE_TOLERANCE;
+}
+
+// A side drags only its own side: the side opposite it stays, and so does the side at the start
+// of the axis it runs along — the top for a left or right side, the left for a top or bottom.
+// The far end of that axis stays too, unless text is being resized: re-wrapped text grows
+// downward, and text scaled evenly grows rightward.
+function sideDragThatMovedOtherSides(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
+  const handle = step.trace.grabbedHandle;
+  if (step.action.type !== 'grab-affordance' || !handle || !isResizeEdge(handle)) return [];
+  return reshapedRects(was, now).flatMap(({ what, before, after, holdsText, tolerance }) => {
+    const moved = sidesHeldBy(handle, holdsText).filter((side) => Math.abs(sideOf(after, side) - sideOf(before, side)) > tolerance);
+    return moved.length === 0 ? [] : violation('a side drag moves only that side', `dragging the ${handle} side moved the ${moved.join(', ')} side of ${what}: ${JSON.stringify(before)} to ${JSON.stringify(after)}`);
+  });
+}
+
+type RectSide = 'left' | 'right' | 'top' | 'bottom';
+
+function sidesHeldBy(handle: ResizeEdge, holdsText: boolean): RectSide[] {
+  const axes = axesOf(handle);
+  const held: RectSide[] = axes.x !== 0
+    ? [axes.x === 1 ? 'left' : 'right', 'top', ...(holdsText ? [] : ['bottom' as const])]
+    : [axes.y === 1 ? 'top' : 'bottom', 'left', ...(holdsText ? [] : ['right' as const])];
+  return held;
+}
+
+function sideOf(rect: Rect, side: RectSide): number {
+  switch (side) {
+    case 'left':
+      return rect.x;
+    case 'right':
+      return rect.x + rect.w;
+    case 'top':
+      return rect.y;
+    case 'bottom':
+      return rect.y + rect.h;
+  }
+}
+
+// Everything whose shape a step changed: each node and region on its own, and the drawings — a
+// lone one or a whole group, resized as one — by their combined geometry.
+function reshapedRects(was: GraphState, now: GraphState): { what: string; before: Rect; after: Rect; holdsText: boolean; tolerance: number }[] {
+  const reshaped: { what: string; before: Rect; after: Rect; holdsText: boolean; tolerance: number }[] = [];
+  for (const [id, node] of now.topNodes) {
+    const before = was.topNodes.get(id)?.pos;
+    if (before && node.pos && sizeChanged(before, node.pos)) reshaped.push({ what: `node ${node.name}`, before, after: node.pos, holdsText: false, tolerance: EXACT_SIDE_TOLERANCE });
+  }
+  for (const [name, region] of now.regions) {
+    const before = was.regions.get(name)?.pos;
+    if (before && region.pos && sizeChanged(before, region.pos)) reshaped.push({ what: `region ${name}`, before, after: region.pos, holdsText: false, tolerance: EXACT_SIDE_TOLERANCE });
+  }
+  const changedStrokes = [...now.strokes.keys()].filter((id) => was.strokes.has(id) && drawingTravel(id, was, now) === null);
+  const changedTexts = [...now.texts.keys()].filter((id) => was.texts.has(id) && drawingTravel(id, was, now) === null);
+  const geometryIn = (state: GraphState) => boundsOfRects([
+    ...changedStrokes.map((id) => strokePointBounds(state.strokes.get(id)!)),
+    ...changedTexts.map((id) => state.texts.get(id)!.box),
+  ]);
+  const before = geometryIn(was);
+  const after = geometryIn(now);
+  if (before && after) {
+    reshaped.push({ what: `drawings ${[...changedStrokes, ...changedTexts].join(', ')}`, before, after, holdsText: changedTexts.length > 0, tolerance: RIGID_MOVE_TOLERANCE });
+  }
+  return reshaped;
+}
+
+// Every text in every layer of a snapshot, by id: a text can be made inside any graph on screen.
+function textsIn(snapshot: FileSnapshot): Map<string, TextDrawing> {
+  const texts = new Map<string, TextDrawing>();
+  for (const [path, contents] of snapshot) {
+    if (!isCanvasLayerPath(path)) continue;
+    for (const drawing of parseCanvasLayer(contents).drawings) {
+      const text = textDrawingOf(drawing);
+      if (text) texts.set(text.id, text);
+    }
+  }
+  return texts;
+}
+
 // A click whose target was on the canvas — one aimed at a kind of thing there is none of never ran.
 function isClickThatRan(step: SessionStep): boolean {
   return step.action.type === 'click' && step.trace.path != null;
@@ -345,13 +506,16 @@ function isCopying(step: SessionStep): boolean {
 }
 
 function createdAnything(was: GraphState, now: GraphState): boolean {
-  return [...now.nodeIds].some((id) => !was.nodeIds.has(id)) || [...now.strokes.keys()].some((id) => !was.strokes.has(id));
+  return [...now.nodeIds].some((id) => !was.nodeIds.has(id))
+    || [...now.strokes.keys()].some((id) => !was.strokes.has(id))
+    || [...now.texts.keys()].some((id) => !was.texts.has(id));
 }
 
 // Anything changed in shape rather than only moved: a node or a region's drawn area resized
-// against the frame it had — a resized region always ends with a drawn area (R30) — or a stroke
-// whose points did not all travel together. Judging a stroke by every point rather than by its
-// size means any transform other than a move counts, whatever it does to the bounds.
+// against the frame it had — a resized region always ends with a drawn area (R30) — a stroke
+// whose points did not all travel together, or a text whose box changed size. Judging a stroke by
+// every point rather than by its size means any transform other than a move counts, whatever it
+// does to the bounds.
 function reshapedAnything(was: GraphState, now: GraphState): boolean {
   const resizedNode = [...now.topNodes].some(([id, node]) => sizeChanged(was.topNodes.get(id)?.pos, node.pos));
   const resizedRegion = [...now.regions].some(([name, region]) => sizeChanged(was.regions.get(name)?.frame, region.pos));
@@ -359,7 +523,8 @@ function reshapedAnything(was: GraphState, now: GraphState): boolean {
     const before = was.strokes.get(id);
     return before !== undefined && rigidTranslation(before, stroke) === null;
   });
-  return resizedNode || resizedRegion || reshapedStroke;
+  const resizedText = [...now.texts].some(([id, text]) => sizeChanged(was.texts.get(id)?.box, text.box));
+  return resizedNode || resizedRegion || reshapedStroke || resizedText;
 }
 
 function sizeChanged(before: Rect | null | undefined, after: Rect | null | undefined): boolean {
@@ -400,6 +565,10 @@ function translationsOf(was: GraphState, now: GraphState): { what: string; delta
     const delta = old ? rigidTranslation(old, stroke) : null;
     if (delta && (delta.x !== 0 || delta.y !== 0)) moves.push({ what: `stroke ${id}`, delta });
   }
+  for (const id of now.texts.keys()) {
+    const delta = drawingTravel(id, was, now);
+    if (delta && (delta.x !== 0 || delta.y !== 0)) moves.push({ what: `text ${id}`, delta });
+  }
   return moves;
 }
 
@@ -415,12 +584,28 @@ function regionTravel(name: string, was: GraphState, now: GraphState): Point | n
   return start && end ? { x: end.x - start.x, y: end.y - start.y } : null;
 }
 
-function strokeAndGroupInside(id: string, frame: Rect, state: GraphState): boolean {
+function drawingAndGroupInside(id: string, frame: Rect, state: GraphState): boolean {
   const members = state.groups.find((group) => group.includes(id)) ?? [id];
   return members.every((member) => {
-    const stroke = state.strokes.get(member);
-    return stroke != null && rectContainsRect(frame, strokeBounds(stroke));
+    const bounds = boundsOfDrawing(member, state);
+    return bounds != null && rectContainsRect(frame, bounds);
   });
+}
+
+function boundsOfDrawing(id: string, state: GraphState): Rect | null {
+  const stroke = state.strokes.get(id);
+  if (stroke) return strokeBounds(stroke);
+  return state.texts.get(id)?.box ?? null;
+}
+
+// How far a drawing moved when it only moved: every point of a stroke alike, a text's box at the
+// same size. Null when it changed in any other way, or is not in both states.
+function drawingTravel(id: string, was: GraphState, now: GraphState): Point | null {
+  const [strokeBefore, strokeAfter] = [was.strokes.get(id), now.strokes.get(id)];
+  if (strokeBefore && strokeAfter) return rigidTranslation(strokeBefore, strokeAfter);
+  const [textBefore, textAfter] = [was.texts.get(id), now.texts.get(id)];
+  if (!textBefore || !textAfter || sizeChanged(textBefore.box, textAfter.box)) return null;
+  return { x: textAfter.box.x - textBefore.box.x, y: textAfter.box.y - textBefore.box.y };
 }
 
 function boundsOfAdded(was: GraphState, now: GraphState): Point | null {
@@ -428,6 +613,7 @@ function boundsOfAdded(was: GraphState, now: GraphState): Point | null {
   for (const [id, node] of now.topNodes) if (!was.nodeIds.has(id) && node.pos) corners.push(node.pos);
   for (const [name, region] of now.regions) if (!was.regions.has(name) && region.pos) corners.push(region.pos);
   for (const [id, stroke] of now.strokes) if (!was.strokes.has(id)) corners.push(...stroke.points);
+  for (const [id, text] of now.texts) if (!was.texts.has(id)) corners.push(text.box);
   if (corners.length === 0) return null;
   return { x: Math.min(...corners.map((corner) => corner.x)), y: Math.min(...corners.map((corner) => corner.y)) };
 }

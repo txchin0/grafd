@@ -9,11 +9,11 @@ import {
   strokeBounds,
   strokeOf,
   strokePointBounds,
-  strokesInScope,
+  drawingsInScope,
   transformDrawings,
-  translationBy,
   type Stroke,
 } from '../src/shared/canvas-drawings.js';
+import { translationBy } from '../src/shared/drawing-geometry.js';
 import { drawingGroupsOf, groupDrawings, groupMembersOf, ungroupDrawings } from '../src/shared/canvas-groups.js';
 import {
   documentIdentities,
@@ -39,7 +39,7 @@ graph: Steps
 `;
 
 function stroke(id: string, graph: string | null, points = [{ x: 0, y: 0 }, { x: 10, y: 5 }]): Stroke {
-  return { id, graph, color: null, width: 'medium', points };
+  return { kind: 'stroke', id, graph, color: null, width: 'medium', points };
 }
 
 function graphBlock(doc: ReturnType<typeof parseFlow>, name: string): GraphItem {
@@ -74,10 +74,10 @@ describe('stroke storage', () => {
 
   it('keeps unknown kinds and fields, and a drawings value that is not a list', () => {
     const kept = parseCanvasLayer(JSON.stringify({
-      drawings: [{ id: 't', kind: 'text', text: 'hi' }, { id: 's', kind: 'stroke', points: [[0, 0]], pressure: [1] }],
+      drawings: [{ id: 't', kind: 'sticker', emoji: 'pin' }, { id: 's', kind: 'stroke', points: [[0, 0]], pressure: [1] }],
     }));
     expect(parseCanvasLayer(serializeCanvasLayer(kept))).toEqual(kept);
-    expect(strokesInScope(kept, null).map((entry) => entry.id)).toEqual(['s']);
+    expect(drawingsInScope(kept, null).map((entry) => entry.id)).toEqual(['s']);
 
     const notAList = parseCanvasLayer(JSON.stringify({ drawings: { oops: true } }));
     expect(notAList.drawings).toEqual([]);
@@ -95,7 +95,7 @@ describe('stroke storage', () => {
 
   it('reads only valid strokes, defaulting a bad colour or width', () => {
     expect(strokeOf({ id: 's', kind: 'stroke', points: [[0, 0]], color: 'mauve', width: 'huge' }))
-      .toEqual({ id: 's', graph: null, color: null, width: 'medium', points: [{ x: 0, y: 0 }] });
+      .toEqual({ kind: 'stroke', id: 's', graph: null, color: null, width: 'medium', points: [{ x: 0, y: 0 }] });
     expect(strokeOf({ id: 's', kind: 'stroke', points: [] })).toBeNull();
     expect(strokeOf({ id: 's', kind: 'stroke', points: [[0, 'a']] })).toBeNull();
     expect(strokeOf({ kind: 'stroke', points: [[0, 0]] })).toBeNull();
@@ -106,8 +106,8 @@ describe('stroke storage', () => {
     const layer = emptyCanvasLayer();
     addStroke(layer, stroke('body', null));
     addStroke(layer, stroke('inner', 'Steps'));
-    expect(strokesInScope(layer, null).map((entry) => entry.id)).toEqual(['body']);
-    expect(strokesInScope(layer, 'Steps').map((entry) => entry.id)).toEqual(['inner']);
+    expect(drawingsInScope(layer, null).map((entry) => entry.id)).toEqual(['body']);
+    expect(drawingsInScope(layer, 'Steps').map((entry) => entry.id)).toEqual(['inner']);
   });
 
   it('measures a stroke including half its line width', () => {
@@ -140,8 +140,8 @@ describe('drawings following their graph block', () => {
     const before = documentIdentities(doc);
     FlowDoc.renameGraphBlock(doc, graphBlock(doc, 'Steps'), 'Phases');
     expect(followIdentityChanges(layer, before, documentIdentities(doc))).toBe(true);
-    expect(strokesInScope(layer, 'Phases').map((entry) => entry.id)).toEqual(['inner']);
-    expect(strokesInScope(layer, null).map((entry) => entry.id)).toEqual(['body']);
+    expect(drawingsInScope(layer, 'Phases').map((entry) => entry.id)).toEqual(['inner']);
+    expect(drawingsInScope(layer, null).map((entry) => entry.id)).toEqual(['body']);
   });
 
   it('drops a block\'s drawings with the block', () => {
@@ -207,7 +207,7 @@ describe('copying and pasting drawings', () => {
     setDrawingColor(layer, new Set(['a']), 'red');
 
     const pasted = pasteDrawings(layer, carried, null, { x: 100, y: -5 });
-    const copies = strokesInScope(layer, null);
+    const copies = drawingsInScope(layer, null);
     expect(copies.map((copy) => copy.id)).toEqual(pasted);
     expect(pasted).not.toContain('a');
     expect(copies[0]).toMatchObject({ color: null, points: [{ x: 100, y: -5 }, { x: 110, y: 0 }] });

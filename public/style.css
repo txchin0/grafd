@@ -448,6 +448,21 @@ html, body {
   line-height: 1;
 }
 
+/* Writes free text in place, over the text the canvas draws; it grows with what is typed and
+   takes its font, size and colour from the canvas at the current zoom. */
+#text-drawing-editor {
+  position: absolute;
+  z-index: 11;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  outline: 1px dashed var(--canvas-select, currentColor);
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+}
+
 /* Names a region in place, over the label the canvas draws at its top-left corner. The reason
    line only appears when a name is refused. */
 #region-name-editor {

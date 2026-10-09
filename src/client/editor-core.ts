@@ -43,7 +43,9 @@ import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, MembershipChange, ModelContext, ModelEdge } from './flow-doc.js';
 import type { Point } from './geometry.js';
 import { CanvasView, type ContextTarget, type EdgeDrop } from './canvas/canvas-view.js';
-import type { DrawingMove } from './canvas/drawing-selection.js';
+import { storedDrawingOf, type DrawingMove, type StoredDrawing } from './canvas/drawing-selection.js';
+import type { TextEditRequest } from './text-drawing-editor.js';
+import { DEFAULT_TEXT_FONT_SIZE, isDrawableText } from '../shared/canvas-text.js';
 import { createDrawingOps } from './drawing-ops.js';
 import type { MenuItem } from './context-menu.js';
 import type { EditorCommand } from './editor-commands.js';
@@ -88,6 +90,7 @@ export type EditorOverlays = Pick<
   | 'openRegionEditor'
   | 'openTitleEditor'
   | 'openRegionNameEditor'
+  | 'openTextEditor'
   | 'closeAll'
   | 'reposition'
   | 'refreshFromDoc'
@@ -185,6 +188,7 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     },
     rerenderAfterEditTo: (owner) => rerenderAfterEditTo(owner),
     notify: (text) => view.flashNotice(text),
+    measureLine: () => view.lineMeasurer(),
   });
 
   // Copy/cut/paste/duplicate. Built here rather than beside the canvas because everything it
@@ -1430,16 +1434,17 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
 
   // Invents the node the edge points at. A ghost already carries the name the document asked for,
   // so only a node conjured out of empty canvas still needs one — and gets inline title editing
-  // rather than the edge editor.
+  // rather than the edge editor. A ghost may be the target of the very edge being drawn again, in
+  // which case that edge is the one joined, as a drop on an existing node joins its edge.
   function addEdgeToNewNode(fromNode: FlowNode, rect: Rect, ghostName: string | null): void {
     const flow = openFlow;
     if (!flow) return;
-    let createdSpec: EdgeSpec | null = null;
+    let createdSpec: EdgeSpec | null = ghostName ? FlowDoc.findUnlabelledEdge(fromNode, ghostName) : null;
     const items = FlowDoc.scopeItems(flow.doc, flow.scope);
     const owner = { doc: flow.doc, path: flow.path };
     const createdNode = runNodeCreationAction(owner, () => {
       const node = FlowDoc.addNode(items, rect, ghostName ?? undefined);
-      createdSpec = FlowDoc.addEdge(fromNode, node.name, null, null);
+      createdSpec ??= FlowDoc.addEdge(fromNode, node.name, null, null);
       return node;
     }, flow.scope);
 
@@ -1535,6 +1540,11 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     editEdge: (edge) => editors.openEdgeEditor(edge),
     bendEdge: (edge, bend) => applyEdgeStyleEdit(edge, { bend }),
     editNodeTitle: (node) => editors.openTitleEditor(node),
+    placeText: (point, frameHost) => {
+      if (!openFlow) return;
+      editors.openTextEditor({ kind: 'new', frameHost, topLeft: point, fontPx: DEFAULT_TEXT_FONT_SIZE, color: view.drawStyle.color });
+    },
+    editText: (drawing) => editors.openTextEditor({ kind: 'existing', drawing: storedDrawingOf(drawing) }),
     editRegionTitle: (region) => editors.openRegionNameEditor(region),
     openExpand,
     toggleExpand: toggleInlineExpansion,
@@ -1661,12 +1671,43 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
       items.push({ label: `Group ${count} drawings`, disabled: !drawingOps.canGroup(drawings), onSelect: groupSelectedDrawings });
     }
     if (drawingOps.isAnyGrouped(drawings)) items.push({ label: 'Ungroup', onSelect: ungroupSelectedDrawings });
+    const text = loneSelectedText();
+    if (text) items.push({ label: 'Edit text', onSelect: () => editors.openTextEditor({ kind: 'existing', drawing: text }) });
     items.push({ label: 'Duplicate', onSelect: clipboard.duplicateSelection });
     items.push({ label: 'Copy', onSelect: clipboard.copy });
     items.push({ label: 'Cut', onSelect: clipboard.cut });
     items.push({ separator: true });
     items.push({ label: count > 1 ? `Delete ${count} drawings` : 'Delete drawing', danger: true, onSelect: deleteSelection });
     return items;
+  }
+
+  // What a closed text editor writes. Trailing blank lines and spaces are what Enter and the
+  // space bar leave behind, never meant to be kept. A text emptied out is deleted, as an emptied
+  // layer is; a new one left empty was never made.
+  function commitText(request: TextEditRequest, typed: string): void {
+    const text = typed.trimEnd();
+    if (request.kind === 'new') {
+      if (!isDrawableText(text) || !openFlow) return;
+      const stored = drawingOps.createText({ ...request, text });
+      if (stored) view.setSelection([], [], [stored]);
+      return;
+    }
+    const laidOut = view.laidOutText(request.drawing);
+    if (!laidOut) return;
+    if (!isDrawableText(text)) {
+      drawingOps.deleteDrawings([laidOut.selection]);
+      view.clearSelection();
+    } else if (text !== laidOut.text.text) {
+      drawingOps.setText(laidOut.selection, text);
+    }
+  }
+
+  // The selected drawing when it is one lone text — what "Edit text" opens.
+  function loneSelectedText(): StoredDrawing | null {
+    const [drawing, ...others] = view.selectedDrawings;
+    if (!drawing || others.length > 0) return null;
+    const stored = storedDrawingOf(drawing);
+    return view.laidOutText(stored) ? stored : null;
   }
 
   function hasCopyableSelection(): boolean {
@@ -1876,6 +1917,7 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     hasCopyableSelection,
     groupSelectedDrawings,
     ungroupSelectedDrawings,
+    commitText,
     runCommand,
   };
 }

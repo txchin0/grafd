@@ -12,6 +12,10 @@ import type { Point } from '../src/client/geometry.js';
 import type { MenuItem } from '../src/client/context-menu.js';
 import { nodeBadges } from '../src/client/canvas/node-badges.js';
 import { EDITOR_COMMANDS, type EditorCommand } from '../src/client/editor-commands.js';
+import { STROKE_KIND, type Stroke } from '../src/shared/canvas-drawings.js';
+import { TEXT_KIND, type TextDrawing } from '../src/shared/canvas-text.js';
+import type { TextEditRequest } from '../src/client/text-drawing-editor.js';
+import type { ResizeHandle } from '../src/client/canvas/resize-handles.js';
 import type { HeadlessEditor } from './editor-harness.js';
 
 // What a pick can aim at. Handles, ports and grips are all one kind, `affordance`, resolved
@@ -27,6 +31,7 @@ export const TARGET_KINDS = [
   'edge',
   'edge-line',
   'stroke',
+  'text',
   'affordance',
   'empty',
 ] as const;
@@ -39,7 +44,7 @@ export interface TargetPick {
   nudge: Point;
 }
 
-export const TOOLS = ['select', 'node', 'context', 'draw'] as const satisfies readonly Tool[];
+export const TOOLS = ['select', 'node', 'context', 'draw', 'text'] as const satisfies readonly Tool[];
 
 // Every keyboard command the page binds, from the same table it binds them with.
 export const COMMANDS = EDITOR_COMMANDS;
@@ -77,6 +82,19 @@ export const TYPED_DESCRIPTIONS = [
   'ends with a backslash\\',
 ] as const;
 
+// What people type as free text on the canvas: a word, several lines, nothing at all, only the
+// blank lines Enter leaves behind, and characters that mean something elsewhere in the format.
+export const TYPED_TEXTS = [
+  'Note',
+  'two\nlines',
+  '',
+  '   ',
+  'trailing\n\n',
+  '-> not an edge',
+  'émoji 🎉',
+  '{"json": true}',
+] as const;
+
 export type SessionAction =
   | { type: 'tool'; tool: Tool }
   | { type: 'click'; target: TargetPick; shift: boolean }
@@ -95,6 +113,8 @@ export type SessionAction =
   | { type: 'describe'; target: TargetPick; text: number }
   | { type: 'rename-region'; region: number; name: number }
   | { type: 'rename-graph'; name: number }
+  // Typed into the inline text editor, if a step before opened it, and finished with Ctrl+Enter.
+  | { type: 'type-text'; text: number }
   | { type: 'command'; command: Command };
 
 // What an action actually did once its picks were resolved, for rules that judge an outcome
@@ -108,6 +128,10 @@ export interface ActionTrace {
   // The node a text edit went to, and what was typed.
   editedNode: FlowNode | null;
   typed: string | null;
+  // The free text the inline text editor was open on when it was typed into.
+  textRequest: TextEditRequest | null;
+  // The corner or side a grab-affordance step dragged, when the affordance was a resize handle.
+  grabbedHandle: ResizeHandle | null;
 }
 
 export const MAX_PICK_INDEX = 7;
@@ -144,6 +168,7 @@ export const sessionAction: fc.Arbitrary<SessionAction> = fc.oneof(
   { weight: 1, arbitrary: fc.record({ type: fc.constant('describe' as const), target: targetPick, text: fc.nat(TYPED_DESCRIPTIONS.length - 1) }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('rename-region' as const), region: fc.nat(MAX_PICK_INDEX), name: fc.nat(TYPED_NAMES.length - 1) }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('rename-graph' as const), name: fc.nat(TYPED_NAMES.length - 1) }) },
+  { weight: 2, arbitrary: fc.record({ type: fc.constant('type-text' as const), text: fc.nat(TYPED_TEXTS.length - 1) }) },
   { weight: 3, arbitrary: fc.record({ type: fc.constant('command' as const), command: fc.constantFrom(...COMMANDS) }) },
 );
 
@@ -191,8 +216,12 @@ function anchorOf(editor: HeadlessEditor, pick: TargetPick): Point | null {
       return path[Math.floor((path.length - 1) * EDGE_LINE_FRACTION)];
     }
     case 'stroke': {
-      const stroke = itemAt(model.visuals?.strokes() ?? [], pick.index);
+      const stroke = itemAt((model.visuals?.drawings() ?? []).filter((drawing): drawing is Stroke => drawing.kind === STROKE_KIND), pick.index);
       return stroke ? stroke.points[Math.floor(stroke.points.length / 2)] : null;
+    }
+    case 'text': {
+      const text = itemAt((model.visuals?.drawings() ?? []).filter((drawing): drawing is TextDrawing => drawing.kind === TEXT_KIND), pick.index);
+      return text ? { x: text.box.x + text.box.w / 2, y: text.box.y + text.box.h / 2 } : null;
     }
 
     case 'empty':
@@ -221,7 +250,7 @@ export function choosableItems(menu: readonly MenuItem[]): { label: string; onSe
 }
 
 function emptyTrace(): ActionTrace {
-  return { path: null, menuAt: null, menuItem: null, editedNode: null, typed: null };
+  return { path: null, menuAt: null, menuItem: null, editedNode: null, typed: null, textRequest: null, grabbedHandle: null };
 }
 
 export async function performAction(editor: HeadlessEditor, action: SessionAction): Promise<ActionTrace> {
@@ -286,6 +315,7 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       await editor.click(owner);
       const from = resolveTarget(editor, { kind: 'affordance', index: action.affordance, nudge: { x: 0, y: 0 } });
       if (!from) return trace;
+      trace.grabbedHandle = itemAt(editor.core.view.affordances(), action.affordance)?.handle ?? null;
       trace.path = pathBetween(from, { x: from.x + action.by.x, y: from.y + action.by.y });
       await editor.drag(trace.path);
       return trace;
@@ -338,6 +368,14 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       trace.typed = TYPED_NAMES[action.name];
       editor.core.renameGraph(trace.typed);
       await editor.settle();
+      return trace;
+    }
+    case 'type-text': {
+      const request = editor.openText();
+      if (!request) return trace;
+      trace.textRequest = request;
+      trace.typed = TYPED_TEXTS[action.text];
+      await editor.finishText(trace.typed);
       return trace;
     }
     case 'command':
