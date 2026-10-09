@@ -25,7 +25,7 @@ import type { HiddenCanvasTitles } from './canvas-view.js';
 import type { Arrowhead, EdgeStyle, LineStyle } from '../../shared/canvas-edge-style.js';
 import { edgeStyleIn } from '../model-visuals.js';
 import { arrowheadIsFilled, arrowheadOutline, type ArrowheadOutline } from './arrowheads.js';
-import { edgeEnd, edgePathApproach, edgePathDeparture, edgeStart } from './edge-path.js';
+import { edgeEnd, edgePathApproach, edgePathDeparture, edgeStart, type EdgeGeometry } from './edge-path.js';
 import {
   drawnShapeOf,
   edgeReachesInsideOpenFrame,
@@ -77,6 +77,22 @@ function regionHachureAngle(seed: number): number {
 
 const ARROWHEAD_TANGENT_BACKOFF = 12;
 const ARROWHEAD_LINE_WIDTH = 1.6;
+const EDGE_LINE_WIDTH = 1.5;
+const EDGE_SELECTION_HALO_WIDTH = 9;
+const EDGE_SELECTION_HALO_ALPHA = 0.32;
+
+interface ArrowheadPlacement {
+  kind: Arrowhead;
+  fromPoint: Point;
+  tip: Point;
+}
+
+function arrowheadPlacements(geometry: EdgeGeometry, style: EdgeStyle): ArrowheadPlacement[] {
+  return [
+    { kind: style.endHead, fromPoint: edgePathApproach(geometry.path, ARROWHEAD_TANGENT_BACKOFF), tip: edgeEnd(geometry) },
+    { kind: style.startHead, fromPoint: edgePathDeparture(geometry.path, ARROWHEAD_TANGENT_BACKOFF), tip: edgeStart(geometry) },
+  ];
+}
 
 // How each line style is stroked. Rough draws a line twice, and its two passes drift apart: that
 // reads as sketchiness on a solid or dashed line, but smears dots, so a dotted line is drawn once.
@@ -242,9 +258,15 @@ export class ScenePainter {
   }
 
   private traceArrowhead(outline: ArrowheadOutline): void {
+    this.ctx.beginPath();
+    this.appendArrowheadOutline(outline);
+  }
+
+  private appendArrowheadOutline(outline: ArrowheadOutline): void {
     const { ctx } = this;
-    ctx.beginPath();
     if (outline.kind === 'circle') {
+      // A fresh subpath, or the arc would be joined to wherever the path last ended.
+      ctx.moveTo(outline.center.x + outline.radius, outline.center.y);
       ctx.arc(outline.center.x, outline.center.y, outline.radius, 0, Math.PI * 2);
       return;
     }
@@ -263,9 +285,8 @@ export class ScenePainter {
     return node.id != null && node.id === this.hiddenTitles.nodeId;
   }
 
-  // Selection outranks the canvas layer's colour, which outranks the edge kind's default.
+  // The canvas layer's colour outranks the edge kind's default.
   private edgeColor(edge: ModelEdge, style: EdgeStyle): string {
-    if (this.selectedEdges.includes(edge)) return canvasPalette.select;
     if (style.color) return resolveLayerColor(style.color);
     return edge.kind === 'error' ? canvasPalette.error : canvasPalette.edge;
   }
@@ -274,12 +295,13 @@ export class ScenePainter {
     const geometry = this.edgeGeometry.get(edge);
     if (!geometry) return;
     const style = edgeStyleIn(model, edge);
+    if (this.selectedEdges.includes(edge)) this.drawEdgeSelectionHalo(geometry, style);
     const color = this.edgeColor(edge, style);
     const lineStroke = LINE_STROKES[style.line];
     const options: RoughOptions = {
       seed: seedFrom(`${edge.from.name}->${edge.spec.target}:${edge.spec.label ?? ''}`),
       stroke: color,
-      strokeWidth: this.selectedEdges.includes(edge) ? 2.2 : 1.5,
+      strokeWidth: EDGE_LINE_WIDTH,
       roughness: this.roughnessFor(EDGE_ROUGHNESS),
       bowing: 0.4,
       disableMultiStroke: lineStroke.singlePass,
@@ -290,8 +312,29 @@ export class ScenePainter {
     this.ctx.lineCap = EDGE_LINE_CAP;
     this.rough.curve(geometry.through.map((point) => [point.x, point.y] as [number, number]), options);
     this.ctx.restore();
-    this.drawArrowhead(style.endHead, edgePathApproach(geometry.path, ARROWHEAD_TANGENT_BACKOFF), edgeEnd(geometry), color);
-    this.drawArrowhead(style.startHead, edgePathDeparture(geometry.path, ARROWHEAD_TANGENT_BACKOFF), edgeStart(geometry), color);
+    for (const head of arrowheadPlacements(geometry, style)) this.drawArrowhead(head.kind, head.fromPoint, head.tip, color);
+  }
+
+  // Painted under the edge rather than over it, so a selected edge still shows the colour, line
+  // and heads it will be saved with. Smooth rather than rough: it marks where the edge is, not ink.
+  private drawEdgeSelectionHalo(geometry: EdgeGeometry, style: EdgeStyle): void {
+    const { ctx } = this;
+    ctx.save();
+    ctx.globalAlpha = EDGE_SELECTION_HALO_ALPHA;
+    ctx.strokeStyle = canvasPalette.select;
+    ctx.fillStyle = canvasPalette.select;
+    ctx.lineWidth = EDGE_SELECTION_HALO_WIDTH;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    geometry.path.forEach((point, index) => (index === 0 ? ctx.moveTo(point.x, point.y) : ctx.lineTo(point.x, point.y)));
+    for (const head of arrowheadPlacements(geometry, style)) {
+      const outline = arrowheadOutline(head.kind, head.fromPoint, head.tip);
+      if (outline) this.appendArrowheadOutline(outline);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   private drawEdgeLabel(edge: ModelEdge): void {
