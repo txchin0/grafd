@@ -22,6 +22,11 @@ export const EDITOR_COMMANDS = [
 ] as const;
 export type EditorCommand = (typeof EDITOR_COMMANDS)[number];
 
+// The commands a floating editor lets through to the canvas while focus sits on one of its
+// controls rather than in a text field — a shape button just clicked, say. The edit that button
+// made must be undoable from there, and select-all is about the canvas wherever focus is.
+export const COMMANDS_PAST_EDITOR_CONTROLS: ReadonlySet<EditorCommand> = new Set(['undo', 'redo', 'select-all']);
+
 // `key` is compared lowercased. A modifier left out matches either way.
 interface KeyBinding {
   key: string;

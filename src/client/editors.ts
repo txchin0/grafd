@@ -29,6 +29,7 @@ import type { LinkContext } from './reference-link.js';
 import { createArrowheadPicker, createColorSwatches, createLineStylePicker, createShapePicker } from './visual-pickers.js';
 import type { EdgeStyle, EdgeStylePatch } from '../shared/canvas-edge-style.js';
 import { refuseReservedNameCharacters } from './name-input.js';
+import { COMMANDS_PAST_EDITOR_CONTROLS, commandForKey } from './editor-commands.js';
 
 export interface EditorContext {
   view: CanvasView;
@@ -710,13 +711,11 @@ export function createEditors(context: EditorContext): Editors {
     context.applyEditNow(edge.from, () => FlowDoc.deleteEdge(edge));
   });
 
-  // Undo and redo still reach the app: after a click on a shape or colour button, focus stays on
-  // that button, and the edit it just made must be undoable from there. Text fields keep their
-  // own undo — the app's handler ignores keys typed into them.
+  // Text fields keep their own undo and select-all — the app's handler ignores keys typed into them.
   for (const editorElement of [elements.nodeEditor, elements.edgeEditor]) {
     editorElement.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') closeAll();
-      if (!isHistoryShortcut(event)) event.stopPropagation();
+      if (!reachesCanvasPastEditor(event)) event.stopPropagation();
     });
   }
 
@@ -747,7 +746,7 @@ export function createEditors(context: EditorContext): Editors {
   };
 }
 
-function isHistoryShortcut(event: KeyboardEvent): boolean {
-  const key = event.key.toLowerCase();
-  return (event.ctrlKey || event.metaKey) && (key === 'z' || key === 'y');
+function reachesCanvasPastEditor(event: KeyboardEvent): boolean {
+  const command = commandForKey(event);
+  return command !== null && COMMANDS_PAST_EDITOR_CONTROLS.has(command);
 }

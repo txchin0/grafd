@@ -402,11 +402,25 @@ function isOutsideHelp(target: EventTarget | null): boolean {
   return !elements.helpOverlay.contains(target) && !elements.helpToggle.contains(target);
 }
 
+// A checkbox or slider with focus types nothing, so keys pressed there are still the app's.
+const TEXT_ENTRY_INPUT_TYPES: ReadonlySet<string> = new Set(['text', 'search', 'url', 'tel', 'email', 'password', 'number']);
+
 function isTypingTarget(element: EventTarget | null): element is HTMLInputElement | HTMLTextAreaElement {
-  return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
+  if (element instanceof HTMLTextAreaElement) return true;
+  return element instanceof HTMLInputElement && TEXT_ENTRY_INPUT_TYPES.has(element.type);
+}
+
+// The browser's own select-all highlights every word of the page chrome, which Ctrl+A never means
+// here outside a text field — whichever handler ends up with the key, even one that swallows it
+// before it bubbles to the app.
+function preventPageSelectAll(): void {
+  window.addEventListener('keydown', (event) => {
+    if (commandForKey(event) === 'select-all' && !isTypingTarget(event.target)) event.preventDefault();
+  }, true);
 }
 
 function wireKeyboard(): void {
+  preventPageSelectAll();
   window.addEventListener('keydown', (event) => {
     const modal = openModal();
 

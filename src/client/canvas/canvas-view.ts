@@ -2823,8 +2823,6 @@ export class CanvasView {
     return drawing.model.visuals?.drawingGroupOf(drawing.id) ?? [drawing.id];
   }
 
-  // Selects every drawing grouped with one already selected — after a grouping changes what
-  // belongs together, the selection follows it.
   // Everything a selection can hold in the graph on screen: its nodes (an unfolded frame brings
   // what is inside it along), its regions, and every drawing not already riding in a selected
   // frame. Edges are left to the nodes they belong to, which every edit of a selection follows.
@@ -2841,6 +2839,8 @@ export class CanvasView {
     this.requestRender();
   }
 
+  // Selects every drawing grouped with one already selected — after a grouping changes what
+  // belongs together, the selection follows it.
   holdWholeGroups(): void {
     const surfaces = this.drawingSurfaces();
     for (const held of [...this.heldDrawings]) {
