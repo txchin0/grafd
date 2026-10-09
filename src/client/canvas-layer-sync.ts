@@ -27,14 +27,17 @@ import {
   flowPathOfCanvasLayer,
   followIdentityChanges,
   nodeShapeOf,
+  nodeTextSizeOf,
   parseCanvasLayer,
   serializeCanvasLayer,
   setNodeShape,
+  setNodeTextSize,
   type CanvasLayer,
   type CapturedRegionVisuals,
   type CapturedVisuals,
   type DocumentIdentities,
   type NodeShape,
+  type NodeTextSize,
 } from '../shared/canvas-layer.js';
 import { edgeStyleOf, setEdgeStyle, type EdgeStyle, type EdgeStylePatch } from '../shared/canvas-edge-style.js';
 import { regionStyleOf, setRegionStyle, type RegionStyle, type RegionStylePatch } from '../shared/canvas-region-style.js';
@@ -50,11 +53,13 @@ export interface CanvasLayerSync {
   // Handed to the edit session as its FlowCommitObserver.
   readonly observer: FlowCommitObserver;
   shapeOf(owner: DocumentOwner, node: FlowNode): NodeShape;
+  textSizeOf(owner: DocumentOwner, node: FlowNode): NodeTextSize;
   edgeStyleOf(owner: DocumentOwner, edge: ModelEdge): EdgeStyle;
   regionStyleOf(owner: DocumentOwner, block: ContextBlock): RegionStyle;
   // Standalone visual edits, each one undoable action that writes only the layer. False when
   // there was no layer to edit (still loading, or unreadable) or nothing to key the edit by.
   setShape(owner: DocumentOwner, node: FlowNode, shape: NodeShape): boolean;
+  setTextSize(owner: DocumentOwner, node: FlowNode, textSize: NodeTextSize): boolean;
   setEdgeStyle(owner: DocumentOwner, edge: ModelEdge, patch: EdgeStylePatch): boolean;
   setRegionStyle(owner: DocumentOwner, block: ContextBlock, patch: RegionStylePatch): boolean;
   // Drawing edits, each its own undoable action — or part of the one already open, so a stroke
@@ -130,6 +135,11 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
   function setShape(owner: DocumentOwner, node: FlowNode, shape: NodeShape): boolean {
     const nodeId = node.id;
     return nodeId != null && editLayer(owner.path, (layer) => setNodeShape(layer, nodeId, shape));
+  }
+
+  function setTextSize(owner: DocumentOwner, node: FlowNode, textSize: NodeTextSize): boolean {
+    const nodeId = node.id;
+    return nodeId != null && editLayer(owner.path, (layer) => setNodeTextSize(layer, nodeId, textSize));
   }
 
   function setEdgeStyleOf(owner: DocumentOwner, edge: ModelEdge, patch: EdgeStylePatch): boolean {
@@ -231,9 +241,11 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
   return {
     observer,
     shapeOf: (owner, node) => nodeShapeOf(layers.layerFor(owner.path), node.id),
+    textSizeOf: (owner, node) => nodeTextSizeOf(layers.layerFor(owner.path), node.id),
     edgeStyleOf: (owner, edge) => edgeStyleOf(layers.layerFor(owner.path), edgeLayerKey(owner.doc, edge), edge.kind),
     regionStyleOf: (owner, block) => regionStyleOf(layers.layerFor(owner.path), block.name),
     setShape,
+    setTextSize,
     setEdgeStyle: setEdgeStyleOf,
     setRegionStyle: setRegionStyleOf,
     editDrawings,

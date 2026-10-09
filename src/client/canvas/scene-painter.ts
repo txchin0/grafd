@@ -24,7 +24,7 @@ import { canvasPalette, resolveLayerColor } from '../theme.js';
 import type { HiddenCanvasTitles } from './canvas-view.js';
 import type { Arrowhead, EdgeStyle, LineStyle } from '../../shared/canvas-edge-style.js';
 import { regionFillColorOf, type RegionFillPattern, type RegionStyle } from '../../shared/canvas-region-style.js';
-import { edgeStyleIn, regionStyleIn } from '../model-visuals.js';
+import { edgeStyleIn, nodeTextSizeIn, regionStyleIn } from '../model-visuals.js';
 import { arrowheadIsFilled, arrowheadOutline, type ArrowheadOutline } from './arrowheads.js';
 import { edgeEnd, edgePathApproach, edgePathDeparture, edgeStart, type EdgeGeometry } from './edge-path.js';
 import {
@@ -44,16 +44,14 @@ import { canvasLineMeasurer, drawingAsCarried } from './text-drawing-layout.js';
 import { BADGE_DIAMETER, BADGE_SYMBOLS, nodeBadges } from './node-badges.js';
 import { outlinePathData, shapeOutline, shapeTextBox, type ShapeOutline } from './node-shapes.js';
 import {
-  DESCRIPTION_FIRST_LINE_NUDGE,
-  DESCRIPTION_LINE_HEIGHT,
   FRAME_TITLE_LEFT,
   FRAME_TITLE_MIDDLE_Y,
   FRAME_TITLE_RIGHT_INSET,
-  TITLE_LINE_HEIGHT,
   descriptionFont,
   frameTitleFont,
   handFontAt,
   layOutNodeText,
+  nodeTypography,
   regionLabelBand,
   titleFont,
 } from './node-metrics.js';
@@ -575,30 +573,31 @@ export class ScenePainter {
 
   private drawNodeText(model: FlowModel, node: FlowNode, rect: Rect): void {
     const { ctx } = this;
-    const layout = layOutNodeText(ctx, node, rect, this.expansions.descriptionFor(node, model.sourcePath));
+    const typography = nodeTypography(nodeTextSizeIn(model, node));
+    const layout = layOutNodeText(ctx, node, rect, this.expansions.descriptionFor(node, model.sourcePath), typography);
     const centerX = rect.x + rect.w / 2;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
     let lineY = layout.firstLineMiddleY;
     if (!this.titleIsHidden(node)) {
-      ctx.font = titleFont();
+      ctx.font = titleFont(typography);
       ctx.fillStyle = canvasPalette.ink;
       for (const line of layout.titleLines) {
         ctx.fillText(line, centerX, lineY, layout.maxWidth);
-        lineY += TITLE_LINE_HEIGHT;
+        lineY += typography.titleLineHeight;
       }
     } else {
-      lineY += layout.titleLines.length * TITLE_LINE_HEIGHT;
+      lineY += layout.titleLines.length * typography.titleLineHeight;
     }
 
     if (layout.descriptionLines.length) {
-      lineY += DESCRIPTION_FIRST_LINE_NUDGE;
-      ctx.font = descriptionFont();
+      lineY += typography.descriptionFirstLineNudge;
+      ctx.font = descriptionFont(typography);
       ctx.fillStyle = canvasPalette.muted;
       for (const line of layout.descriptionLines) {
         ctx.fillText(line, centerX, lineY, layout.maxWidth);
-        lineY += DESCRIPTION_LINE_HEIGHT;
+        lineY += typography.descriptionLineHeight;
       }
     }
   }

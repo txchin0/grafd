@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { parseFlow, type FlowNode } from '../src/shared/flow-format.js';
 import { allNodes, contextBlockNamed } from '../src/client/flow-doc.js';
 import type { Point } from '../src/client/geometry.js';
-import { canvasLayerPathOf } from '../src/shared/canvas-layer.js';
+import { canvasLayerPathOf, type NodeTextSize } from '../src/shared/canvas-layer.js';
 import type { RegionStylePatch } from '../src/shared/canvas-region-style.js';
 import type { RegionTarget } from '../src/client/canvas/canvas-view.js';
 import { createHeadlessEditor, disposeHeadlessEditor, type HeadlessEditor } from './editor-harness.js';
@@ -179,6 +179,43 @@ describe('styling a region', () => {
       .filter((path) => path.endsWith('.canvas.json') && path !== canvasLayerPathOf(FLOW_PATH));
     expect(extractedLayers).toHaveLength(1);
     expect(JSON.parse(editor.workspace.file(extractedLayers[0])!).regions).toEqual({ Session: { color: 'green' } });
+  });
+});
+
+describe('sizing a node\'s text', () => {
+  function sizeText(editor: HeadlessEditor, name: string, textSize: NodeTextSize): void {
+    const node = allNodes(editor.core.openFlow()!.doc).find((candidate) => candidate.name === name)!;
+    const owner = editor.core.ownerOf(node);
+    editor.core.applyLayerEdit(owner, () => editor.core.layerSync.setTextSize(owner, node, textSize));
+  }
+
+  function titleFontPxOf(editor: HeadlessEditor, name: string): number {
+    const node = allNodes(editor.core.openFlow()!.doc).find((candidate) => candidate.name === name)!;
+    return editor.core.view.titlePlacementOf(node)!.fontPx;
+  }
+
+  it('writes only the canvas layer, as one undo step', async () => {
+    const editor = await openRegionedFlow();
+    const flowBefore = editor.workspace.file(FLOW_PATH);
+
+    sizeText(editor, 'A', 'large');
+    await editor.settle();
+    expect(JSON.parse(editor.workspace.file(canvasLayerPathOf(FLOW_PATH))!).nodes).toEqual({ 'a-1': { textSize: 'large' } });
+    expect(editor.workspace.file(FLOW_PATH)).toBe(flowBefore);
+
+    editor.core.undo();
+    await editor.settle();
+    expect(editor.workspace.file(canvasLayerPathOf(FLOW_PATH))).toBeNull();
+  });
+
+  it('gives the inline title editor the font the title is drawn at', async () => {
+    const editor = await openRegionedFlow();
+    const mediumPx = titleFontPxOf(editor, 'A');
+
+    sizeText(editor, 'A', 'x-large');
+    await editor.settle();
+    expect(titleFontPxOf(editor, 'A')).toBeGreaterThan(mediumPx);
+    expect(titleFontPxOf(editor, 'B')).toBe(mediumPx);
   });
 });
 

@@ -31,6 +31,12 @@ export const NODE_SHAPES = ['rectangle', 'rounded', 'ellipse', 'diamond', 'hexag
 export type NodeShape = (typeof NODE_SHAPES)[number];
 export const DEFAULT_NODE_SHAPE: NodeShape = 'rectangle';
 
+// Named presets rather than pixel sizes: each scales the node's whole text block, so the
+// proportions between title and description hold at every size.
+export const NODE_TEXT_SIZES = ['small', 'medium', 'large', 'x-large'] as const;
+export type NodeTextSize = (typeof NODE_TEXT_SIZES)[number];
+export const DEFAULT_NODE_TEXT_SIZE: NodeTextSize = 'medium';
+
 // Named slots rather than colours: each theme defines what a slot looks like, so a coloured
 // edge or drawing stays legible in every theme. A `#rrggbb` value is accepted as an escape hatch.
 export const LAYER_COLOR_SLOTS = ['red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple', 'gray'] as const;
@@ -39,7 +45,7 @@ const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 
 // Entries keep every field they were read with, known or not, so a layer written by a newer
 // editor survives a save by an older one. The typed readers below validate what they read.
-export type NodeVisual = { shape?: unknown } & Record<string, unknown>;
+export type NodeVisual = { shape?: unknown; textSize?: unknown } & Record<string, unknown>;
 export type EdgeVisual = { color?: unknown } & Record<string, unknown>;
 export type RegionVisual = Record<string, unknown>;
 // One entry of the `drawings` list, kept whole; canvas-drawings.ts reads the kinds it knows.
@@ -91,6 +97,10 @@ export function flowPathOfCanvasLayer(layerPath: string): string {
 
 export function isNodeShape(value: unknown): value is NodeShape {
   return (NODE_SHAPES as readonly unknown[]).includes(value);
+}
+
+export function isNodeTextSize(value: unknown): value is NodeTextSize {
+  return (NODE_TEXT_SIZES as readonly unknown[]).includes(value);
 }
 
 export function isLayerColorSlot(value: unknown): value is LayerColorSlot {
@@ -219,6 +229,17 @@ export function nodeShapeOf(layer: CanvasLayer | null, nodeId: string | null): N
 // The default shape is never written; clearing the last field of an entry removes the entry.
 export function setNodeShape(layer: CanvasLayer, nodeId: string, shape: NodeShape | null): void {
   setEntryField(layer.nodes, nodeId, 'shape', shape === DEFAULT_NODE_SHAPE ? null : shape);
+}
+
+export function nodeTextSizeOf(layer: CanvasLayer | null, nodeId: string | null): NodeTextSize {
+  if (!layer || nodeId == null) return DEFAULT_NODE_TEXT_SIZE;
+  const textSize = layer.nodes[nodeId]?.textSize;
+  return isNodeTextSize(textSize) ? textSize : DEFAULT_NODE_TEXT_SIZE;
+}
+
+// Like the shape, the default size is never written.
+export function setNodeTextSize(layer: CanvasLayer, nodeId: string, textSize: NodeTextSize | null): void {
+  setEntryField(layer.nodes, nodeId, 'textSize', textSize === DEFAULT_NODE_TEXT_SIZE ? null : textSize);
 }
 
 // The one way an entry is edited, whichever module owns its fields: clearing its last field

@@ -1,12 +1,14 @@
 // The canvas-layer controls in the node, edge and region editors and the draw tool's pen: rows of
-// shape buttons, colour swatches, line styles, arrowheads, fill patterns and stroke widths. Each is a one-click choice that takes effect
+// shape and text size buttons, colour swatches, line styles, arrowheads, fill patterns and stroke widths. Each is a one-click choice that takes effect
 // immediately, like a checkbox, and is refilled whenever its owner is.
 
 import {
   LAYER_COLOR_SLOTS,
   NODE_SHAPES,
+  NODE_TEXT_SIZES,
   isLayerColorSlot,
   type NodeShape,
+  type NodeTextSize,
 } from '../shared/canvas-layer.js';
 import { ARROWHEADS, LINE_STYLES, type Arrowhead, type LineStyle } from '../shared/canvas-edge-style.js';
 import { REGION_FILL_PATTERNS, type RegionFillPattern } from '../shared/canvas-region-style.js';
@@ -14,6 +16,7 @@ import type { Rect } from '../shared/flow-format.js';
 import { STROKE_LINE_WIDTHS, STROKE_WIDTHS, type StrokeWidth } from '../shared/canvas-drawings.js';
 import { arrowheadIsFilled, arrowheadOutline, arrowheadPathData } from './canvas/arrowheads.js';
 import { outlinePathData, shapeOutline } from './canvas/node-shapes.js';
+import { NODE_TEXT_SCALES } from './canvas/node-metrics.js';
 import { layerColorSlotToken } from './theme.js';
 
 export interface ChoiceRow<Choice> {
@@ -83,6 +86,23 @@ const SHAPE_LABELS: Record<NodeShape, string> = {
   parallelogram: 'Parallelogram',
   cylinder: 'Cylinder',
 };
+
+const TEXT_SIZE_LABELS: Record<NodeTextSize, string> = {
+  small: 'Small text',
+  medium: 'Medium text',
+  large: 'Large text',
+  'x-large': 'Extra-large text',
+};
+
+// The letter each text size icon shows, at the medium size; each icon scales it like the canvas
+// scales the node's text. It sits on a shared baseline so the sizes read as a row of steps.
+const TEXT_SIZE_ICON_LETTER = 'A';
+const TEXT_SIZE_ICON_MEDIUM_PX = 10;
+const TEXT_SIZE_ICON_BASELINE_INSET = 2;
+
+export function createTextSizePicker(container: HTMLElement, pick: (textSize: NodeTextSize) => void): ChoiceRow<NodeTextSize> {
+  return createIconChoiceRow(container, NODE_TEXT_SIZES, (textSize) => TEXT_SIZE_LABELS[textSize], textSizeIcon, pick);
+}
 
 export function createShapePicker(container: HTMLElement, pick: (shape: NodeShape) => void): ChoiceRow<NodeShape> {
   return createIconChoiceRow(container, NODE_SHAPES, (shape) => SHAPE_LABELS[shape], shapeIcon, pick);
@@ -255,6 +275,18 @@ function shapeIcon(shape: NodeShape): SVGSVGElement {
     path.setAttribute('d', data);
     svg.append(path);
   }
+  return svg;
+}
+
+function textSizeIcon(textSize: NodeTextSize): SVGSVGElement {
+  const svg = iconSvg();
+  const letter = document.createElementNS(SVG_NAMESPACE, 'text');
+  letter.setAttribute('x', String(ICON_SIZE.w / 2));
+  letter.setAttribute('y', String(ICON_SIZE.h - TEXT_SIZE_ICON_BASELINE_INSET));
+  letter.setAttribute('text-anchor', 'middle');
+  letter.setAttribute('font-size', String(TEXT_SIZE_ICON_MEDIUM_PX * NODE_TEXT_SCALES[textSize]));
+  letter.textContent = TEXT_SIZE_ICON_LETTER;
+  svg.append(letter);
   return svg;
 }
 

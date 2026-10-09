@@ -82,7 +82,7 @@ When editing a `.flow` file:
 
 ### Canvas Layer Files
 
-Every visual style — a node's shape, an edge's colour, line style, arrowheads and bend, a region's colour and background, a freehand drawing, free text written on the canvas, a group of drawings, anything else the editor lets a user decorate a graph with — is kept out of the `.flow`, in a JSON file beside it named after it with `.canvas.json` appended:
+Every visual style — a node's shape and text size, an edge's colour, line style, arrowheads and bend, a region's colour and background, a freehand drawing, free text written on the canvas, a group of drawings, anything else the editor lets a user decorate a graph with — is kept out of the `.flow`, in a JSON file beside it named after it with `.canvas.json` appended:
 
 ```
 auth/login.flow               # the graph: meaning, identity, layout

@@ -11,10 +11,12 @@ import {
   followIdentityChanges,
   isCanvasLayerPath,
   nodeShapeOf,
+  nodeTextSizeOf,
   onErrorEdgeKey,
   parseCanvasLayer,
   serializeCanvasLayer,
   setNodeShape,
+  setNodeTextSize,
   type CanvasLayer,
 } from '../src/shared/canvas-layer.js';
 import { parseFlow, setProp, type FlowDocument, type FlowNode } from '../src/shared/flow-format.js';
@@ -97,6 +99,20 @@ describe('parse and serialize', () => {
     setNodeShape(layer, 'a', 'ellipse');
     setNodeShape(layer, 'a', null);
     expect(serializeCanvasLayer(layer)).toBeNull();
+  });
+
+  it('never writes the default text size, keeps a shape beside a size, and validates what it reads', () => {
+    const layer = emptyCanvasLayer();
+    setNodeTextSize(layer, 'a', 'medium');
+    expect(layer.nodes).toEqual({});
+    setNodeShape(layer, 'a', 'ellipse');
+    setNodeTextSize(layer, 'a', 'x-large');
+    expect(layer.nodes).toEqual({ a: { shape: 'ellipse', textSize: 'x-large' } });
+    setNodeTextSize(layer, 'a', null);
+    expect(layer.nodes).toEqual({ a: { shape: 'ellipse' } });
+    layer.nodes.b = { textSize: 40 };
+    expect(nodeTextSizeOf(layer, 'b')).toBe('medium');
+    expect(nodeTextSizeOf(null, 'a')).toBe('medium');
   });
 
   it('reads anything that is not a JSON object as an empty layer', () => {

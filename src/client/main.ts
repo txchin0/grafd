@@ -214,6 +214,11 @@ const editors: Editors = createEditors({
     const owner = core.ownerOf(node);
     core.applyLayerEdit(owner, () => core.layerSync.setShape(owner, node, shape));
   },
+  textSizeOf: (node) => core.layerSync.textSizeOf(core.ownerOf(node), node),
+  applyTextSizeEdit: (node, textSize) => {
+    const owner = core.ownerOf(node);
+    core.applyLayerEdit(owner, () => core.layerSync.setTextSize(owner, node, textSize));
+  },
   edgeStyleOf: (edge) => core.layerSync.edgeStyleOf(core.ownerOf(edge.from), edge),
   applyEdgeStyleEdit: core.applyEdgeStyleEdit,
   regionStyleOf: (region) => core.layerSync.regionStyleOf(core.contextOps.ownerOfRegion(region), region.block),

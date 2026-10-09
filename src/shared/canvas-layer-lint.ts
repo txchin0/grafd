@@ -7,10 +7,12 @@ import {
   documentIdentities,
   isLayerColor,
   isNodeShape,
+  isNodeTextSize,
   parseCanvasLayer,
   parseJsonObject,
   LAYER_COLOR_SLOTS,
   NODE_SHAPES,
+  NODE_TEXT_SIZES,
   type CanvasLayer,
 } from './canvas-layer.js';
 import {
@@ -55,6 +57,9 @@ export function lintCanvasLayer(layerText: string, flowText: string | null): Dia
   for (const [nodeId, visual] of Object.entries(layer.nodes)) {
     if (visual.shape !== undefined && !isNodeShape(visual.shape)) {
       diagnostics.push(warning('unknown-node-shape', lineOf(nodeId), `Unknown shape ${JSON.stringify(visual.shape)}; the node is drawn as a rectangle. Shapes: ${NODE_SHAPES.join(', ')}.`));
+    }
+    if (visual.textSize !== undefined && !isNodeTextSize(visual.textSize)) {
+      diagnostics.push(warning('unknown-node-text-size', lineOf(nodeId), `Unknown text size ${JSON.stringify(visual.textSize)}; the node's text is drawn at medium. Sizes: ${NODE_TEXT_SIZES.join(', ')}.`));
     }
   }
   for (const [edgeKey, visual] of Object.entries(layer.edges)) {

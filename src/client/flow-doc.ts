@@ -33,7 +33,7 @@ import {
   type Rect,
   type Reference,
 } from '../shared/flow-format.js';
-import type { NodeShape } from '../shared/canvas-layer.js';
+import type { NodeShape, NodeTextSize } from '../shared/canvas-layer.js';
 import type { EdgeKind, EdgeStyle } from '../shared/canvas-edge-style.js';
 import type { RegionStyle } from '../shared/canvas-region-style.js';
 import { drawingBounds, type CanvasDrawing } from '../shared/canvas-drawings.js';
@@ -121,6 +121,7 @@ export interface FlowModel {
 
 export interface ModelVisuals {
   shapeOf(node: FlowNode): NodeShape;
+  textSizeOf(node: FlowNode): NodeTextSize;
   edgeStyleOf(edge: ModelEdge): EdgeStyle;
   regionStyleOf(block: ContextBlock): RegionStyle;
   // The drawings made in this model's graph scope, in its coordinates, oldest first.

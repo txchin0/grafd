@@ -51,6 +51,11 @@ describe('lintCanvasLayer', () => {
     expect(text.split('\n')[diagnostics[0].line - 1]).toContain(START);
   });
 
+  it('passes a known text size and warns about an unknown one', () => {
+    expect(rulesOf(layerText({ nodes: { [START]: { textSize: 'large' } } }))).toEqual([]);
+    expect(rulesOf(layerText({ nodes: { [START]: { textSize: 'huge' } } }))).toEqual(['warning unknown-node-text-size']);
+  });
+
   it('passes an edge drawn with a line style, heads at both ends and a bend', () => {
     const edge = { line: 'dotted', startHead: 'dot', endHead: 'triangle', bend: [0.5, -0.2] };
     expect(rulesOf(layerText({ edges: { [EDGE_KEY]: edge } }))).toEqual([]);

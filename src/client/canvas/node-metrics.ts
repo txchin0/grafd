@@ -5,16 +5,28 @@
 // band with text, so the two must agree exactly or the overlay drifts off the ink. Keeping
 // the font strings and the wrapping in one place is what stops them from diverging.
 
+import type { NodeTextSize } from '../../shared/canvas-layer.js';
 import type { FlowNode, Rect } from '../../shared/flow-format.js';
 import { handFontFamily } from '../canvas-font.js';
 
 export const NODE_TEXT_SIDE_PADDING = 13;
+// The medium text size; every other size scales all of these together.
 export const TITLE_FONT_PX = 15;
 export const TITLE_LINE_HEIGHT = 20;
-export const DESCRIPTION_LINE_HEIGHT = 16;
+const DESCRIPTION_FONT_PX = 12.5;
+const DESCRIPTION_LINE_HEIGHT = 16;
+const TITLE_DESCRIPTION_GAP = 6;
 // Both text runs are drawn on a middle baseline, so the first description line sits a little
 // tighter under the title than the block-height gap suggests.
-export const DESCRIPTION_FIRST_LINE_NUDGE = 4;
+const DESCRIPTION_FIRST_LINE_NUDGE = 4;
+
+export const NODE_TEXT_SCALES: Record<NodeTextSize, number> = {
+  small: 0.8,
+  medium: 1,
+  large: 1.3,
+  'x-large': 1.7,
+};
+
 export const FRAME_TITLE_FONT_PX = 13;
 export const FRAME_TITLE_LINE_HEIGHT = 18;
 export const FRAME_TITLE_LEFT = 12;
@@ -24,17 +36,37 @@ export const FRAME_TITLE_RIGHT_INSET = 64;
 export const REGION_LABEL_RIGHT_INSET = 16;
 
 const TITLE_MAX_LINES = 2;
-const DESCRIPTION_FONT_PX = 12.5;
 const DESCRIPTION_MAX_LINES = 4;
-const TITLE_DESCRIPTION_GAP = 6;
 const FRAME_TITLE_HIT_PADDING = 6;
 
-export function titleFont(): string {
-  return `600 ${TITLE_FONT_PX}px ${handFontFamily()}`;
+// A node's text metrics at one text size.
+export interface NodeTypography {
+  titleFontPx: number;
+  titleLineHeight: number;
+  descriptionFontPx: number;
+  descriptionLineHeight: number;
+  titleDescriptionGap: number;
+  descriptionFirstLineNudge: number;
 }
 
-export function descriptionFont(): string {
-  return `${DESCRIPTION_FONT_PX}px ${handFontFamily()}`;
+export function nodeTypography(size: NodeTextSize): NodeTypography {
+  const scale = NODE_TEXT_SCALES[size];
+  return {
+    titleFontPx: TITLE_FONT_PX * scale,
+    titleLineHeight: TITLE_LINE_HEIGHT * scale,
+    descriptionFontPx: DESCRIPTION_FONT_PX * scale,
+    descriptionLineHeight: DESCRIPTION_LINE_HEIGHT * scale,
+    titleDescriptionGap: TITLE_DESCRIPTION_GAP * scale,
+    descriptionFirstLineNudge: DESCRIPTION_FIRST_LINE_NUDGE * scale,
+  };
+}
+
+export function titleFont(typography: NodeTypography): string {
+  return handFontAt(typography.titleFontPx, 600);
+}
+
+export function descriptionFont(typography: NodeTypography): string {
+  return handFontAt(typography.descriptionFontPx);
 }
 
 export function frameTitleFont(): string {
@@ -47,6 +79,7 @@ export function handFontAt(sizePx: number, weight?: number | string): string {
 }
 
 export interface NodeTextLayout {
+  typography: NodeTypography;
   titleLines: string[];
   descriptionLines: string[];
   maxWidth: number;
@@ -82,37 +115,40 @@ export function layOutNodeText(
   node: FlowNode,
   rect: Rect,
   description: string | null,
+  typography: NodeTypography,
 ): NodeTextLayout {
+  const { titleLineHeight, descriptionLineHeight } = typography;
   const maxWidth = rect.w - 2 * NODE_TEXT_SIDE_PADDING;
 
-  ctx.font = titleFont();
+  ctx.font = titleFont(typography);
   const titleLines = wrapText(ctx, node.name, maxWidth, TITLE_MAX_LINES);
-  ctx.font = descriptionFont();
+  ctx.font = descriptionFont(typography);
   const descriptionLineBudget = Math.max(
     0,
-    Math.floor((rect.h - TITLE_LINE_HEIGHT - titleLines.length * TITLE_LINE_HEIGHT) / DESCRIPTION_LINE_HEIGHT),
+    Math.floor((rect.h - titleLineHeight - titleLines.length * titleLineHeight) / descriptionLineHeight),
   );
   const descriptionLines = description
     ? wrapText(ctx, description, maxWidth, Math.min(DESCRIPTION_MAX_LINES, descriptionLineBudget))
     : [];
 
-  const blockHeight = titleLines.length * TITLE_LINE_HEIGHT
-    + (descriptionLines.length ? TITLE_DESCRIPTION_GAP + descriptionLines.length * DESCRIPTION_LINE_HEIGHT : 0);
+  const blockHeight = titleLines.length * titleLineHeight
+    + (descriptionLines.length ? typography.titleDescriptionGap + descriptionLines.length * descriptionLineHeight : 0);
 
   return {
+    typography,
     titleLines,
     descriptionLines,
     maxWidth,
-    firstLineMiddleY: rect.y + rect.h / 2 - blockHeight / 2 + TITLE_LINE_HEIGHT / 2,
+    firstLineMiddleY: rect.y + rect.h / 2 - blockHeight / 2 + titleLineHeight / 2,
   };
 }
 
 export function titleBandOf(rect: Rect, layout: NodeTextLayout): Rect {
   return {
     x: rect.x + NODE_TEXT_SIDE_PADDING,
-    y: layout.firstLineMiddleY - TITLE_LINE_HEIGHT / 2,
+    y: layout.firstLineMiddleY - layout.typography.titleLineHeight / 2,
     w: layout.maxWidth,
-    h: Math.max(1, layout.titleLines.length) * TITLE_LINE_HEIGHT,
+    h: Math.max(1, layout.titleLines.length) * layout.typography.titleLineHeight,
   };
 }
 

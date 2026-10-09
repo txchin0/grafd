@@ -593,9 +593,10 @@ html, body {
 
 .field-caption { font-size: var(--text-caption); color: var(--muted); }
 
-/* Canvas-layer choices: shape buttons, edge and region colour swatches, line styles, arrowheads
-   and region fill patterns. */
+/* Canvas-layer choices: shape and text size buttons, edge and region colour swatches, line styles,
+   arrowheads and region fill patterns. */
 #ne-shape-field,
+#ne-text-size-field,
 #ee-color-field,
 #ee-line-field,
 #ee-heads-field,
@@ -604,6 +605,7 @@ html, body {
 #ee-heads-field .choice-row + .choice-row,
 #re-background-field .choice-row + .choice-row { margin-top: 2px; }
 .choice svg .filled { fill: currentColor; }
+.choice svg text { fill: currentColor; stroke: none; font-family: inherit; font-weight: 600; }
 .choice-row { display: flex; flex-wrap: wrap; gap: 4px; }
 .choice {
   display: inline-flex;

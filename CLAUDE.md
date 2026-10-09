@@ -55,8 +55,8 @@ It is editor-owned, ignored by agents apart from `entrypoint` and `flowVersion`,
 through the same read/write path as .flow files.
 
 All styling lives outside the .flow too, in each graph's **canvas layer**
-`<file>.flow.canvas.json` (FLOW-SPEC.md §2.1, §11.5; `src/shared/canvas-layer.ts`): node shapes
-keyed by node `id`, edge colours keyed by a key derived from the edge, region colours and
+`<file>.flow.canvas.json` (FLOW-SPEC.md §2.1, §11.5; `src/shared/canvas-layer.ts`): node shapes and
+text sizes keyed by node `id`, edge colours keyed by a key derived from the edge, region colours and
 backgrounds keyed by the provider's name (unique in its file), freehand strokes and free
 text in a `drawings` list (each filed under the graph scope it was made in — `graph` names the
 block, absent for the body — in that scope's coordinates), groups of things picked up as one (a `groups` list

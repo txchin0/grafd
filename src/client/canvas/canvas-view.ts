@@ -76,13 +76,14 @@ import { BADGE_HIT_RADIUS, nodeBadges, type BadgeHit } from './node-badges.js';
 import { ScenePainter } from './scene-painter.js';
 import {
   FRAME_TITLE_FONT_PX,
-  TITLE_FONT_PX,
   frameTitleBand,
   layOutNodeText,
+  nodeTypography,
   regionLabelBand,
   titleBandOf,
   type NodeTextLayout,
 } from './node-metrics.js';
+import { nodeTextSizeIn } from '../model-visuals.js';
 import {
   applyCombinedMove,
   applyRegionResize,
@@ -2496,7 +2497,8 @@ export class CanvasView {
   }
 
   private layOutNodeText(model: FlowModel, node: FlowNode, rect: Rect): NodeTextLayout {
-    return layOutNodeText(this.ctx, node, rect, this.expansionLayer.descriptionFor(node, model.sourcePath));
+    const typography = nodeTypography(nodeTextSizeIn(model, node));
+    return layOutNodeText(this.ctx, node, rect, this.expansionLayer.descriptionFor(node, model.sourcePath), typography);
   }
 
   // World-space rect and typography of a node's title as drawn, or null when the node is
@@ -2513,10 +2515,11 @@ export class CanvasView {
     const band = expansion
       ? frameTitleBand(this.ctx, node, expansion.frame)
       : titleBandOf(textBox, this.layOutNodeText(model, node, textBox));
+    const titleFontPx = expansion ? FRAME_TITLE_FONT_PX : nodeTypography(nodeTextSizeIn(model, node)).titleFontPx;
 
     return {
       rect: locus ? transformRect(band, locus.transform) : band,
-      fontPx: expansion ? FRAME_TITLE_FONT_PX : TITLE_FONT_PX,
+      fontPx: titleFontPx,
       align: expansion ? 'left' : 'center',
       color: expansion ? canvasPalette.expandStroke : canvasPalette.ink,
       screenScale: this.screenScaleOf(node),

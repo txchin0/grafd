@@ -18,7 +18,7 @@ import {
   type Rect,
   type Reference,
 } from '../shared/flow-format.js';
-import type { NodeShape } from '../shared/canvas-layer.js';
+import type { NodeShape, NodeTextSize } from '../shared/canvas-layer.js';
 import * as FlowDoc from './flow-doc.js';
 import type { ModelEdge } from './flow-doc.js';
 import type { CanvasView, RegionTarget } from './canvas/canvas-view.js';
@@ -33,6 +33,7 @@ import {
   createFillPatternPicker,
   createLineStylePicker,
   createShapePicker,
+  createTextSizePicker,
 } from './visual-pickers.js';
 import type { EdgeStyle, EdgeStylePatch } from '../shared/canvas-edge-style.js';
 import type { RegionStyle, RegionStylePatch } from '../shared/canvas-region-style.js';
@@ -77,6 +78,8 @@ export interface EditorContext {
   renameRegion: RenameRegion;
   shapeOf(node: FlowNode): NodeShape;
   applyShapeEdit(node: FlowNode, shape: NodeShape): void;
+  textSizeOf(node: FlowNode): NodeTextSize;
+  applyTextSizeEdit(node: FlowNode, textSize: NodeTextSize): void;
   edgeStyleOf(edge: ModelEdge): EdgeStyle;
   applyEdgeStyleEdit(edge: ModelEdge, patch: EdgeStylePatch): void;
   regionStyleOf(region: RegionTarget): RegionStyle;
@@ -141,6 +144,7 @@ export function createEditors(context: EditorContext): Editors {
     addDataField: elementById<HTMLButtonElement>('ee-add-field'),
     deleteEdge: elementById<HTMLButtonElement>('ee-delete'),
     shapeChoices: elementById<HTMLDivElement>('ne-shape'),
+    textSizeChoices: elementById<HTMLDivElement>('ne-text-size'),
     colorChoices: elementById<HTMLDivElement>('ee-color'),
     lineChoices: elementById<HTMLDivElement>('ee-line'),
     startHeadChoices: elementById<HTMLDivElement>('ee-start-head'),
@@ -179,6 +183,13 @@ export function createEditors(context: EditorContext): Editors {
     if (!node) return;
     context.applyShapeEdit(node, shape);
     shapePicker.fill(context.shapeOf(node));
+  });
+
+  const textSizePicker = createTextSizePicker(elements.textSizeChoices, (textSize) => {
+    const node = editingNode();
+    if (!node) return;
+    context.applyTextSizeEdit(node, textSize);
+    textSizePicker.fill(context.textSizeOf(node));
   });
 
   const colorSwatches = createColorSwatches(elements.colorChoices, (color) => applyEdgeStyle({ color }));
@@ -285,6 +296,7 @@ export function createEditors(context: EditorContext): Editors {
     fillReadableContexts(node);
     elements.entrypoint.checked = getProp(node, 'entrypoint') === 'true';
     shapePicker.fill(context.shapeOf(node));
+    textSizePicker.fill(context.textSizeOf(node));
     referenceRows.fill(context.referencesOf(node));
     const lacksExpand = !getProp(node, 'expand');
     elements.openExpand.classList.toggle('hidden', lacksExpand);
