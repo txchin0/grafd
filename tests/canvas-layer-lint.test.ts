@@ -22,6 +22,20 @@ describe('lintCanvasLayer', () => {
     expect(rulesOf(layerText({ nodes: { [START]: { shape: 'diamond' } }, edges: { [EDGE_KEY]: { color: 'red' } } }))).toEqual([]);
   });
 
+  it('passes a styled region, and reports one the .flow no longer declares as unused', () => {
+    const flow = `${FLOW}\ncontext: Auth\n  nodes: Start\n`;
+    expect(rulesOf(layerText({ regions: { Auth: { color: 'blue', fillColor: 'gray', fill: 'dots' } } }), flow)).toEqual([]);
+    expect(rulesOf(layerText({ regions: { Gone: { color: 'blue' } } }), flow)).toEqual(['info stale-canvas-entry']);
+  });
+
+  it('warns about a region colour or fill it cannot draw, on the line that sets it', () => {
+    const flow = `${FLOW}\ncontext: Auth\n  nodes: Start\n`;
+    const text = layerText({ edges: { [EDGE_KEY]: { color: 'red' } }, regions: { Auth: { color: 'mauve', fill: 'plaid' } } });
+    const diagnostics = lintCanvasLayer(text, flow);
+    expect(diagnostics.map((diagnostic) => diagnostic.rule)).toEqual(['invalid-region-color', 'unknown-region-fill']);
+    expect(text.split('\n')[diagnostics[0].line - 1]).toContain('"Auth"');
+  });
+
   it('warns about a layer that is not a JSON object', () => {
     expect(rulesOf('{ nope')).toEqual(['warning canvas-layer-unreadable']);
   });

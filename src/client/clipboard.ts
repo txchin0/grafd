@@ -5,13 +5,14 @@
 // which for nodes selected inside an inline-expanded frame is not the open file. Cloning at
 // copy time means later edits to (or deletion of) the originals never disturb a later paste.
 // Regions ride the same groups: a region belongs to the graph scope that declares it, so a
-// paste whose target is a `graph:` block writes the block into that scope. The nodes' canvas
-// visuals are captured with them, positionally, since a copy shares no id with its source.
+// paste whose target is a `graph:` block writes the block into that scope. The canvas visuals of
+// nodes and regions are captured with them, positionally, since a copy shares no id or name with
+// its source.
 // Strokes ride the same groups too, in the same scope coordinates as the nodes beside them, so a
 // paste keeps a stroke where it was drawn relative to them.
 
 import { drawingAnchorPoints, type CarriedDrawings } from '../shared/canvas-drawings.js';
-import type { CapturedVisuals } from '../shared/canvas-layer.js';
+import type { CapturedRegionVisuals, CapturedVisuals } from '../shared/canvas-layer.js';
 import type { ContextBlock, FlowNode } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { Point } from './geometry.js';
@@ -30,10 +31,11 @@ interface ClipboardGroup {
   nodes: FlowNode[];
   regions: ContextBlock[];
   visuals: CapturedVisuals | null;
+  regionVisuals: CapturedRegionVisuals | null;
   drawings: CarriedDrawings;
 }
 
-interface CopiedGroup extends Omit<ClipboardGroup, 'visuals'> {
+interface CopiedGroup extends Omit<ClipboardGroup, 'visuals' | 'regionVisuals'> {
   owner: DocumentOwner;
 }
 
@@ -52,6 +54,9 @@ export interface ClipboardOptions {
   captureVisuals(owner: DocumentOwner, nodes: FlowNode[]): CapturedVisuals | null;
   // Runs inside the mutation that made the copies, so its layer write joins that edit's commit.
   applyCapturedVisuals(owner: DocumentOwner, copies: FlowNode[], visuals: CapturedVisuals | null): void;
+  captureRegionVisuals(owner: DocumentOwner, regions: readonly ContextBlock[]): CapturedRegionVisuals | null;
+  // Like applyCapturedVisuals, runs inside the mutation that made the copies.
+  applyRegionVisuals(owner: DocumentOwner, copies: readonly ContextBlock[], visuals: CapturedRegionVisuals | null): void;
   copyDrawings(selections: DrawingSelection[]): CopiedDrawings[];
   pasteDrawings(target: CreationTarget, drawings: CarriedDrawings, offset: Point): StoredDrawing[];
   // Cut, paste and duplicate each write several documents; this makes each one undo step.
@@ -112,6 +117,7 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
       nodes: FlowDoc.cloneNodesDetached(group.nodes),
       regions: group.regions,
       visuals: options.captureVisuals(group.owner, group.nodes),
+      regionVisuals: options.captureRegionVisuals(group.owner, group.regions),
       drawings: group.drawings,
     }));
     unplacedPasteCount = 0;
@@ -162,7 +168,8 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
       options.applyToDoc(owner, () => {
         const items = FlowDoc.containingItemsForContext(owner.doc, region.block);
         const nested = items !== owner.doc.items;
-        regionCopies.push(...FlowDoc.duplicateContextBlocks(
+        const visuals = options.captureRegionVisuals(owner, [region.block]);
+        const copiesOfRegion = FlowDoc.duplicateContextBlocks(
           items,
           [region.block],
           offset,
@@ -170,7 +177,9 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
           FlowDoc.inheritedContextNames(owner.doc),
           FlowDoc.allContextBlocks(owner.doc).map((block) => block.name),
           nested ? 'before-nodes' : 'end',
-        ));
+        );
+        options.applyRegionVisuals(owner, copiesOfRegion, visuals);
+        regionCopies.push(...copiesOfRegion);
       });
     }
     return { nodes: copies, regions: regionCopies };
@@ -240,7 +249,7 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
         pastedNodes.push(...copies);
         const renamedMembers = new Map(group.nodes.map((source, index) => [source.name, copies[index].name]));
         const nested = items !== owner.doc.items;
-        pastedRegions.push(...FlowDoc.duplicateContextBlocks(
+        const regionCopies = FlowDoc.duplicateContextBlocks(
           items,
           group.regions,
           offset,
@@ -248,7 +257,9 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
           FlowDoc.inheritedContextNames(owner.doc),
           FlowDoc.allContextBlocks(owner.doc).map((block) => block.name),
           nested ? 'before-nodes' : 'end',
-        ));
+        );
+        options.applyRegionVisuals(owner, regionCopies, group.regionVisuals);
+        pastedRegions.push(...regionCopies);
       });
       pastedDrawings.push(...options.pasteDrawings({ owner, scope }, group.drawings, offset));
     }

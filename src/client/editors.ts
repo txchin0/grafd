@@ -1,7 +1,8 @@
-// Floating DOM overlays for editing a node (title, description, shape, advanced properties) and
-// an edge (label, subgraph refinements, colour, data schema). Overlays anchor to canvas geometry
-// and are repositioned after every render. Shape and colour live in the file's canvas layer
-// rather than in the .flow, so they go through their own context calls.
+// Floating DOM overlays for editing a node (title, description, shape, advanced properties), an
+// edge (label, subgraph refinements, colour, data schema) and a region (description, references,
+// colour and background). Overlays anchor to canvas geometry and are repositioned after every
+// render. Shapes, colours and backgrounds live in the file's canvas layer rather than in the
+// .flow, so they go through their own context calls.
 // Field changes mutate the document immediately through the context callbacks; external file
 // updates refresh unfocused fields only, so in-progress typing is never clobbered.
 
@@ -26,8 +27,15 @@ import { createTextDrawingEditor, type TextEditRequest } from './text-drawing-ed
 import { createRegionNameEditor, type RenameRegion } from './region-name-editor.js';
 import { createReferenceRows } from './reference-rows.js';
 import type { LinkContext } from './reference-link.js';
-import { createArrowheadPicker, createColorSwatches, createLineStylePicker, createShapePicker } from './visual-pickers.js';
+import {
+  createArrowheadPicker,
+  createColorSwatches,
+  createFillPatternPicker,
+  createLineStylePicker,
+  createShapePicker,
+} from './visual-pickers.js';
 import type { EdgeStyle, EdgeStylePatch } from '../shared/canvas-edge-style.js';
+import type { RegionStyle, RegionStylePatch } from '../shared/canvas-region-style.js';
 import { refuseReservedNameCharacters } from './name-input.js';
 import { COMMANDS_PAST_EDITOR_CONTROLS, commandForKey } from './editor-commands.js';
 
@@ -71,6 +79,8 @@ export interface EditorContext {
   applyShapeEdit(node: FlowNode, shape: NodeShape): void;
   edgeStyleOf(edge: ModelEdge): EdgeStyle;
   applyEdgeStyleEdit(edge: ModelEdge, patch: EdgeStylePatch): void;
+  regionStyleOf(region: RegionTarget): RegionStyle;
+  applyRegionStyleEdit(region: RegionTarget, patch: RegionStylePatch): void;
   commitText(request: TextEditRequest, text: string): void;
 }
 
@@ -119,6 +129,9 @@ export function createEditors(context: EditorContext): Editors {
     regionAddReference: elementById<HTMLButtonElement>('re-add-reference'),
     regionMembers: elementById<HTMLUListElement>('re-member-list'),
     regionDelete: elementById<HTMLButtonElement>('re-delete'),
+    regionColorChoices: elementById<HTMLDivElement>('re-color'),
+    regionFillColorChoices: elementById<HTMLDivElement>('re-fill-color'),
+    regionFillChoices: elementById<HTMLDivElement>('re-fill'),
     edgeEditor: elementById<HTMLDivElement>('edge-editor'),
     edgeLabel: elementById<HTMLInputElement>('ee-label'),
     edgeInnerSource: elementById<HTMLSelectElement>('ee-inner-source'),
@@ -188,6 +201,27 @@ export function createEditors(context: EditorContext): Editors {
     startHeadPicker.fill(style.startHead);
     endHeadPicker.fill(style.endHead);
     elements.straighten.classList.toggle('hidden', style.bend == null);
+  }
+
+  const regionColorSwatches = createColorSwatches(elements.regionColorChoices, (color) => applyRegionStyle({ color }));
+  const regionFillColorSwatches = createColorSwatches(
+    elements.regionFillColorChoices,
+    (fillColor) => applyRegionStyle({ fillColor }),
+    'Same as the region colour',
+  );
+  const regionFillPicker = createFillPatternPicker(elements.regionFillChoices, (fill) => applyRegionStyle({ fill }));
+
+  function applyRegionStyle(patch: RegionStylePatch): void {
+    if (!editingRegion) return;
+    context.applyRegionStyleEdit(editingRegion, patch);
+    fillRegionStyle(editingRegion);
+  }
+
+  function fillRegionStyle(region: RegionTarget): void {
+    const style = context.regionStyleOf(region);
+    regionColorSwatches.fill(style.color);
+    regionFillColorSwatches.fill(style.fillColor);
+    regionFillPicker.fill(style.fill);
   }
 
   let editingNodeId: string | null = null;
@@ -324,6 +358,7 @@ export function createEditors(context: EditorContext): Editors {
     setUnlessFocused(elements.regionDescription, context.regionDescriptionOf(region));
     regionReferenceRows.fill(context.regionReferencesOf(region));
     fillRegionMembers(region);
+    fillRegionStyle(region);
   }
 
   // A member naming a node that is not in the file is shown as the dangling entry it is rather

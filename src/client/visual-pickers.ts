@@ -1,5 +1,5 @@
-// The canvas-layer controls in the node and edge editors and the draw tool's pen: rows of shape
-// buttons, colour swatches, line styles, arrowheads and stroke widths. Each is a one-click choice that takes effect
+// The canvas-layer controls in the node, edge and region editors and the draw tool's pen: rows of
+// shape buttons, colour swatches, line styles, arrowheads, fill patterns and stroke widths. Each is a one-click choice that takes effect
 // immediately, like a checkbox, and is refilled whenever its owner is.
 
 import {
@@ -9,6 +9,8 @@ import {
   type NodeShape,
 } from '../shared/canvas-layer.js';
 import { ARROWHEADS, LINE_STYLES, type Arrowhead, type LineStyle } from '../shared/canvas-edge-style.js';
+import { REGION_FILL_PATTERNS, type RegionFillPattern } from '../shared/canvas-region-style.js';
+import type { Rect } from '../shared/flow-format.js';
 import { STROKE_LINE_WIDTHS, STROKE_WIDTHS, type StrokeWidth } from '../shared/canvas-drawings.js';
 import { arrowheadIsFilled, arrowheadOutline, arrowheadPathData } from './canvas/arrowheads.js';
 import { outlinePathData, shapeOutline } from './canvas/node-shapes.js';
@@ -57,6 +59,21 @@ const STROKE_WIDTH_LABELS: Record<StrokeWidth, string> = {
   thick: 'Thick stroke',
 };
 
+const FILL_PATTERN_LABELS: Record<RegionFillPattern, string> = {
+  hachure: 'Hatched',
+  'cross-hatch': 'Cross-hatched',
+  dots: 'Dotted',
+  solid: 'Solid',
+  none: 'No background',
+};
+
+// The pattern icons sit inside a dashed outline, the way a region is drawn.
+const FILL_ICON_OUTLINE_DASH = '3 2';
+const FILL_ICON_LINE_GAP = 4.5;
+const FILL_ICON_DOT_GAP = 4;
+const FILL_ICON_DOT_RADIUS = 0.8;
+const FILL_ICON_SOLID_OPACITY = '0.35';
+
 const SHAPE_LABELS: Record<NodeShape, string> = {
   rectangle: 'Rectangle',
   rounded: 'Rounded rectangle',
@@ -74,8 +91,12 @@ export function createShapePicker(container: HTMLElement, pick: (shape: NodeShap
 // Swatches show the slot through its theme token, so they always match what the canvas draws.
 // A hex colour written into the layer by hand has no swatch of its own; while an edge carries
 // one it is shown as an extra, chosen swatch so the editor never misreports the edge as default.
-export function createColorSwatches(container: HTMLElement, pick: (color: string | null) => void): ChoiceRow<string | null> {
-  const defaultSwatch = choiceButton('Default colour', () => pick(null));
+export function createColorSwatches(
+  container: HTMLElement,
+  pick: (color: string | null) => void,
+  defaultLabel = 'Default colour',
+): ChoiceRow<string | null> {
+  const defaultSwatch = choiceButton(defaultLabel, () => pick(null));
   defaultSwatch.classList.add('swatch', 'swatch-default');
   const slotSwatches = LAYER_COLOR_SLOTS.map((slot) => {
     const swatch = choiceButton(slot, () => pick(slot));
@@ -121,6 +142,10 @@ export function createArrowheadPicker(
     (head) => arrowheadIcon(head, end),
     pick,
   );
+}
+
+export function createFillPatternPicker(container: HTMLElement, pick: (pattern: RegionFillPattern) => void): ChoiceRow<RegionFillPattern> {
+  return createIconChoiceRow(container, REGION_FILL_PATTERNS, (pattern) => FILL_PATTERN_LABELS[pattern], fillPatternIcon, pick);
 }
 
 function createIconChoiceRow<Choice extends string>(
@@ -231,4 +256,80 @@ function shapeIcon(shape: NodeShape): SVGSVGElement {
     svg.append(path);
   }
   return svg;
+}
+
+function fillPatternIcon(pattern: RegionFillPattern): SVGSVGElement {
+  const svg = iconSvg();
+  const box = { x: ICON_INSET, y: ICON_INSET, w: ICON_SIZE.w - 2 * ICON_INSET, h: ICON_SIZE.h - 2 * ICON_INSET };
+  const outline = svgRect(box);
+  outline.setAttribute('stroke-dasharray', FILL_ICON_OUTLINE_DASH);
+  svg.append(...fillPatternMarks(pattern, box), outline);
+  return svg;
+}
+
+function fillPatternMarks(pattern: RegionFillPattern, box: Rect): SVGElement[] {
+  switch (pattern) {
+    case 'hachure':
+      return [diagonalLinesPath(box, 1)];
+    case 'cross-hatch':
+      return [diagonalLinesPath(box, 1), diagonalLinesPath(box, -1)];
+    case 'dots':
+      return dotGrid(box);
+    case 'solid':
+      return [solidBox(box)];
+    case 'none':
+      return [];
+  }
+}
+
+// Parallel lines y = slope·x + offset, one every gap of offset, each clipped to the box.
+function diagonalLinesPath(box: Rect, slope: 1 | -1): SVGPathElement {
+  const right = box.x + box.w;
+  const bottom = box.y + box.h;
+  const offsetsAtCorners = [box.x, right].flatMap((x) => [box.y, bottom].map((y) => y - slope * x));
+  const firstOffset = Math.min(...offsetsAtCorners);
+  const lastOffset = Math.max(...offsetsAtCorners);
+  const segments: string[] = [];
+  for (let offset = firstOffset + FILL_ICON_LINE_GAP; offset < lastOffset; offset += FILL_ICON_LINE_GAP) {
+    const xAtTop = (box.y - offset) / slope;
+    const xAtBottom = (bottom - offset) / slope;
+    const fromX = Math.max(box.x, Math.min(xAtTop, xAtBottom));
+    const toX = Math.min(right, Math.max(xAtTop, xAtBottom));
+    if (toX > fromX) segments.push(`M ${fromX} ${slope * fromX + offset} L ${toX} ${slope * toX + offset}`);
+  }
+  const path = document.createElementNS(SVG_NAMESPACE, 'path');
+  path.setAttribute('d', segments.join(' '));
+  return path;
+}
+
+function dotGrid(box: Rect): SVGCircleElement[] {
+  const dots: SVGCircleElement[] = [];
+  for (let y = box.y + FILL_ICON_DOT_GAP / 2; y < box.y + box.h; y += FILL_ICON_DOT_GAP) {
+    for (let x = box.x + FILL_ICON_DOT_GAP / 2; x < box.x + box.w; x += FILL_ICON_DOT_GAP) {
+      const dot = document.createElementNS(SVG_NAMESPACE, 'circle');
+      dot.setAttribute('cx', String(x));
+      dot.setAttribute('cy', String(y));
+      dot.setAttribute('r', String(FILL_ICON_DOT_RADIUS));
+      dot.classList.add('filled');
+      dots.push(dot);
+    }
+  }
+  return dots;
+}
+
+function solidBox(box: Rect): SVGRectElement {
+  const fill = svgRect(box);
+  fill.setAttribute('fill-opacity', FILL_ICON_SOLID_OPACITY);
+  fill.setAttribute('stroke', 'none');
+  fill.classList.add('filled');
+  return fill;
+}
+
+function svgRect(box: Rect): SVGRectElement {
+  const rect = document.createElementNS(SVG_NAMESPACE, 'rect');
+  rect.setAttribute('x', String(box.x));
+  rect.setAttribute('y', String(box.y));
+  rect.setAttribute('width', String(box.w));
+  rect.setAttribute('height', String(box.h));
+  return rect;
 }

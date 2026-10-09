@@ -593,12 +593,16 @@ html, body {
 
 .field-caption { font-size: var(--text-caption); color: var(--muted); }
 
-/* Canvas-layer choices: shape buttons, edge colour swatches, line styles and arrowheads. */
+/* Canvas-layer choices: shape buttons, edge and region colour swatches, line styles, arrowheads
+   and region fill patterns. */
 #ne-shape-field,
 #ee-color-field,
 #ee-line-field,
-#ee-heads-field { display: flex; flex-direction: column; gap: 4px; }
-#ee-heads-field .choice-row + .choice-row { margin-top: 2px; }
+#ee-heads-field,
+#re-color-field,
+#re-background-field { display: flex; flex-direction: column; gap: 4px; }
+#ee-heads-field .choice-row + .choice-row,
+#re-background-field .choice-row + .choice-row { margin-top: 2px; }
 .choice svg .filled { fill: currentColor; }
 .choice-row { display: flex; flex-wrap: wrap; gap: 4px; }
 .choice {
@@ -629,6 +633,11 @@ html, body {
 #draw-style { display: flex; gap: 8px; align-items: center; }
 #draw-style[hidden] { display: none; }
 #draw-style .swatch-default::after { background: var(--canvas-ink); }
+
+/* A region's default colour is the theme's; its default background follows the region's colour,
+   so that swatch is a hollow ring rather than a colour of its own. */
+#re-color .swatch-default::after { background: var(--canvas-region-stroke); }
+#re-fill-color .swatch-default::after { background: transparent; border: 1.5px dashed var(--muted); box-sizing: border-box; }
 
 /* Read-only lines in an editor: what the file already says, and why an edit was refused. */
 .field-note { font-size: var(--text-caption); color: var(--muted); margin: 0; }

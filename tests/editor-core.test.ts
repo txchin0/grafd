@@ -7,6 +7,8 @@ import { parseFlow, type FlowNode } from '../src/shared/flow-format.js';
 import { allNodes, contextBlockNamed } from '../src/client/flow-doc.js';
 import type { Point } from '../src/client/geometry.js';
 import { canvasLayerPathOf } from '../src/shared/canvas-layer.js';
+import type { RegionStylePatch } from '../src/shared/canvas-region-style.js';
+import type { RegionTarget } from '../src/client/canvas/canvas-view.js';
 import { createHeadlessEditor, disposeHeadlessEditor, type HeadlessEditor } from './editor-harness.js';
 
 const FLOW_PATH = 'main.flow';
@@ -27,6 +29,26 @@ A
 B
   id: b-1
   pos: 800, 200, 200, 88
+`;
+
+// A host node expanding into a local graph block that declares a region of its own.
+const NESTED_REGION_FLOW = `---
+name: Shop
+---
+
+Checkout
+  id: checkout-1
+  pos: 200, 200, 200, 88
+  expand: Checkout
+
+graph: Checkout
+  context: Session
+    nodes:
+      - Pay
+
+  Pay
+    id: pay-1
+    pos: 0, 0, 200, 88
 `;
 
 afterEach(() => disposeHeadlessEditor());
@@ -93,6 +115,70 @@ describe('deleting a node from its context menu', () => {
 
     expect(nodeOnDisk(editor, 'A')).toBeUndefined();
     expect(membersOnDisk(editor, 'Auth')).toEqual([]);
+  });
+});
+
+function regionTarget(editor: HeadlessEditor, name: string): RegionTarget {
+  const flow = editor.core.openFlow()!;
+  return { block: contextBlockNamed(flow.doc, name)!, doc: flow.doc, path: flow.path };
+}
+
+function styleRegion(editor: HeadlessEditor, name: string, patch: RegionStylePatch): void {
+  const region = regionTarget(editor, name);
+  const owner = editor.core.contextOps.ownerOfRegion(region);
+  editor.core.applyLayerEdit(owner, () => editor.core.layerSync.setRegionStyle(owner, region.block, patch));
+}
+
+function regionsOnDisk(editor: HeadlessEditor, flowPath = FLOW_PATH): Record<string, unknown> | undefined {
+  const text = editor.workspace.file(canvasLayerPathOf(flowPath));
+  return text == null ? undefined : JSON.parse(text).regions;
+}
+
+describe('styling a region', () => {
+  it('writes only the canvas layer, as one undo step', async () => {
+    const editor = await openRegionedFlow();
+    const flowBefore = editor.workspace.file(FLOW_PATH);
+
+    styleRegion(editor, 'Auth', { color: 'blue', fill: 'cross-hatch' });
+    await editor.settle();
+    expect(regionsOnDisk(editor)).toEqual({ Auth: { color: 'blue', fill: 'cross-hatch' } });
+    expect(editor.workspace.file(FLOW_PATH)).toBe(flowBefore);
+
+    editor.core.undo();
+    await editor.settle();
+    expect(editor.workspace.file(canvasLayerPathOf(FLOW_PATH))).toBeNull();
+  });
+
+  it('keeps its look through a rename, and undo puts the look back under the old name', async () => {
+    const editor = await openRegionedFlow();
+    styleRegion(editor, 'Auth', { fillColor: 'yellow' });
+    await editor.settle();
+
+    expect(editor.core.contextOps.renameRegion(regionTarget(editor, 'Auth'), 'Login')).toBeNull();
+    await editor.settle();
+    expect(regionsOnDisk(editor)).toEqual({ Login: { fillColor: 'yellow' } });
+
+    editor.core.undo();
+    await editor.settle();
+    expect(regionsOnDisk(editor)).toEqual({ Auth: { fillColor: 'yellow' } });
+  });
+
+  it('takes the looks of a graph block\'s regions along when the block is extracted into a file', async () => {
+    const editor = await createHeadlessEditor({ [FLOW_PATH]: NESTED_REGION_FLOW }, { open: FLOW_PATH });
+    const host = nodeOnDisk(editor, 'Checkout')!;
+    const owner = { doc: editor.core.openFlow()!.doc, path: FLOW_PATH };
+    const session = contextBlockNamed(owner.doc, 'Session')!;
+    editor.core.applyLayerEdit(owner, () => editor.core.layerSync.setRegionStyle(owner, session, { color: 'green' }));
+    await editor.settle();
+
+    await editor.rightClick(centerOf(host));
+    await editor.chooseMenuItem('Extract into file');
+    await editor.settle();
+
+    const extractedLayers = [...editor.workspace.snapshot().keys()]
+      .filter((path) => path.endsWith('.canvas.json') && path !== canvasLayerPathOf(FLOW_PATH));
+    expect(extractedLayers).toHaveLength(1);
+    expect(JSON.parse(editor.workspace.file(extractedLayers[0])!).regions).toEqual({ Session: { color: 'green' } });
   });
 });
 

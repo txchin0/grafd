@@ -216,6 +216,11 @@ const editors: Editors = createEditors({
   },
   edgeStyleOf: (edge) => core.layerSync.edgeStyleOf(core.ownerOf(edge.from), edge),
   applyEdgeStyleEdit: core.applyEdgeStyleEdit,
+  regionStyleOf: (region) => core.layerSync.regionStyleOf(core.contextOps.ownerOfRegion(region), region.block),
+  applyRegionStyleEdit: (region, patch) => {
+    const owner = core.contextOps.ownerOfRegion(region);
+    core.applyLayerEdit(owner, () => core.layerSync.setRegionStyle(owner, region.block, patch));
+  },
   commitText: core.commitText,
 });
 

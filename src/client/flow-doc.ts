@@ -35,6 +35,7 @@ import {
 } from '../shared/flow-format.js';
 import type { NodeShape } from '../shared/canvas-layer.js';
 import type { EdgeKind, EdgeStyle } from '../shared/canvas-edge-style.js';
+import type { RegionStyle } from '../shared/canvas-region-style.js';
 import { drawingBounds, type CanvasDrawing } from '../shared/canvas-drawings.js';
 import type { DisplayGeometry } from './canvas/expansion.js';
 import type { Point } from './geometry.js';
@@ -121,6 +122,7 @@ export interface FlowModel {
 export interface ModelVisuals {
   shapeOf(node: FlowNode): NodeShape;
   edgeStyleOf(edge: ModelEdge): EdgeStyle;
+  regionStyleOf(block: ContextBlock): RegionStyle;
   // The drawings made in this model's graph scope, in its coordinates, oldest first.
   drawings(): CanvasDrawing[];
   // The ids of the drawings picked up together with this one — its whole group, itself included —

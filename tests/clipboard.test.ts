@@ -11,6 +11,8 @@ import type { OpenFlow } from '../src/client/open-flow.js';
 import { createClipboard, type Clipboard, type ClipboardOptions } from '../src/client/clipboard.js';
 import {
   applyCapturedVisuals,
+  applyRegionVisuals,
+  captureRegionVisuals,
   captureVisuals,
   documentIdentities,
   emptyCanvasLayer,
@@ -19,6 +21,7 @@ import {
   type CanvasLayer,
 } from '../src/shared/canvas-layer.js';
 import { edgeStyleOf, setEdgeStyle } from '../src/shared/canvas-edge-style.js';
+import { regionStyleOf, setRegionStyle } from '../src/shared/canvas-region-style.js';
 
 // An edge's colour reads and writes alike whatever its kind, so these tests treat every edge as a
 // flow edge.
@@ -118,6 +121,8 @@ function harnessFor(text: string, flowOverride?: Partial<OpenFlow>, documentReso
     deleteSelection: () => options.deleteSelection(),
     captureVisuals: () => null,
     applyCapturedVisuals: () => {},
+    captureRegionVisuals: () => null,
+    applyRegionVisuals: () => {},
     ...withoutDrawings,
   } satisfies ClipboardOptions);
   const setSelection = (nodes: FlowNode[], regions: ContextBlock[]) => {
@@ -252,7 +257,7 @@ describe('clipboard with regions', () => {
 });
 
 describe('clipboard and the canvas layer', () => {
-  const SOURCE = `---\nname: Main\n---\n\nAsk\n  id: ask-1\n  pos: 0, 0, 200, 88\n  -> Answer : "yes"\n\nAnswer\n  id: answer-1\n  pos: 300, 0, 200, 88\n`;
+  const SOURCE = `---\nname: Main\n---\n\ncontext: Auth\n  pos: -20, -20, 540, 128\n  nodes: Ask, Answer\n\nAsk\n  id: ask-1\n  pos: 0, 0, 200, 88\n  -> Answer : "yes"\n\nAnswer\n  id: answer-1\n  pos: 300, 0, 200, 88\n`;
 
   function visualHarness() {
     const doc = parseFlow(SOURCE);
@@ -260,7 +265,9 @@ describe('clipboard and the canvas layer', () => {
     const layer = emptyCanvasLayer();
     setNodeShape(layer, 'ask-1', 'diamond');
     setEdgeColor(layer, documentIdentities(doc).edgeKeys.get(allNodes(doc)[0].edges[0])!, 'green');
+    setRegionStyle(layer, 'Auth', { color: 'purple', fill: 'dots' });
     let selection: FlowNode[] = [];
+    let selectedRegions: RegionTarget[] = [];
     const flow = {
       doc,
       path: 'main.flow',
@@ -270,7 +277,7 @@ describe('clipboard and the canvas layer', () => {
     const clipboard = createClipboard({
       openFlow: () => flow,
       selection: () => selection,
-      selectedRegions: () => [],
+      selectedRegions: () => selectedRegions,
       select: () => {},
       ownerOf: () => owner,
       ownerOfRegion: () => owner,
@@ -281,12 +288,21 @@ describe('clipboard and the canvas layer', () => {
       applyCapturedVisuals: (to, copies, visuals) => {
         if (visuals) applyCapturedVisuals(layer, documentIdentities(to.doc), copies, visuals);
       },
+      captureRegionVisuals: (_from, regions) => captureRegionVisuals(layer, regions),
+      applyRegionVisuals: (_to, copies, visuals) => {
+        if (visuals) applyRegionVisuals(layer, copies, visuals);
+      },
       ...withoutDrawings,
     } satisfies ClipboardOptions);
-    const select = (names: string[]) => {
+    const select = (names: string[], regionNames: string[] = []) => {
       selection = names.map((name) => allNodes(doc).find((node) => node.name === name)!);
+      selectedRegions = regionNames.map((name) => ({ block: contextBlockNamed(doc, name)!, doc, path: 'main.flow' }));
     };
     return { doc, layer, clipboard, select };
+  }
+
+  function regionCopiesOf(doc: FlowDocument, sourceName: string): ContextBlock[] {
+    return allContextBlocks(doc).filter((block) => block.name !== sourceName && block.name.startsWith(sourceName));
   }
 
   function copiesOf(doc: FlowDocument, sourceName: string): FlowNode[] {
@@ -301,6 +317,23 @@ describe('clipboard and the canvas layer', () => {
     const [askCopy] = copiesOf(doc, 'Ask');
     expect(nodeShapeOf(layer, askCopy.id)).toBe('diamond');
     expect(edgeColorOf(layer, documentIdentities(doc).edgeKeys.get(askCopy.edges[0])!)).toBe('green');
+  });
+
+  it("pastes a region copy wearing its source's colour and background", () => {
+    const { doc, layer, clipboard, select } = visualHarness();
+    select(['Ask', 'Answer'], ['Auth']);
+    clipboard.copy();
+    clipboard.paste();
+    const [authCopy] = regionCopiesOf(doc, 'Auth');
+    expect(regionStyleOf(layer, authCopy.name)).toEqual({ color: 'purple', fillColor: null, fill: 'dots' });
+  });
+
+  it("carries a region's look through a duplicate of the region alone", () => {
+    const { doc, layer, clipboard, select } = visualHarness();
+    select([], ['Auth']);
+    clipboard.duplicateSelection();
+    const [authCopy] = regionCopiesOf(doc, 'Auth');
+    expect(regionStyleOf(layer, authCopy.name).color).toBe('purple');
   });
 
   it('carries visuals through a duplicate', () => {
@@ -347,6 +380,8 @@ describe('clipboard and strokes', () => {
       deleteSelection: () => deletions.push(openActions > 0 ? 'inside an action' : 'alone'),
       captureVisuals: () => null,
       applyCapturedVisuals: () => {},
+      captureRegionVisuals: () => null,
+      applyRegionVisuals: () => {},
       copyDrawings: () => [{ owner, scope: null, carried }],
       pasteDrawings,
       runAction: (body) => {

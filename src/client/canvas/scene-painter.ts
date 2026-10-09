@@ -23,7 +23,8 @@ import { unionRect } from '../../shared/rect-math.js';
 import { canvasPalette, resolveLayerColor } from '../theme.js';
 import type { HiddenCanvasTitles } from './canvas-view.js';
 import type { Arrowhead, EdgeStyle, LineStyle } from '../../shared/canvas-edge-style.js';
-import { edgeStyleIn } from '../model-visuals.js';
+import { regionFillColorOf, type RegionFillPattern, type RegionStyle } from '../../shared/canvas-region-style.js';
+import { edgeStyleIn, regionStyleIn } from '../model-visuals.js';
 import { arrowheadIsFilled, arrowheadOutline, type ArrowheadOutline } from './arrowheads.js';
 import { edgeEnd, edgePathApproach, edgePathDeparture, edgeStart, type EdgeGeometry } from './edge-path.js';
 import {
@@ -76,6 +77,46 @@ const REGION_DASH_PHASES = 12;
 
 function regionHachureAngle(seed: number): number {
   return REGION_HACHURE_ANGLES[seed % REGION_HACHURE_ANGLES.length];
+}
+
+// The theme's region fill token is already as faint as a pattern should be. A chosen colour is a
+// full-strength slot, so it is brought down to match; a solid wash covers the whole area rather
+// than lines across it, so either is laid down fainter still.
+const CHOSEN_REGION_FILL_OPACITY = 0.13;
+const SOLID_REGION_FILL_FACTOR = 0.8;
+const REGION_DOTS_GAP = 9;
+// A dot covers far less of the area than a line across it, so dots are drawn heavier to read as
+// strongly as a hatch.
+const REGION_DOT_WEIGHT = 2.5;
+const REGION_LINE_FILL_WEIGHT = 1;
+
+// The patterns are named after rough.js's own fill styles.
+type DrawnRegionFillPattern = Exclude<RegionFillPattern, 'none'>;
+
+interface RegionFill {
+  color: string;
+  opacity: number;
+  pattern: DrawnRegionFillPattern;
+}
+
+interface RegionPaint {
+  stroke: string;
+  fill: RegionFill | null;
+}
+
+function regionPaintOf(style: RegionStyle): RegionPaint {
+  const stroke = style.color != null ? resolveLayerColor(style.color) : canvasPalette.regionStroke;
+  return { stroke, fill: regionFillOf(style) };
+}
+
+function regionFillOf(style: RegionStyle): RegionFill | null {
+  const pattern = style.fill;
+  if (pattern === 'none') return null;
+  const chosenColor = regionFillColorOf(style);
+  const patternFactor = pattern === 'solid' ? SOLID_REGION_FILL_FACTOR : 1;
+  return chosenColor != null
+    ? { color: resolveLayerColor(chosenColor), opacity: CHOSEN_REGION_FILL_OPACITY * patternFactor, pattern }
+    : { color: canvasPalette.regionFill, opacity: patternFactor, pattern };
 }
 
 const ARROWHEAD_TANGENT_BACKOFF = 12;
@@ -207,40 +248,54 @@ export class ScenePainter {
     else if (drawing.id !== this.hiddenTitles.drawingId) inkText(this.ctx, drawing, color);
   }
 
-  // A region is an enclosure, not a container: hachure fill and a dashed outline, so it reads as
-  // an area rather than as the solid-filled surface an expansion frame is (R47). Two regions
-  // overlapping stay legible because each keeps its own hatch angle and dash phase (R24, R26) —
-  // channels that survive one hue and a viewer who cannot separate colours.
+  // A region is an enclosure, not a container: by default a hachure fill and a dashed outline, so
+  // it reads as an area rather than as the solid-filled surface an expansion frame is (R47). Two
+  // regions overlapping stay legible because each keeps its own hatch angle and dash phase (R24,
+  // R26) — channels that survive one hue and a viewer who cannot separate colours. A user who picks
+  // a solid or empty fill gives up the hatch angle for that region, never the dash phase.
   private drawRegions(model: FlowModel): void {
     for (const context of model.contexts) {
       const rect = this.regionRects?.get(context.block) ?? regionRectOf(model, context);
       // A block with neither an area nor members has no geometry, and the editor invents none (R23).
       if (!rect) continue;
       const seed = seedFrom(context.block.name);
+      const paint = regionPaintOf(regionStyleIn(model, context.block));
+      const shared = { seed, roughness: this.roughnessFor(REGION_ROUGHNESS), bowing: 0.6 };
+      if (paint.fill) this.drawRegionFill(rect, paint.fill, shared);
       this.rough.rectangle(rect.x, rect.y, rect.w, rect.h, {
-        seed,
-        roughness: this.roughnessFor(REGION_ROUGHNESS),
-        bowing: 0.6,
-        stroke: canvasPalette.regionStroke,
+        ...shared,
+        stroke: paint.stroke,
         strokeWidth: 1.4,
         strokeLineDash: REGION_DASH,
         strokeLineDashOffset: seed % REGION_DASH_PHASES,
-        fill: canvasPalette.regionFill,
-        fillStyle: 'hachure',
-        hachureAngle: regionHachureAngle(seed),
-        hachureGap: REGION_HACHURE_GAP,
-        fillWeight: 1,
       });
-      this.drawRegionLabel(context.block.name, rect);
+      this.drawRegionLabel(context.block.name, rect, paint.stroke);
     }
   }
 
-  private drawRegionLabel(name: string, rect: Rect): void {
+  // Drawn on its own pass, under its own alpha, so the outline over it stays at full strength.
+  private drawRegionFill(rect: Rect, fill: RegionFill, shared: RoughOptions & { seed: number }): void {
+    const { ctx } = this;
+    ctx.save();
+    ctx.globalAlpha *= fill.opacity;
+    this.rough.rectangle(rect.x, rect.y, rect.w, rect.h, {
+      ...shared,
+      stroke: 'none',
+      fill: fill.color,
+      fillStyle: fill.pattern,
+      hachureAngle: regionHachureAngle(shared.seed),
+      hachureGap: fill.pattern === 'dots' ? REGION_DOTS_GAP : REGION_HACHURE_GAP,
+      fillWeight: fill.pattern === 'dots' ? REGION_DOT_WEIGHT : REGION_LINE_FILL_WEIGHT,
+    });
+    ctx.restore();
+  }
+
+  private drawRegionLabel(name: string, rect: Rect, color: string): void {
     if (name === this.hiddenTitles.regionName) return;
     const { ctx } = this;
     const band = regionLabelBand(ctx, name, rect);
     ctx.font = frameTitleFont();
-    ctx.fillStyle = canvasPalette.regionStroke;
+    ctx.fillStyle = color;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(name, rect.x + FRAME_TITLE_LEFT, rect.y + FRAME_TITLE_MIDDLE_Y, band.w);

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyCapturedVisuals,
+  applyRegionVisuals,
   canvasLayerPathOf,
+  captureRegionVisuals,
   captureVisuals,
   documentIdentities,
   emptyCanvasLayer,
@@ -18,6 +20,7 @@ import {
 import { parseFlow, setProp, type FlowDocument, type FlowNode } from '../src/shared/flow-format.js';
 import * as FlowDoc from '../src/client/flow-doc.js';
 import { edgeStyleOf, setEdgeStyle } from '../src/shared/canvas-edge-style.js';
+import { regionStyleOf, setRegionStyle } from '../src/shared/canvas-region-style.js';
 
 // An edge's colour reads and writes alike whatever its kind, so these tests treat every edge as a
 // flow edge.
@@ -269,6 +272,87 @@ graph: Steps
     nodeNamed(doc, 'Check').edges[0].label = 'x';
     expect(followIdentityChanges(layer, before, documentIdentities(doc))).toBe(false);
     expect(Object.keys(layer.edges)).toEqual(['orphaned by an outside edit']);
+  });
+});
+
+describe('region looks', () => {
+  const REGION_FLOW = `---
+name: demo
+---
+
+context: Auth
+  nodes: Start
+
+Start
+  id: ${IDS.start}
+  pos: 0, 0, 180, 80
+  expand: Inner
+
+graph: Inner
+  context: Session
+    nodes: Step
+
+  Step
+    id: ${IDS.check}
+    pos: 0, 0, 180, 80
+`;
+
+  function styledRegions(doc: FlowDocument): CanvasLayer {
+    const layer = emptyCanvasLayer();
+    setRegionStyle(layer, 'Auth', { color: 'blue' });
+    setRegionStyle(layer, 'Session', { fill: 'dots' });
+    expect([...documentIdentities(doc).contextNames.values()]).toEqual(['Auth', 'Session']);
+    return layer;
+  }
+
+  it('serializes regions beside nodes and edges, and reads them back', () => {
+    const layer = emptyCanvasLayer();
+    setRegionStyle(layer, 'Auth', { color: 'blue', fill: 'solid' });
+    const text = serializeCanvasLayer(layer)!;
+    expect(JSON.parse(text).regions).toEqual({ Auth: { color: 'blue', fill: 'solid' } });
+    expect(parseCanvasLayer(text).regions).toEqual(layer.regions);
+  });
+
+  it('moves a look to the new name when a region is renamed, in the body or in a graph block', () => {
+    const doc = parseFlow(REGION_FLOW);
+    const layer = styledRegions(doc);
+    const before = documentIdentities(doc);
+    FlowDoc.renameContextBlock(doc, FlowDoc.contextBlockNamed(doc, 'Auth')!, 'Login');
+    FlowDoc.renameContextBlock(doc, FlowDoc.contextBlockNamed(doc, 'Session')!, 'Visit');
+    expect(followIdentityChanges(layer, before, documentIdentities(doc))).toBe(true);
+    expect(regionStyleOf(layer, 'Login').color).toBe('blue');
+    expect(regionStyleOf(layer, 'Visit').fill).toBe('dots');
+    expect(Object.keys(layer.regions).sort()).toEqual(['Login', 'Visit']);
+  });
+
+  it('drops the look of a deleted region', () => {
+    const doc = parseFlow(REGION_FLOW);
+    const layer = styledRegions(doc);
+    const before = documentIdentities(doc);
+    FlowDoc.deleteContextBlock(doc.items, FlowDoc.contextBlockNamed(doc, 'Auth')!);
+    followIdentityChanges(layer, before, documentIdentities(doc));
+    expect(Object.keys(layer.regions)).toEqual(['Session']);
+  });
+
+  it('leaves a look alone that names no region the earlier capture knew', () => {
+    const doc = parseFlow(REGION_FLOW);
+    const layer = emptyCanvasLayer();
+    setRegionStyle(layer, 'Renamed outside the editor', { color: 'gray' });
+    const before = documentIdentities(doc);
+    FlowDoc.renameContextBlock(doc, FlowDoc.contextBlockNamed(doc, 'Auth')!, 'Login');
+    expect(followIdentityChanges(layer, before, documentIdentities(doc))).toBe(false);
+    expect(Object.keys(layer.regions)).toEqual(['Renamed outside the editor']);
+  });
+
+  it('carries looks onto copies by position, and clears a leftover under an unstyled copy\'s name', () => {
+    const layer = emptyCanvasLayer();
+    setRegionStyle(layer, 'Auth', { color: 'red' });
+    setRegionStyle(layer, 'Session 2', { color: 'gray' });
+    const sources = [{ name: 'Auth' }, { name: 'Session' }].map((source) => ({ ...source, pos: null, props: [], references: [], members: [] }));
+    const copies = [{ ...sources[0], name: 'Auth 2' }, { ...sources[1], name: 'Session 2' }];
+    applyRegionVisuals(layer, copies, captureRegionVisuals(layer, sources));
+    expect(regionStyleOf(layer, 'Auth 2').color).toBe('red');
+    expect(layer.regions['Session 2']).toBeUndefined();
   });
 });
 

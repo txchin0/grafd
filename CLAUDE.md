@@ -56,7 +56,8 @@ through the same read/write path as .flow files.
 
 All styling lives outside the .flow too, in each graph's **canvas layer**
 `<file>.flow.canvas.json` (FLOW-SPEC.md §2.1, §11.5; `src/shared/canvas-layer.ts`): node shapes
-keyed by node `id`, edge colours keyed by a key derived from the edge, freehand strokes and free
+keyed by node `id`, edge colours keyed by a key derived from the edge, region colours and
+backgrounds keyed by the provider's name (unique in its file), freehand strokes and free
 text in a `drawings` list (each filed under the graph scope it was made in — `graph` names the
 block, absent for the body — in that scope's coordinates), groups of things picked up as one (a `groups` list
 of typed members — drawings for now, built to take nodes later), plus unknown keys carried
@@ -115,6 +116,10 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   fractions of the chord between the endpoint centres, so it keeps its shape as nodes move.
   Defaults are never written, and an error edge's default line is dashed, so reads and writes
   are told the edge's kind and a read comes back with every field resolved.
+  `canvas-region-style.ts` owns a region entry the same way — a `color` for its outline, label
+  and fill, a `fillColor` for the fill alone, and the `fill` pattern. A region has no id, so
+  `documentIdentities` names each `context:` block, and a rename or delete moves or drops its
+  entry like any other; copies carry it by position.
 - `src/shared/flow-scan.ts` — the linter's positioned re-walk of the line grammar: mirrors
   `parseFlow`'s branch structure but keeps line numbers and records every line the parser
   would drop. `flow-diagnostics.ts` (severities), `flow-lint-syntax.ts` (structure),

@@ -1,5 +1,5 @@
 // Dresses a view-model in its file's canvas layer: which shape each node draws as, how each
-// edge is drawn (colour, line, heads, bend), and the drawings made in the model's graph scope.
+// edge is drawn (colour, line, heads, bend), how each region is coloured and filled, and the drawings made in the model's graph scope.
 // Resolved per model build, like traits, so painting and edge layout read answers rather than
 // re-deriving edge keys every frame.
 
@@ -11,9 +11,10 @@ import {
   type Drawing,
 } from '../shared/canvas-layer.js';
 import { defaultEdgeStyle, edgeStyleOf, type EdgeStyle } from '../shared/canvas-edge-style.js';
+import { defaultRegionStyle, regionStyleOf, type RegionStyle } from '../shared/canvas-region-style.js';
 import { drawingsInScope, type CanvasDrawing } from '../shared/canvas-drawings.js';
 import { drawingGroupsOf, type Group } from '../shared/canvas-groups.js';
-import type { FlowDocument } from '../shared/flow-format.js';
+import type { ContextBlock, FlowDocument } from '../shared/flow-format.js';
 import { edgeIdentityOf, type FlowModel, type ModelEdge, type ModelVisuals } from './flow-doc.js';
 
 export function dressModel(model: FlowModel, layer: CanvasLayer | null): FlowModel {
@@ -32,6 +33,7 @@ function visualsFor(model: FlowModel, layer: CanvasLayer | null): ModelVisuals {
   return {
     shapeOf: (node) => nodeShapeOf(layer, node.id),
     edgeStyleOf: (edge): EdgeStyle => edgeStyleOf(layer, layer ? keyOf(edge) : null, edge.kind),
+    regionStyleOf: (block) => regionStyleOf(layer, block.name),
     drawings: drawingReaderFor(layer, model.sourceScope),
     drawingGroupOf: drawingGroupReaderFor(layer),
   };
@@ -78,4 +80,8 @@ function edgeKeyIn(identities: DocumentIdentities, edge: ModelEdge): string | nu
 // A model that was never dressed draws every edge in its kind's default look.
 export function edgeStyleIn(model: FlowModel, edge: ModelEdge): EdgeStyle {
   return model.visuals?.edgeStyleOf(edge) ?? defaultEdgeStyle(edge.kind);
+}
+
+export function regionStyleIn(model: FlowModel, block: ContextBlock): RegionStyle {
+  return model.visuals?.regionStyleOf(block) ?? defaultRegionStyle();
 }

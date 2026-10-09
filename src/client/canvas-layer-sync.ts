@@ -9,13 +9,17 @@
 // sites capture their sources' visuals and put them on the copies explicitly.
 //
 // Drawings are filed by graph scope rather than by node, so they follow the same commits: a
-// `graph:` block renamed or removed takes its drawings with it.
+// `graph:` block renamed or removed takes its drawings with it. Region looks are filed by
+// provider name and follow a region's rename or removal the same way.
 
 import {
   applyCapturedVisuals,
+  applyRegionVisuals,
   canvasLayerIsUnreadable,
   canvasLayerPathOf,
+  capturedRegionVisualsAreEmpty,
   capturedVisualsAreEmpty,
+  captureRegionVisuals,
   captureVisuals,
   documentIdentities,
   drawingListsAreEditable,
@@ -27,13 +31,15 @@ import {
   serializeCanvasLayer,
   setNodeShape,
   type CanvasLayer,
+  type CapturedRegionVisuals,
   type CapturedVisuals,
   type DocumentIdentities,
   type NodeShape,
 } from '../shared/canvas-layer.js';
 import { edgeStyleOf, setEdgeStyle, type EdgeStyle, type EdgeStylePatch } from '../shared/canvas-edge-style.js';
+import { regionStyleOf, setRegionStyle, type RegionStyle, type RegionStylePatch } from '../shared/canvas-region-style.js';
 import type { CarriedDrawings } from '../shared/canvas-drawings.js';
-import type { FlowDocument, FlowNode } from '../shared/flow-format.js';
+import type { ContextBlock, FlowDocument, FlowNode } from '../shared/flow-format.js';
 import type { DocumentOwner } from './canvas/expansion.js';
 import type { CanvasLayerStore } from './canvas-layer-store.js';
 import type { EditSession, FlowCommitObserver } from './edit-session.js';
@@ -45,10 +51,12 @@ export interface CanvasLayerSync {
   readonly observer: FlowCommitObserver;
   shapeOf(owner: DocumentOwner, node: FlowNode): NodeShape;
   edgeStyleOf(owner: DocumentOwner, edge: ModelEdge): EdgeStyle;
+  regionStyleOf(owner: DocumentOwner, block: ContextBlock): RegionStyle;
   // Standalone visual edits, each one undoable action that writes only the layer. False when
   // there was no layer to edit (still loading, or unreadable) or nothing to key the edit by.
   setShape(owner: DocumentOwner, node: FlowNode, shape: NodeShape): boolean;
   setEdgeStyle(owner: DocumentOwner, edge: ModelEdge, patch: EdgeStylePatch): boolean;
+  setRegionStyle(owner: DocumentOwner, block: ContextBlock, patch: RegionStylePatch): boolean;
   // Drawing edits, each its own undoable action — or part of the one already open, so a stroke
   // moved or deleted with nodes lands in the same undo step. False when there was no layer.
   // A drawing edit, its own undoable action or part of the one already open, so a stroke moved
@@ -66,15 +74,21 @@ export interface CanvasLayerSync {
   // Called inside the mutation that made `copies`, so the flow commit that follows carries the
   // layer write in the same undo step.
   applyCapturedVisuals(owner: DocumentOwner, copies: FlowNode[], captured: CapturedVisuals | null): void;
+  // The same for regions, which are paired with their copies by position too.
+  captureRegionVisuals(owner: DocumentOwner, sources: readonly ContextBlock[]): CapturedRegionVisuals | null;
+  applyRegionVisuals(owner: DocumentOwner, copies: readonly ContextBlock[], captured: CapturedRegionVisuals | null): void;
   // The layer text for a document this editor is about to create from copies of `sources`
-  // (paired by position, null where a source has no copy) and the drawings it takes along, or
-  // null when it has no visuals.
+  // (paired by position, null where a source has no copy), the region looks it takes along
+  // (filed by name, which an extraction keeps) and its drawings, or null when it has no visuals.
   layerTextForNewDocument(
     doc: FlowDocument,
     copies: (FlowNode | null)[],
     captured: CapturedVisuals | null,
     carried: CarriedDrawings,
+    regions: CanvasLayer['regions'],
   ): string | null;
+  // The region looks filed under `names` in the owner's layer, for a document about to take them.
+  regionVisualsNamed(owner: DocumentOwner, names: readonly string[]): CanvasLayer['regions'];
 }
 
 export function createCanvasLayerSync(session: () => EditSession, layers: CanvasLayerStore): CanvasLayerSync {
@@ -123,6 +137,10 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
     return key != null && editLayer(owner.path, (layer) => setEdgeStyle(layer, key, patch, edge.kind));
   }
 
+  function setRegionStyleOf(owner: DocumentOwner, block: ContextBlock, patch: RegionStylePatch): boolean {
+    return editLayer(owner.path, (layer) => setRegionStyle(layer, block.name, patch));
+  }
+
   function drawingsAreEditable(owner: DocumentOwner): boolean {
     const layer = layers.layerFor(owner.path);
     return layer != null && drawingListsAreEditable(layer);
@@ -166,13 +184,40 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
     applyCapturedVisuals(layer, documentIdentities(owner.doc), copies, captured);
   }
 
+  function captureRegionVisualsOf(owner: DocumentOwner, sources: readonly ContextBlock[]): CapturedRegionVisuals | null {
+    const layer = layers.layerFor(owner.path);
+    if (!layer) return null;
+    const captured = captureRegionVisuals(layer, sources);
+    return capturedRegionVisualsAreEmpty(captured) ? null : captured;
+  }
+
+  function applyRegionVisualsTo(owner: DocumentOwner, copies: readonly ContextBlock[], captured: CapturedRegionVisuals | null): void {
+    if (!captured) return;
+    const layer = layers.layerFor(owner.path);
+    if (!layer) return;
+    session().trackLayerWithBaseline(owner.path, layer);
+    applyRegionVisuals(layer, copies, captured);
+  }
+
+  function regionVisualsNamed(owner: DocumentOwner, names: readonly string[]): CanvasLayer['regions'] {
+    const layer = layers.layerFor(owner.path);
+    const regions: CanvasLayer['regions'] = {};
+    for (const name of names) {
+      const entry = layer?.regions[name];
+      if (entry) regions[name] = { ...entry };
+    }
+    return regions;
+  }
+
   function layerTextForNewDocument(
     doc: FlowDocument,
     copies: (FlowNode | null)[],
     captured: CapturedVisuals | null,
     carried: CarriedDrawings,
+    regions: CanvasLayer['regions'],
   ): string | null {
     const layer = emptyCanvasLayer();
+    layer.regions = regions;
     layer.drawings = carried.drawings;
     layer.groups = carried.groups;
     if (captured) {
@@ -187,8 +232,10 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
     observer,
     shapeOf: (owner, node) => nodeShapeOf(layers.layerFor(owner.path), node.id),
     edgeStyleOf: (owner, edge) => edgeStyleOf(layers.layerFor(owner.path), edgeLayerKey(owner.doc, edge), edge.kind),
+    regionStyleOf: (owner, block) => regionStyleOf(layers.layerFor(owner.path), block.name),
     setShape,
     setEdgeStyle: setEdgeStyleOf,
+    setRegionStyle: setRegionStyleOf,
     editDrawings,
     drawingsAreEditable,
     drawingContentOf: (owner) => {
@@ -198,6 +245,9 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
     adoptWatchedLayer,
     captureVisuals: captureVisualsOf,
     applyCapturedVisuals: applyCapturedVisualsTo,
+    captureRegionVisuals: captureRegionVisualsOf,
+    applyRegionVisuals: applyRegionVisualsTo,
+    regionVisualsNamed,
     layerTextForNewDocument,
   };
 }

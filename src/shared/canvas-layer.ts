@@ -8,11 +8,14 @@
 // says — its source's id, its target (by id when the target resolves in its scope, so renaming
 // the target never breaks the key), its `{Inner}` refinements and its label. The editor moves
 // entries when its own edits change a key; an edit made outside the editor orphans them.
+// A region has no id either, but a provider's name is unique in its file, `graph:` blocks
+// included (FLOW-SPEC.md §8.2), so a region's look is filed under its name (canvas-region-style.ts).
 // Drawings are filed by the graph scope they were drawn in (canvas-drawings.ts), and groups hold
 // things that are picked up as one (canvas-groups.ts).
 
 import {
   serializeEdgeExpression,
+  type ContextBlock,
   type EdgeSpec,
   type FlowDocument,
   type FlowItem,
@@ -38,12 +41,14 @@ const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 // editor survives a save by an older one. The typed readers below validate what they read.
 export type NodeVisual = { shape?: unknown } & Record<string, unknown>;
 export type EdgeVisual = { color?: unknown } & Record<string, unknown>;
+export type RegionVisual = Record<string, unknown>;
 // One entry of the `drawings` list, kept whole; canvas-drawings.ts reads the kinds it knows.
 export type Drawing = { id?: unknown; kind?: unknown; graph?: unknown } & Record<string, unknown>;
 
 export interface CanvasLayer {
   nodes: Record<string, NodeVisual>;
   edges: Record<string, EdgeVisual>;
+  regions: Record<string, RegionVisual>;
   drawings: Drawing[];
   groups: Group[];
   // Top-level keys this editor does not interpret, carried through verbatim — among them a
@@ -52,13 +57,13 @@ export interface CanvasLayer {
   extras: Record<string, unknown>;
 }
 
-const KNOWN_TOP_LEVEL_KEYS = new Set(['format', 'nodes', 'edges']);
+const KNOWN_TOP_LEVEL_KEYS = new Set(['format', 'nodes', 'edges', 'regions']);
 // Lists of objects, written one entry per line after everything else, in this order.
 const ENTRY_LIST_KEYS = ['groups', 'drawings'] as const;
 type EntryListKey = (typeof ENTRY_LIST_KEYS)[number];
 
 export function emptyCanvasLayer(): CanvasLayer {
-  return { nodes: {}, edges: {}, drawings: [], groups: [], extras: {} };
+  return { nodes: {}, edges: {}, regions: {}, drawings: [], groups: [], extras: {} };
 }
 
 export function canvasLayerPathOf(flowPath: string): string {
@@ -110,6 +115,7 @@ export function parseCanvasLayer(text: string | null | undefined): CanvasLayer {
   return {
     nodes: readEntries(raw.nodes),
     edges: readEntries(raw.edges),
+    regions: readEntries(raw.regions),
     drawings: readEntryList(raw.drawings),
     groups: readEntryList(raw.groups),
     extras,
@@ -168,6 +174,7 @@ export function serializeCanvasLayer(layer: CanvasLayer): string | null {
   const document: Record<string, unknown> = { format: CANVAS_LAYER_FORMAT };
   if (Object.keys(layer.nodes).length > 0) document.nodes = sortedEntries(layer.nodes);
   if (Object.keys(layer.edges).length > 0) document.edges = sortedEntries(layer.edges);
+  if (Object.keys(layer.regions).length > 0) document.regions = sortedEntries(layer.regions);
   Object.assign(document, layer.extras);
   const lists = ENTRY_LIST_KEYS
     .map((key): [EntryListKey, Record<string, unknown>[]] => [key, layer[key]])
@@ -191,6 +198,7 @@ function withEntryListsAppended(objectText: string, lists: [EntryListKey, Record
 export function canvasLayerIsEmpty(layer: CanvasLayer): boolean {
   return Object.keys(layer.nodes).length === 0
     && Object.keys(layer.edges).length === 0
+    && Object.keys(layer.regions).length === 0
     && layer.drawings.length === 0
     && layer.groups.length === 0
     && Object.keys(layer.extras).length === 0;
@@ -245,26 +253,40 @@ export interface DocumentIdentities {
   nodeIds: Map<FlowNode, string>;
   // The name of each `graph:` block, which is what drawings made inside it are filed under.
   graphNames: Map<GraphItem, string>;
+  // The name of each `context:` block, in the body or in a `graph:` block: what its look is filed under.
+  contextNames: Map<ContextBlock, string>;
   // A node's `on_error` edge is filed under the node itself: the property is re-parsed on every
   // read, so its EdgeSpec has no stable object to file it under.
   edgeKeys: Map<EdgeSpec | FlowNode, string>;
 }
 
 export function documentIdentities(doc: FlowDocument): DocumentIdentities {
-  const identities: DocumentIdentities = { nodeIds: new Map(), graphNames: new Map(), edgeKeys: new Map() };
-  for (const scopeNodes of graphScopesOf(doc)) collectScopeIdentities(scopeNodes, identities);
+  const identities: DocumentIdentities = {
+    nodeIds: new Map(),
+    graphNames: new Map(),
+    contextNames: new Map(),
+    edgeKeys: new Map(),
+  };
+  for (const scopeItems of graphScopeItemsOf(doc)) {
+    collectScopeIdentities(nodesOfItems(scopeItems), identities);
+    for (const block of contextBlocksOfItems(scopeItems)) identities.contextNames.set(block, block.name);
+  }
   for (const item of doc.items) {
     if (item.kind === 'graph') identities.graphNames.set(item, item.name);
   }
   return identities;
 }
 
-function graphScopesOf(doc: FlowDocument): FlowNode[][] {
-  const scopes = [nodesOfItems(doc.items)];
+function graphScopeItemsOf(doc: FlowDocument): FlowItem[][] {
+  const scopes = [doc.items];
   for (const item of doc.items) {
-    if (item.kind === 'graph') scopes.push(nodesOfItems(item.items));
+    if (item.kind === 'graph') scopes.push(item.items);
   }
   return scopes;
+}
+
+function contextBlocksOfItems(items: FlowItem[]): ContextBlock[] {
+  return items.flatMap((item) => (item.kind === 'context' ? [item.block] : []));
 }
 
 function nodesOfItems(items: FlowItem[]): FlowNode[] {
@@ -290,8 +312,8 @@ function collectScopeIdentities(nodes: FlowNode[], identities: DocumentIdentitie
   }
 }
 
-// Moves every entry whose node or edge an edit re-keyed and drops those whose node or edge the
-// edit removed, comparing two captures of the same document. Drawings follow the `graph:` block
+// Moves every entry whose node, edge or region an edit re-keyed and drops those whose node, edge
+// or region the edit removed, comparing two captures of the same document. Drawings follow the `graph:` block
 // they were drawn in the same way: renamed with it, dropped with it, leaving their groups when they
 // go. Entries the `before` capture
 // does not account for — orphans of an edit made outside the editor — are left alone: they are
@@ -299,13 +321,16 @@ function collectScopeIdentities(nodes: FlowNode[], identities: DocumentIdentitie
 export function followIdentityChanges(layer: CanvasLayer, before: DocumentIdentities, after: DocumentIdentities): boolean {
   const nodes = rekeyEntries(layer.nodes, before.nodeIds, after.nodeIds);
   const edges = rekeyEntries(layer.edges, before.edgeKeys, after.edgeKeys);
+  const regions = rekeyEntries(layer.regions, before.contextNames, after.contextNames);
   const drawings = refileDrawings(layer.drawings, before.graphNames, after.graphNames);
   const groupsBefore = layer.groups;
   const changed = !sameEntries(nodes, layer.nodes)
     || !sameEntries(edges, layer.edges)
+    || !sameEntries(regions, layer.regions)
     || !sameItems(drawings, layer.drawings);
   layer.nodes = nodes;
   layer.edges = edges;
+  layer.regions = regions;
   layer.drawings = drawings;
   pruneGroups(layer);
   return changed || layer.groups !== groupsBefore;
@@ -400,5 +425,26 @@ export function applyCapturedVisuals(
       const key = identities.edgeKeys.get(spec);
       if (edgeEntry && key) layer.edges[key] = { ...edgeEntry };
     });
+  });
+}
+
+// A region copy gets a new name, so its look is carried by position like a node copy's: one entry
+// per source block, in the order the sources were given.
+export type CapturedRegionVisuals = (RegionVisual | null)[];
+
+export function captureRegionVisuals(layer: CanvasLayer, sources: readonly ContextBlock[]): CapturedRegionVisuals {
+  return sources.map((block) => layer.regions[block.name] ?? null);
+}
+
+export function capturedRegionVisualsAreEmpty(captured: CapturedRegionVisuals): boolean {
+  return captured.every((entry) => entry == null);
+}
+
+export function applyRegionVisuals(layer: CanvasLayer, copies: readonly ContextBlock[], captured: CapturedRegionVisuals): void {
+  copies.forEach((copy, index) => {
+    const entry = captured[index];
+    // A copy of an unstyled region must not take up an entry left behind under its new name.
+    if (entry) layer.regions[copy.name] = { ...entry };
+    else delete layer.regions[copy.name];
   });
 }

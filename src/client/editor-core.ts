@@ -216,6 +216,8 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     deleteSelection: () => deleteSelection(),
     captureVisuals: (owner, nodes) => layerSync.captureVisuals(owner, nodes),
     applyCapturedVisuals: (owner, copies, visuals) => layerSync.applyCapturedVisuals(owner, copies, visuals),
+    captureRegionVisuals: (owner, regions) => layerSync.captureRegionVisuals(owner, regions),
+    applyRegionVisuals: (owner, copies, visuals) => layerSync.applyRegionVisuals(owner, copies, visuals),
     copyDrawings: (selections) => drawingOps.copyDrawings(selections),
     pasteDrawings: (target, drawings, offset) => drawingOps.pasteDrawings(target, drawings, offset),
     runAction: (body) => session.runAction(body),
@@ -729,6 +731,8 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     // nodes that moved out, and the new file is written from a re-parse with no link to them.
     const blockNodes = FlowDoc.nodesIn(FlowDoc.scopeItems(owner.doc, blockName));
     const blockVisuals = layerSync.captureVisuals(owner, blockNodes);
+    const blockRegionNames = FlowDoc.contextBlocksIn(FlowDoc.scopeItems(owner.doc, blockName)).map((block) => block.name);
+    const blockRegionVisuals = layerSync.regionVisualsNamed(owner, blockRegionNames);
     const parentDrawings = layerSync.drawingContentOf(owner) ?? { drawings: [], groups: [] };
 
     // The extracted file is new, so it has no prior text to restore and takes no part in the undo
@@ -749,7 +753,7 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     const copies = blockNodes.map((node) => extractedByName.get(node.name) ?? null);
     const carriedBlockNames = new Set(FlowDoc.graphBlockNames(extracted));
     const carried = drawingsForExtractedDocument(parentDrawings, blockName, carriedBlockNames);
-    registerCreatedFlowFile(path, text, layerSync.layerTextForNewDocument(extracted, copies, blockVisuals, carried));
+    registerCreatedFlowFile(path, text, layerSync.layerTextForNewDocument(extracted, copies, blockVisuals, carried, blockRegionVisuals));
     session.adoptText(path, text);
     // Extraction moves the block out of the owning document, so a scope naming it is now stale.
     if (owner.path === openFlow?.path) dropScopeIfMissing();

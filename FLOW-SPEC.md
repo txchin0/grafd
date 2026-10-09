@@ -822,7 +822,7 @@ Editor-owned properties are the one part of a `.flow` file that a future version
 
 Every visual style the editor offers is stored outside the `.flow`, in the graph's canvas layer: a JSON file named after its graph with `.canvas.json` appended (`auth/login.flow` → `auth/login.flow.canvas.json`). The editor writes it only while it holds something; a graph with no styling has no canvas layer.
 
-A canvas layer is entirely editor-owned. Its content is not part of this format — it records node shapes and how each edge is drawn (its colour, line style, arrowheads and bend), keyed by node `id` and by a key derived from each edge, free drawings and free text, filed under the graph scope they were made in (the file body, or a `graph:` block by name), groups of drawings the editor moves as one, and whatever decoration later editor versions add — and nothing in it changes what a graph means. There is no style property in the `.flow` grammar: a `shape:` or `color:` line in a `.flow` is an unknown property, not a style.
+A canvas layer is entirely editor-owned. Its content is not part of this format — it records node shapes and how each edge is drawn (its colour, line style, arrowheads and bend), keyed by node `id` and by a key derived from each edge, each region's colour and background, keyed by its `context:` block's name, free drawings and free text, filed under the graph scope they were made in (the file body, or a `graph:` block by name), groups of drawings the editor moves as one, and whatever decoration later editor versions add — and nothing in it changes what a graph means. There is no style property in the `.flow` grammar: a `shape:` or `color:` line in a `.flow` is an unknown property, not a style.
 
 **Rules for agents:**
 
@@ -831,6 +831,7 @@ A canvas layer is entirely editor-owned. Its content is not part of this format 
 - **Rename or move** a canvas layer together with its `.flow`, keeping the `.canvas.json` suffix on the new name. **Delete** it together with its `.flow`.
 - When creating a `.flow` at a path where a canvas layer already sits with no `.flow` beside it, **delete** that leftover first — it belongs to a graph that no longer exists.
 - Preserving node `id`s ([Section 11.2](#112-rules-for-agents)) is all it takes to preserve the styling of the nodes you keep. Edge styling is keyed by what the edge says, so an edge you relabel or retarget loses its style; that is expected, and the editor reports the leftover entry as unused rather than as an error.
+- A region's look is filed under its `context:` block's name, so a block you rename or remove loses it. That is expected, and reported as an unused entry like an edge's.
 - Drawings (including free text) made inside a `graph:` block are filed under the block's name, so a block you rename or remove leaves its drawings behind, unshown. That is expected too, and reported the same way.
 
 ---

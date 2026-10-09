@@ -1,7 +1,7 @@
 // Lints a .flow's canvas layer (`<file>.flow.canvas.json`). A layer is decoration, so nothing
 // in it can be an error: a broken layer loads as an empty one and costs only looks. Warnings
-// flag what was probably a mistake; entries whose node, edge or graph block no longer exists are
-// reported as info, since any edit to the .flow made outside the editor leaves some behind.
+// flag what was probably a mistake; entries whose node, edge, region or graph block no longer
+// exists are reported as info, since any edit to the .flow made outside the editor leaves some behind.
 
 import {
   documentIdentities,
@@ -11,6 +11,7 @@ import {
   parseJsonObject,
   LAYER_COLOR_SLOTS,
   NODE_SHAPES,
+  type CanvasLayer,
 } from './canvas-layer.js';
 import {
   ARROWHEADS,
@@ -21,6 +22,7 @@ import {
   readEdgeBend,
   type Arrowhead,
 } from './canvas-edge-style.js';
+import { REGION_FILL_PATTERNS, isRegionFillPattern } from './canvas-region-style.js';
 import { STROKE_KIND, STROKE_WIDTHS, isStrokeWidth, strokePointsOf } from './canvas-drawings.js';
 import { TEXT_KIND, isDrawableText, isTextSize, textBoxOf } from './canvas-text.js';
 import { DRAWING_MEMBER_KIND, groupMembersOf, type Group } from './canvas-groups.js';
@@ -58,11 +60,15 @@ export function lintCanvasLayer(layerText: string, flowText: string | null): Dia
   for (const [edgeKey, visual] of Object.entries(layer.edges)) {
     diagnostics.push(...edgeVisualDiagnostics(visual, lineOf(edgeKey)));
   }
+  const lineOfRegion = (name: string) => lineOfKey(layerText, name, lineOfKey(layerText, 'regions'));
+  for (const [name, visual] of Object.entries(layer.regions)) {
+    diagnostics.push(...regionVisualDiagnostics(visual, lineOfRegion(name)));
+  }
 
   const flow = flowText != null ? parseFlow(flowText) : null;
   diagnostics.push(...drawingDiagnostics(layerText, flow));
   diagnostics.push(...groupDiagnostics(layerText));
-  if (flow) diagnostics.push(...staleEntries(layer.nodes, layer.edges, flow, lineOf));
+  if (flow) diagnostics.push(...staleEntries(layer, flow, lineOf, lineOfRegion));
   return diagnostics.sort(byLine);
 }
 
@@ -83,6 +89,19 @@ function edgeVisualDiagnostics(visual: Record<string, unknown>, line: number): D
   }
   if (visual.bend !== undefined && !readEdgeBend(visual.bend)) {
     diagnostics.push(warning('invalid-edge-bend', line, `Invalid bend ${JSON.stringify(visual.bend)}; the edge is drawn unbent. A bend is a pair of numbers, [along, across].`));
+  }
+  return diagnostics;
+}
+
+function regionVisualDiagnostics(visual: Record<string, unknown>, line: number): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (const [field, drawnIn] of [['color', 'the theme\'s region colour'], ['fillColor', 'the region\'s colour']] as const) {
+    if (visual[field] !== undefined && !isLayerColor(visual[field])) {
+      diagnostics.push(warning('invalid-region-color', line, `Invalid ${field} ${JSON.stringify(visual[field])}; the region is drawn in ${drawnIn} instead. Use one of ${LAYER_COLOR_SLOTS.join(', ')}, or #rrggbb.`));
+    }
+  }
+  if (visual.fill !== undefined && !isRegionFillPattern(visual.fill)) {
+    diagnostics.push(warning('unknown-region-fill', line, `Unknown fill ${JSON.stringify(visual.fill)}; the region is hatched. Fills: ${REGION_FILL_PATTERNS.join(', ')}.`));
   }
   return diagnostics;
 }
@@ -215,34 +234,50 @@ function graphBlockNamesOf(flow: FlowDocument): Set<string> {
 }
 
 function staleEntries(
-  nodes: Record<string, unknown>,
-  edges: Record<string, unknown>,
+  layer: CanvasLayer,
   flow: FlowDocument,
   lineOf: (key: string) => number,
+  lineOfRegion: (name: string) => number,
 ): Diagnostic[] {
   const identities = documentIdentities(flow);
   const nodeIds = new Set(identities.nodeIds.values());
   const edgeKeys = new Set(identities.edgeKeys.values());
+  const regionNames = new Set(identities.contextNames.values());
   const stale: Diagnostic[] = [];
-  for (const nodeId of Object.keys(nodes)) {
+  for (const nodeId of Object.keys(layer.nodes)) {
     if (!nodeIds.has(nodeId)) {
       stale.push(info('stale-canvas-entry', lineOf(nodeId), `No node with id ${nodeId} is in the .flow any more; its visuals are unused.`));
     }
   }
-  for (const edgeKey of Object.keys(edges)) {
+  for (const edgeKey of Object.keys(layer.edges)) {
     if (!edgeKeys.has(edgeKey)) {
       stale.push(info('stale-canvas-entry', lineOf(edgeKey), `No edge matches ${JSON.stringify(edgeKey)} any more; its visuals are unused.`));
+    }
+  }
+  for (const name of Object.keys(layer.regions)) {
+    if (!regionNames.has(name)) {
+      stale.push(info('stale-canvas-entry', lineOfRegion(name), `No \`context: ${name}\` block is in the .flow any more; its visuals are unused.`));
     }
   }
   return stale;
 }
 
-// The line a key is written on, found by its JSON spelling; the first line when the key's text
-// also appears earlier (it is reported, just less precisely).
-function lineOfKey(text: string, key: string): number {
-  const index = text.indexOf(`${JSON.stringify(key)}:`);
-  if (index === -1) return FIRST_LINE;
+// The line a key is written on, found by its JSON spelling at or after `fromLine`; that line
+// when the key's text cannot be found (it is reported, just less precisely).
+function lineOfKey(text: string, key: string, fromLine = FIRST_LINE): number {
+  const index = text.indexOf(`${JSON.stringify(key)}:`, indexOfLine(text, fromLine));
+  if (index === -1) return fromLine;
   return lineAtIndex(text, index);
+}
+
+function indexOfLine(text: string, line: number): number {
+  let index = 0;
+  for (let current = FIRST_LINE; current < line; current += 1) {
+    const lineEnd = text.indexOf('\n', index);
+    if (lineEnd === -1) return index;
+    index = lineEnd + 1;
+  }
+  return index;
 }
 
 // A drawing is a value, not a key, so it is found by position: the editor writes one drawing per

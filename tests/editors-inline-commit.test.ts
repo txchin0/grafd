@@ -93,6 +93,9 @@ const ELEMENT_IDS = [
   're-add-reference',
   're-member-list',
   're-delete',
+  're-color',
+  're-fill-color',
+  're-fill',
   'edge-editor',
   'ee-label',
   'ee-inner-source',
@@ -161,6 +164,8 @@ function createContextStub() {
     applyShapeEdit: vi.fn(),
     edgeStyleOf: vi.fn(() => ({ color: null, line: null, startHead: 'none', endHead: 'arrow', bend: null })),
     applyEdgeStyleEdit: vi.fn(),
+    regionStyleOf: vi.fn(() => ({ color: null, fillColor: null, fill: 'hachure' })),
+    applyRegionStyleEdit: vi.fn(),
     commitText: vi.fn(),
   } as unknown as EditorContext;
 }
