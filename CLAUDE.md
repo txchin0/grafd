@@ -208,6 +208,13 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   - `text-drawing-layout.ts` / `text-painter.ts` — free text: its lines (wrapped to its width, if
     it has one), the size it is drawn at, the box new words or a new width need (the one place the
     painter, the inline text editor and the writes agree on), and how its lines are inked.
+  - `grid-painter.ts` — the background grid, which is also the depth gauge of a dive: each level
+    down the trail resolves the gaps between dots one step finer, until the deepest joins them
+    into lines. Depth is continuous, so a dive resolves it while the camera moves; the lattice's
+    spacing never changes, so it stays where snapping lands. Each kind of mark is one small tile
+    filled across the screen as a repeating pattern; depth only sets how strongly each is filled,
+    and tile sizes come in fixed steps, so neither a dive nor a zoom redraws tiles every frame.
+    Per-dot, dashed and redraw-every-frame versions all measurably stuttered dives.
   - `pinch-gesture.ts` — the camera during a two-finger gesture. Pan and zoom fall out of one
     calculation: the world point under the fingers' midpoint when they landed is held under
     their current midpoint. Scale limits are passed in, so the view stays the only place that

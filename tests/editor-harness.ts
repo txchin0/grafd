@@ -289,6 +289,8 @@ function createHeadlessCanvas(): { canvas: HTMLCanvasElement; listeners: Map<str
     releasePointerCapture: doNothing,
     getBoundingClientRect: () => ({ left: 0, top: 0, right: width, bottom: height, width, height, x: 0, y: 0, toJSON: () => ({}) }),
     getContext: () => context,
+    // The grid draws its tile on a canvas of its own; this one shares the inert context.
+    ownerDocument: { createElement: () => ({ width: 0, height: 0, getContext: () => context }) },
   } as unknown as HTMLCanvasElement;
   return { canvas, listeners };
 }
@@ -302,6 +304,7 @@ function createHeadlessContext() {
   return {
     ...Object.fromEntries(drawingCalls.map((name) => [name, doNothing])),
     measureText: () => ({ width: 0 }),
+    createPattern: () => ({ setTransform: doNothing }),
     globalAlpha: 1,
     fillStyle: '',
     strokeStyle: '',

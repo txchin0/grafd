@@ -8,38 +8,41 @@ beforeAll(async () => {
   ({ CanvasView } = await import('../src/client/canvas/canvas-view.js'));
 });
 
-// drawGrid is the only thing that paints dots this size, so counting them isolates the grid
-// from the rest of the scene.
-const GRID_DOT_SIZE = 1.5;
-
-function countGridDots(canvas: HTMLCanvasElement): number {
-  const fillRect = (canvas.getContext('2d') as unknown as { fillRect: Mock }).fillRect;
-  return fillRect.mock.calls.filter((call) => call[2] === GRID_DOT_SIZE && call[3] === GRID_DOT_SIZE).length;
+// The grid fills the canvas with a repeating tile, and nothing else on the canvas is filled with a
+// pattern, so counting pattern fills isolates the grid from the rest of the scene.
+function recordGridFills(canvas: HTMLCanvasElement): { count: () => number; clear: () => void } {
+  const context = canvas.getContext('2d') as unknown as { fillRect: Mock; fillStyle: unknown };
+  let fills = 0;
+  context.fillRect.mockImplementation(() => {
+    if (typeof context.fillStyle === 'object') fills++;
+  });
+  return { count: () => fills, clear: () => { fills = 0; } };
 }
 
 // The constructor sizes the canvas and renders once, so each measurement starts from a
-// cleared spy rather than from whatever that first frame drew.
+// cleared count rather than from whatever that first frame drew.
 function createViewOnMockCanvas() {
   const canvas = createCanvasMock();
+  const gridFills = recordGridFills(canvas);
   const view = new CanvasView(canvas, {} as unknown as ConstructorParameters<typeof CanvasView>[1], createExpansionLayer());
-  const renderAndCountGridDots = () => {
-    (canvas.getContext('2d') as unknown as { fillRect: Mock }).fillRect.mockClear();
+  const renderAndCountGridFills = () => {
+    gridFills.clear();
     view.requestRender();
-    return countGridDots(canvas);
+    return gridFills.count();
   };
-  return { view, renderAndCountGridDots };
+  return { view, renderAndCountGridFills };
 }
 
 describe('CanvasView.gridIsVisible', () => {
   it('draws the grid by default', () => {
-    const { renderAndCountGridDots } = createViewOnMockCanvas();
-    expect(renderAndCountGridDots()).toBeGreaterThan(0);
+    const { renderAndCountGridFills } = createViewOnMockCanvas();
+    expect(renderAndCountGridFills()).toBeGreaterThan(0);
   });
 
   it('draws no grid once the preference turns it off', () => {
-    const { view, renderAndCountGridDots } = createViewOnMockCanvas();
+    const { view, renderAndCountGridFills } = createViewOnMockCanvas();
     view.gridIsVisible = false;
-    expect(renderAndCountGridDots()).toBe(0);
+    expect(renderAndCountGridFills()).toBe(0);
   });
 
   it('still draws the grid into an export that asked for one', () => {
@@ -47,6 +50,7 @@ describe('CanvasView.gridIsVisible', () => {
     view.gridIsVisible = false;
 
     const exportCanvas = createCanvasMock(400, 300);
+    const exportFills = recordGridFills(exportCanvas);
     view.renderSnapshot({
       canvas: exportCanvas,
       viewport: { width: 400, height: 300 },
@@ -55,6 +59,6 @@ describe('CanvasView.gridIsVisible', () => {
       grid: true,
     });
 
-    expect(countGridDots(exportCanvas)).toBeGreaterThan(0);
+    expect(exportFills.count()).toBeGreaterThan(0);
   });
 });

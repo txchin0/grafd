@@ -411,7 +411,7 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
   }
 
   function closeCurrentFlow(): void {
-    navigation.trail.length = 0;
+    setTrailLength(0);
     editors.closeAll();
     view.clearSelection();
     // Deliberately not flushed: the flow is closing because it was deleted or vanished, and a
@@ -888,12 +888,23 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
         return;
       }
 
-      navigation.trail.push(...dive.entries);
+      extendTrail(dive.entries);
       shell.trailChanged();
       await view.zoomDiveIn({ nodeRect, inlineAnchor: anchor?.transform ?? null });
     } finally {
       navigation.inProgress = false;
     }
+  }
+
+  // The canvas grid shows how deep the trail runs, so its length only changes through these two.
+  function setTrailLength(length: number): void {
+    navigation.trail.length = length;
+    view.diveDepth = length;
+  }
+
+  function extendTrail(entries: readonly TrailEntry[]): void {
+    navigation.trail.push(...entries);
+    view.diveDepth = navigation.trail.length;
   }
 
   function diveNavigationContext(flow: OpenFlow, model: FlowModel = flow.model) {
@@ -943,8 +954,9 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
       const entry = navigation.trail[index];
       const dropped = navigation.trail.slice(index);
       const leavingModel = openFlow.model;
-      navigation.trail.length = index;
+      // Held before the trail shortens: the hold keeps the depth the grid is leaving.
       view.beginSceneHold(openFlow.model, view.view);
+      setTrailLength(index);
       if (entry.path !== openFlow.path) {
         const opened = await openFile(entry.path, { restoreSavedView: false });
         if (!opened) {
@@ -1821,7 +1833,7 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
   // Picking a file from the sidebar snaps to it and clears the dive trail — the crumbs describe
   // a path through the flow that was open, which the new one has nothing to do with.
   function openFlowFromSidebar(path: string, presetText: string | null = null): void {
-    navigation.trail.length = 0;
+    setTrailLength(0);
     void openFile(path, { presetText });
   }
 
@@ -1830,7 +1842,7 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     view.clearSelection();
     expansions.reset();
     layers.reset();
-    navigation.trail.length = 0;
+    setTrailLength(0);
     session.reset();
     workspaceFiles = [];
     openFlow = null;

@@ -24,6 +24,7 @@ export function createContextMock() {
     fill: vi.fn(),
     fillText: vi.fn(),
     measureText: vi.fn(() => ({ width: 0 })),
+    createPattern: vi.fn(() => ({ setTransform: vi.fn() })),
     globalAlpha: 1,
     fillStyle: '',
     strokeStyle: '',
@@ -66,6 +67,7 @@ export function createCanvasMock(width = VIEWPORT.width, height = VIEWPORT.heigh
       toJSON: () => ({}),
     }),
     getContext: vi.fn(() => context),
+    ownerDocument: { createElement: vi.fn(() => createCanvasMock(0, 0)) },
   } as unknown as HTMLCanvasElement;
 }
 

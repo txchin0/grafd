@@ -53,6 +53,7 @@ import {
 import {
   distanceBetween,
   easeInOutCubic,
+  lerp,
   normalizedRect,
   rectCenter,
   rectContains,
@@ -144,6 +145,7 @@ import {
   type PinchAnchor,
 } from './pinch-gesture.js';
 import { WheelIntentReader, ZOOM_STEP_FACTOR } from './wheel-intent.js';
+import { GridPainter } from './grid-painter.js';
 import {
   inverseTransformPoint,
   modelsOnScreen,
@@ -378,6 +380,7 @@ function resizeCursorOf(handle: ResizeHandle): CanvasCursor {
 interface HeldScene {
   model: FlowModel;
   view: View;
+  diveDepth: number;
 }
 
 type SceneTransition =
@@ -638,6 +641,9 @@ export class CanvasView {
   drawStyle: DrawStyle = { color: null, width: DEFAULT_STROKE_WIDTH };
   readonly expansionLayer: ExpansionLayer;
   gridIsVisible = true;
+  // How many levels the open graph sits below the top of the dive trail; the grid resolves
+  // one step finer per level (grid-painter.ts).
+  diveDepth = 0;
   doubleClickOpensSubgraph = true;
   baseRoughness = DEFAULT_ROUGHNESS;
   readonly hiddenTitles: HiddenCanvasTitles = { ...NO_HIDDEN_TITLES };
@@ -650,6 +656,8 @@ export class CanvasView {
   private spaceDown = false;
   private renderQueued = false;
   private readonly wheelIntents = new WheelIntentReader();
+  // The tile the grid repeats is drawn on a canvas of its own, made by the canvas's own document.
+  private readonly gridPainter = new GridPainter(() => this.canvas.ownerDocument.createElement('canvas'));
   private notice: { text: string; world: Point; until: number } | null = null;
 
   // Every pointer currently down, at its latest position on the canvas. A second entry turns
@@ -1032,7 +1040,7 @@ export class CanvasView {
       }
       if (grid) {
         ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-        this.drawGrid(view);
+        this.drawGrid(view, this.diveDepth);
       }
       ctx.setTransform(
         pixelRatio * view.scale, 0, 0, pixelRatio * view.scale,
@@ -1061,7 +1069,7 @@ export class CanvasView {
   // flashing at the old camera.
 
   beginSceneHold(model: FlowModel, view: View): void {
-    this.sceneTransition = { phase: 'hold', outgoing: { model, view: { ...view } } };
+    this.sceneTransition = { phase: 'hold', outgoing: { model, view: { ...view }, diveDepth: this.diveDepth } };
     this.requestRender();
   }
 
@@ -2387,7 +2395,7 @@ export class CanvasView {
     const painter = this.scenePainter(this.hiddenTitles);
     const dpr = this.devicePixelRatio;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.drawGridIfVisible(this.view);
+    this.drawGridIfVisible(this.view, this.diveDepth);
 
     const { x, y, scale } = this.view;
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * x, dpr * y);
@@ -2411,7 +2419,7 @@ export class CanvasView {
     if (transition.phase === 'hold') {
       this.expansionLayer.layout(transition.outgoing.model, now);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      this.drawGridIfVisible(transition.outgoing.view);
+      this.drawGridIfVisible(transition.outgoing.view, transition.outgoing.diveDepth);
       this.drawWorldScene(painter, transition.outgoing.model, transition.outgoing.view, 1);
       return;
     }
@@ -2432,7 +2440,12 @@ export class CanvasView {
     const childAlpha = transition.childDrawnByParent ? 1 : (parentIsIncoming ? 1 - eased : eased);
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.drawGridIfVisible(this.view);
+    // Each scene's grid rides with its own camera and the two crossfade, so the grid being left
+    // magnifies away while the destination's grows in, both resolving towards the new depth.
+    const outgoingView = parentIsIncoming ? childView : parentView;
+    const depth = lerp(transition.outgoing.diveDepth, this.diveDepth, eased);
+    this.drawGridIfVisible(outgoingView, depth, 1 - eased);
+    this.drawGridIfVisible(this.view, depth, eased);
     this.drawWorldScene(painter, parentModel, parentView, parentAlpha);
 
     // The child scene is clipped to the node's on-screen rectangle so the subgraph reads
@@ -2477,23 +2490,19 @@ export class CanvasView {
 
   // Only the live canvas honours the preference; an export draws whatever its own grid
   // checkbox asked for, so renderSnapshot calls drawGrid directly.
-  private drawGridIfVisible(view: View): void {
-    if (this.gridIsVisible) this.drawGrid(view);
+  private drawGridIfVisible(view: View, depth: number, opacity = 1): void {
+    if (this.gridIsVisible) this.drawGrid(view, depth, opacity);
   }
 
-  private drawGrid(view: View): void {
-    const { ctx } = this;
-    const spacing = 32 * view.scale;
-    if (spacing < 9) return;
-    const bounds = this.viewport;
-    ctx.fillStyle = canvasPalette.grid;
-    const offsetX = ((view.x % spacing) + spacing) % spacing;
-    const offsetY = ((view.y % spacing) + spacing) % spacing;
-    for (let gridX = offsetX; gridX < bounds.width; gridX += spacing) {
-      for (let gridY = offsetY; gridY < bounds.height; gridY += spacing) {
-        ctx.fillRect(gridX - 0.75, gridY - 0.75, 1.5, 1.5);
-      }
-    }
+  private drawGrid(view: View, depth: number, opacity = 1): void {
+    this.gridPainter.paint(this.ctx, {
+      view,
+      viewport: this.viewport,
+      pixelRatio: this.devicePixelRatio,
+      depth,
+      color: canvasPalette.grid,
+      opacity,
+    });
   }
 
   private layOutNodeText(model: FlowModel, node: FlowNode, rect: Rect): NodeTextLayout {
