@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   HANDLE_HIT_RADIUS_PX,
+  handleFrameAround,
   hitResizeHandle,
   resizeCornersOf,
   resizeHandlePointsOf,
@@ -11,33 +12,42 @@ import { parseFlow } from '../src/shared/flow-format.js';
 import { buildModel } from '../src/client/flow-doc.js';
 
 describe('hitResizeHandle', () => {
-  const rect = { x: 0, y: 0, w: 100, h: 80 };
+  const frame = handleFrameAround({ x: 0, y: 0, w: 100, h: 80 }, 0);
 
   it('hits each corner within the radius', () => {
-    expect(hitResizeHandle(rect, { x: 0, y: 0 }, 5)).toBe('nw');
-    expect(hitResizeHandle(rect, { x: 100, y: 0 }, 5)).toBe('ne');
-    expect(hitResizeHandle(rect, { x: 0, y: 80 }, 5)).toBe('sw');
-    expect(hitResizeHandle(rect, { x: 100, y: 80 }, 5)).toBe('se');
+    expect(hitResizeHandle(frame, { x: 0, y: 0 }, 5)).toBe('nw');
+    expect(hitResizeHandle(frame, { x: 100, y: 0 }, 5)).toBe('ne');
+    expect(hitResizeHandle(frame, { x: 0, y: 80 }, 5)).toBe('sw');
+    expect(hitResizeHandle(frame, { x: 100, y: 80 }, 5)).toBe('se');
   });
 
   it('hits each side along its length, on it or just outside it', () => {
-    expect(hitResizeHandle(rect, { x: 50, y: 0 }, 4)).toBe('n');
-    expect(hitResizeHandle(rect, { x: 30, y: -4 }, 4)).toBe('n');
-    expect(hitResizeHandle(rect, { x: 104, y: 40 }, 4)).toBe('e');
-    expect(hitResizeHandle(rect, { x: 70, y: 83 }, 4)).toBe('s');
-    expect(hitResizeHandle(rect, { x: -2, y: 20 }, 4)).toBe('w');
+    expect(hitResizeHandle(frame, { x: 50, y: 0 }, 4)).toBe('n');
+    expect(hitResizeHandle(frame, { x: 30, y: -4 }, 4)).toBe('n');
+    expect(hitResizeHandle(frame, { x: 104, y: 40 }, 4)).toBe('e');
+    expect(hitResizeHandle(frame, { x: 70, y: 83 }, 4)).toBe('s');
+    expect(hitResizeHandle(frame, { x: -2, y: 20 }, 4)).toBe('w');
   });
 
   it('leaves the inside to what is selected, and misses beyond the reach', () => {
-    expect(hitResizeHandle(rect, { x: 50, y: 40 }, HANDLE_HIT_RADIUS_PX)).toBeNull();
-    expect(hitResizeHandle(rect, { x: 50, y: 2 }, 4)).toBeNull();
-    expect(hitResizeHandle(rect, { x: 50, y: -5 }, 4)).toBeNull();
+    expect(hitResizeHandle(frame, { x: 50, y: 40 }, HANDLE_HIT_RADIUS_PX)).toBeNull();
+    expect(hitResizeHandle(frame, { x: 50, y: 2 }, 4)).toBeNull();
+    expect(hitResizeHandle(frame, { x: 50, y: -5 }, 4)).toBeNull();
   });
 
   it('reports every handle at a point a press lands on it, and no side too short to grab clear of its corners', () => {
-    for (const { handle, x, y } of resizeHandlePointsOf(rect, 4)) expect(hitResizeHandle(rect, { x, y }, 4)).toBe(handle);
-    expect(resizeHandlePointsOf(rect, 4).map((point) => point.handle)).toEqual(['nw', 'ne', 'sw', 'se', 'n', 'e', 's', 'w']);
-    expect(resizeHandlePointsOf({ x: 0, y: 0, w: 100, h: 8 }, 4).map((point) => point.handle)).toEqual(['nw', 'ne', 'sw', 'se', 'n', 's']);
+    for (const { handle, x, y } of resizeHandlePointsOf(frame, 4)) expect(hitResizeHandle(frame, { x, y }, 4)).toBe(handle);
+    expect(resizeHandlePointsOf(frame, 4).map((point) => point.handle)).toEqual(['nw', 'ne', 'sw', 'se', 'n', 'e', 's', 'w']);
+    expect(resizeHandlePointsOf(handleFrameAround({ x: 0, y: 0, w: 100, h: 8 }, 0), 4).map((point) => point.handle)).toEqual(['nw', 'ne', 'sw', 'se', 'n', 's']);
+  });
+
+  it('puts the corners on an outline drawn outside the object, and grabs a side across the gap', () => {
+    const outlined = handleFrameAround({ x: 0, y: 0, w: 100, h: 80 }, 5);
+    expect(hitResizeHandle(outlined, { x: -5, y: -5 }, 4)).toBe('nw');
+    expect(hitResizeHandle(outlined, { x: 50, y: 0 }, 4)).toBe('n');
+    expect(hitResizeHandle(outlined, { x: 50, y: -9 }, 4)).toBe('n');
+    expect(hitResizeHandle(outlined, { x: 50, y: 1 }, 4)).toBeNull();
+    for (const { handle, x, y } of resizeHandlePointsOf(outlined, 4)) expect(hitResizeHandle(outlined, { x, y }, 4)).toBe(handle);
   });
 });
 

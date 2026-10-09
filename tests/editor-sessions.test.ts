@@ -16,6 +16,7 @@ import { SESSION_FLOW_PATH, sessionWorkspaceFiles } from './session-fixtures.js'
 import {
   gesturesIn,
   isHistoryAction,
+  MAX_AFFORDANCE_INDEX,
   MAX_PICK_INDEX,
   pathBetween,
   performAction,
@@ -269,7 +270,7 @@ async function pressTargetsReachedFrom(editor: HeadlessEditor, pick: TargetPick)
   if (!point) return [];
   const reached = [view.pressTargetKindAt(point)];
   await performAction(editor, { type: 'click', target: pick, shift: false });
-  for (let index = 0; index <= MAX_PICK_INDEX; index++) {
+  for (let index = 0; index <= MAX_AFFORDANCE_INDEX; index++) {
     const affordance = resolveTarget(editor, affordancePick(index));
     if (affordance) reached.push(view.pressTargetKindAt(affordance));
   }

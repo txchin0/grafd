@@ -137,6 +137,9 @@ export interface ActionTrace {
 }
 
 export const MAX_PICK_INDEX = 7;
+// Enough to reach every affordance of the busiest selection: a lone node's four corners, four
+// sides and four ports.
+export const MAX_AFFORDANCE_INDEX = 11;
 const MAX_NUDGE = 4;
 const MAX_DRAG_OFFSET = 160;
 // Far from anything the fixture draws, so a press there lands on bare canvas.
@@ -164,7 +167,7 @@ export const sessionAction: fc.Arbitrary<SessionAction> = fc.oneof(
   { weight: 3, arbitrary: fc.record({ type: fc.constant('nudge' as const), from: targetPick, by: dragOffset, shift: fc.boolean() }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('wiggle' as const), from: targetPick, by: dragOffset }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('abandoned-drag' as const), from: targetPick, by: dragOffset }) },
-  { weight: 2, arbitrary: fc.record({ type: fc.constant('grab-affordance' as const), owner: targetPick, affordance: fc.nat(MAX_PICK_INDEX), by: dragOffset }) },
+  { weight: 2, arbitrary: fc.record({ type: fc.constant('grab-affordance' as const), owner: targetPick, affordance: fc.nat(MAX_AFFORDANCE_INDEX), by: dragOffset }) },
   { weight: 2, arbitrary: fc.record({ type: fc.constant('menu' as const), target: targetPick, choice: fc.nat(12) }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('rename' as const), target: targetPick, name: fc.nat(TYPED_NAMES.length - 1) }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('describe' as const), target: targetPick, text: fc.nat(TYPED_DESCRIPTIONS.length - 1) }) },

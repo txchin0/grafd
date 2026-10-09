@@ -116,9 +116,11 @@ import { drawingInkColor, inkStroke } from './stroke-painter.js';
 import {
   HANDLE_HIT_RADIUS_PX,
   axesOf,
+  handleFrameAround,
   hitResizeHandle,
   resizeHandlePointsOf,
   selectionHandleOrigins,
+  type HandleFrame,
   type ResizeHandle,
 } from './resize-handles.js';
 // A live object refilled in place on every theme change, never reassigned.
@@ -287,12 +289,12 @@ type PressTarget =
 export type PressTargetKind = PressTarget['kind'];
 
 // The handles a sole selection resizes by (R52) — its corners, and the whole length of each side —
-// and the rectangle they sit on. Drawing them, pressing them and listing them (`affordances`) all
-// ask `cornerHandles`.
+// and the outline they sit on, which is the one its selection is drawn with. Drawing them,
+// pressing them and listing them (`affordances`) all ask `cornerHandles`.
 type CornerHandles =
-  | { kind: 'node-handle'; node: FlowNode; rect: Rect }
-  | { kind: 'region-handle'; context: ModelContext; rect: Rect }
-  | { kind: 'drawing-handle'; resizable: ResizableDrawings; rect: Rect };
+  | { kind: 'node-handle'; node: FlowNode; frame: HandleFrame }
+  | { kind: 'region-handle'; context: ModelContext; frame: HandleFrame }
+  | { kind: 'drawing-handle'; resizable: ResizableDrawings; frame: HandleFrame };
 
 // Something the selection, or the node under the pointer, offers a press beyond the object
 // itself: a port, a corner or side handle, a bend grip.
@@ -535,9 +537,13 @@ const FIT_PADDING = 80;
 // Where the origin sits relative to the viewport centre when there is nothing to frame.
 const EMPTY_CANVAS_ORIGIN = { x: 200, y: 150 };
 const EMPTY_SNAPSHOT_SIZE = { w: 400, h: 300 };
-// How far, in world units, the selection outline sits outside a node or drawing, and a group's
-// outline outside its members' combined ink.
-const SELECTION_OUTLINE_INFLATE = 5;
+// Screen pixels: how far the selection outline sits outside a node or drawing.
+const SELECTION_OUTLINE_INFLATE_PX = 5;
+const RESIZE_HANDLE_SIZE_PX = 8;
+// Screen pixels: how far the outline around an edge's prospective target sits outside it.
+const EDGE_TARGET_OUTLINE_INFLATE_PX = 3;
+// World units: how far a group's outline sits outside its members' combined ink. Its handles sit on
+// this outline, and resizing the group scales this padded rectangle.
 const GROUP_OUTLINE_INFLATE = 10;
 const NOTICE_MS = 2400;
 const NOTICE_FONT = '13px system-ui, sans-serif';
@@ -834,7 +840,7 @@ export class CanvasView {
   affordances(): Affordance[] {
     const handles = this.cornerHandles();
     const corners = handles
-      ? resizeHandlePointsOf(handles.rect, this.handleReach()).map(({ handle, x, y }) => ({ kind: handles.kind, point: { x, y }, handle }))
+      ? resizeHandlePointsOf(handles.frame, this.handleReach()).map(({ handle, x, y }) => ({ kind: handles.kind, point: { x, y }, handle }))
       : [];
     const loneEdge = this.edgeSelectedAlone();
     const grip = loneEdge ? this.edgeAnchor(loneEdge) : null;
@@ -2175,16 +2181,16 @@ export class CanvasView {
 
   private cornerHandles(): CornerHandles | null {
     const sole = this.soleSelection();
-    if (sole?.kind === 'node') return { kind: 'node-handle', node: sole.node, rect: this.rect(sole.node) };
-    if (sole?.kind === 'drawings') return { kind: 'drawing-handle', resizable: sole.resizable, rect: this.drawingHandleRect(sole.resizable) };
+    if (sole?.kind === 'node') return { kind: 'node-handle', node: sole.node, frame: this.selectionOutlineAround(this.rect(sole.node)) };
+    if (sole?.kind === 'drawings') return { kind: 'drawing-handle', resizable: sole.resizable, frame: this.drawingHandleFrame(sole.resizable) };
     if (sole?.kind !== 'region') return null;
-    const rect = this.regionRectOfContext(sole.context);
-    return rect ? { kind: 'region-handle', context: sole.context, rect } : null;
+    const rect = this.selectedRegionDisplayRectOf(sole.context);
+    return rect ? { kind: 'region-handle', context: sole.context, frame: handleFrameAround(rect, 0) } : null;
   }
 
   private hitCornerHandle(world: Point): PressTarget | null {
     const handles = this.cornerHandles();
-    const handle = handles && hitResizeHandle(handles.rect, world, this.handleReach());
+    const handle = handles && hitResizeHandle(handles.frame, world, this.handleReach());
     if (!handles || !handle) return null;
     switch (handles.kind) {
       case 'node-handle':
@@ -2537,20 +2543,16 @@ export class CanvasView {
   }
 
   private drawSelectionDecorations(): void {
-    this.drawSelectedRegionDecorations();
+    this.drawSelectedRegionOutlines();
     const { ctx } = this;
-    const inflate = SELECTION_OUTLINE_INFLATE;
     ctx.save();
     ctx.strokeStyle = canvasPalette.select;
     ctx.lineWidth = SELECTION_LINE_WIDTH_PX / this.view.scale;
     ctx.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
-    for (const node of this.selection) {
-      if (!this.isNodeVisible(node)) continue;
-      const { x, y, w, h } = this.rect(node);
-      ctx.strokeRect(x - inflate, y - inflate, w + inflate * 2, h + inflate * 2);
-    }
-    for (const { x, y, w, h } of this.selectedDrawingOutlines()) {
-      ctx.strokeRect(x - inflate, y - inflate, w + inflate * 2, h + inflate * 2);
+    const visibleNodeRects = [...this.selection].filter((node) => this.isNodeVisible(node)).map((node) => this.rect(node));
+    for (const rect of [...visibleNodeRects, ...this.selectedDrawingOutlines()]) {
+      const { x, y, w, h } = this.selectionOutlineAround(rect).outline;
+      ctx.strokeRect(x, y, w, h);
     }
     ctx.setLineDash([]);
     for (const { x, y, w, h } of this.selectedGroupOutlines().map((union) => padRect(union, GROUP_OUTLINE_INFLATE))) {
@@ -2559,13 +2561,21 @@ export class CanvasView {
     ctx.restore();
 
     this.drawSelectedEdgeGrip();
+    this.drawResizeHandles();
+  }
 
-    const handleRect = this.resizeHandleRect();
-    if (!handleRect) return;
-    const handleSize = 8 / this.view.scale;
-    ctx.fillStyle = canvasPalette.select;
-    for (const origin of selectionHandleOrigins(handleRect, handleSize)) {
-      ctx.fillRect(origin.x, origin.y, handleSize, handleSize);
+  // The outline drawn around a selected node or drawing, which a lone one's handles sit on.
+  private selectionOutlineAround(rect: Rect): HandleFrame {
+    return handleFrameAround(rect, SELECTION_OUTLINE_INFLATE_PX / this.view.scale);
+  }
+
+  private drawResizeHandles(): void {
+    const frame = this.drawnHandleFrame();
+    if (!frame) return;
+    const handleSize = RESIZE_HANDLE_SIZE_PX / this.view.scale;
+    this.ctx.fillStyle = canvasPalette.select;
+    for (const origin of selectionHandleOrigins(frame.outline, handleSize)) {
+      this.ctx.fillRect(origin.x, origin.y, handleSize, handleSize);
     }
   }
 
@@ -2588,19 +2598,18 @@ export class CanvasView {
     ctx.restore();
   }
 
-  // Corner handles belong to a selection of exactly one node, one drawing or one group; any other
-  // selection is not resizable, and handles it would not answer would lie about what a press does.
-  private resizeHandleRect(): Rect | null {
+  // Handles belong to a selection of exactly one node, one region, one drawing or one group; any
+  // other selection is not resizable, and handles it would not answer would lie about what a press
+  // does.
+  private drawnHandleFrame(): HandleFrame | null {
     const handles = this.cornerHandles();
-    if (handles?.kind === 'node-handle') return this.isNodeVisible(handles.node) ? handles.rect : null;
-    return handles?.kind === 'drawing-handle' ? handles.rect : null;
+    if (handles?.kind === 'node-handle' && !this.isNodeVisible(handles.node)) return null;
+    return handles?.frame ?? null;
   }
 
   // Every selected region gets the same dashed outline a node does, drawn on its frame rather
-  // than inside it, so the thing under the pointer is the thing that will move. Corner handles
-  // appear only when the region is the sole selection — a mixed selection is not resizable, and
-  // drawing handles it would not answer would lie about what a press can do.
-  private drawSelectedRegionDecorations(): void {
+  // than inside it, so the thing under the pointer is the thing that will move.
+  private drawSelectedRegionOutlines(): void {
     const { ctx } = this;
     for (const context of this.selectedRegions) {
       const rect = this.selectedRegionDisplayRectOf(context);
@@ -2611,16 +2620,6 @@ export class CanvasView {
       ctx.setLineDash([6 / this.view.scale, 4 / this.view.scale]);
       ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
       ctx.restore();
-    }
-
-    const sole = this.soleSelection();
-    if (sole?.kind !== 'region') return;
-    const rect = this.selectedRegionDisplayRectOf(sole.context);
-    if (!rect) return;
-    const handleSize = 8 / this.view.scale;
-    ctx.fillStyle = canvasPalette.select;
-    for (const origin of selectionHandleOrigins(rect, handleSize)) {
-      ctx.fillRect(origin.x, origin.y, handleSize, handleSize);
     }
   }
 
@@ -2680,8 +2679,9 @@ export class CanvasView {
       if (gesture.hoverTarget) {
         const { x, y, w, h } = this.rect(gesture.hoverTarget);
         ctx.strokeStyle = canvasPalette.select;
+        const inflate = EDGE_TARGET_OUTLINE_INFLATE_PX / this.view.scale;
         ctx.lineWidth = 2 / this.view.scale;
-        ctx.strokeRect(x - 3, y - 3, w + 6, h + 6);
+        ctx.strokeRect(x - inflate, y - inflate, w + inflate * 2, h + inflate * 2);
       }
     } else if (gesture.type === 'draw') {
       const { scale, tx, ty } = gesture.transform;
@@ -2945,13 +2945,12 @@ export class CanvasView {
     return { surface, drawings: members.map((drawing) => ({ model: first.model, id: drawing.id })), members };
   }
 
-  // On the drawing's ink for a lone drawing, on the group's outline for a group — where the eye
-  // already sees the edge of the thing being resized.
-  private drawingHandleRect(resizable: ResizableDrawings): Rect {
+  // On the outline the selection is drawn with: a lone drawing's own, or its group's.
+  private drawingHandleFrame(resizable: ResizableDrawings): HandleFrame {
     const shownBounds = resizable.members.map((drawing) =>
       worldBoundsOf(this.drawingAsShown({ model: resizable.surface.model, id: drawing.id }, drawing), resizable.surface));
     const bounds = boundsOfRects(shownBounds)!;
-    return resizable.members.length > 1 ? padRect(bounds, GROUP_OUTLINE_INFLATE) : bounds;
+    return resizable.members.length > 1 ? handleFrameAround(bounds, GROUP_OUTLINE_INFLATE) : this.selectionOutlineAround(bounds);
   }
 }
 

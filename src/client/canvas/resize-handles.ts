@@ -1,11 +1,13 @@
 // Where a selection can be resized from, shared by node, region and drawing selection chrome: a
-// handle at each corner, and each side's whole length just outside it. Reaches are measured in
-// screen pixels and converted by the caller via the view scale.
+// handle at each corner of its outline, and each side's whole length just outside it. Reaches are
+// measured in screen pixels and converted by the caller via the view scale.
 //
-// A side is grabbed only from outside the selection, where its outline is drawn: inside belongs
-// to what is selected, which a press there still moves.
+// The outline may stand a gap outside what it resizes. A side is grabbed from the object's own
+// edge outward, across that gap, never from inside: inside belongs to what is selected, which a
+// press there still moves.
 
 import type { Rect } from '../../shared/flow-format.js';
+import { padRect } from '../../shared/rect-math.js';
 import type { Point } from '../geometry.js';
 
 export type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se';
@@ -38,6 +40,16 @@ export function isResizeEdge(handle: ResizeHandle): handle is ResizeEdge {
   return handle.length === 1;
 }
 
+// The outline a selection's handles sit on, drawn `gap` outside the object it resizes.
+export interface HandleFrame {
+  outline: Rect;
+  gap: number;
+}
+
+export function handleFrameAround(rect: Rect, gap: number): HandleFrame {
+  return { outline: padRect(rect, gap), gap };
+}
+
 export interface HandlePoint {
   handle: ResizeHandle;
   x: number;
@@ -55,8 +67,8 @@ export function resizeCornersOf(rect: Rect): (HandlePoint & { handle: ResizeCorn
 }
 
 // Corners first, so where a corner's handle and a side's reach meet, the corner answers.
-export function hitResizeHandle(rect: Rect, world: Point, reach: number): ResizeHandle | null {
-  return hitResizeCorner(rect, world, reach) ?? hitResizeEdge(rect, world, reach);
+export function hitResizeHandle(frame: HandleFrame, world: Point, reach: number): ResizeHandle | null {
+  return hitResizeCorner(frame.outline, world, reach) ?? hitResizeEdge(frame, world, reach);
 }
 
 function hitResizeCorner(rect: Rect, world: Point, reach: number): ResizeCorner | null {
@@ -64,12 +76,12 @@ function hitResizeCorner(rect: Rect, world: Point, reach: number): ResizeCorner 
   return corner?.handle ?? null;
 }
 
-// Within `reach` outside a side — on the side itself included — and alongside it.
-function hitResizeEdge(rect: Rect, world: Point, reach: number): ResizeEdge | null {
+// Alongside a side, from the object's own edge to `reach` outside the outline's.
+function hitResizeEdge({ outline: rect, gap }: HandleFrame, world: Point, reach: number): ResizeEdge | null {
   const alongTopAndBottom = world.x >= rect.x && world.x <= rect.x + rect.w;
   const alongLeftAndRight = world.y >= rect.y && world.y <= rect.y + rect.h;
   const outside = { n: rect.y - world.y, s: world.y - (rect.y + rect.h), w: rect.x - world.x, e: world.x - (rect.x + rect.w) };
-  const isWithinReach = (distance: number) => distance >= 0 && distance <= reach;
+  const isWithinReach = (distance: number) => distance >= -gap && distance <= reach;
   if (alongTopAndBottom && isWithinReach(outside.n)) return 'n';
   if (alongTopAndBottom && isWithinReach(outside.s)) return 's';
   if (alongLeftAndRight && isWithinReach(outside.w)) return 'w';
@@ -79,11 +91,11 @@ function hitResizeEdge(rect: Rect, world: Point, reach: number): ResizeEdge | nu
 
 // Every handle a press can reach, at a point a press there lands on it: the corners, then each
 // side long enough to be grabbed clear of its corners and its middle.
-export function resizeHandlePointsOf(rect: Rect, reach: number): HandlePoint[] {
+export function resizeHandlePointsOf(frame: HandleFrame, reach: number): HandlePoint[] {
   const sides = EDGES
-    .map((edge) => ({ handle: edge, ...edgeAffordancePoint(rect, edge, reach) }))
-    .filter((point) => hitResizeHandle(rect, point, reach) === point.handle);
-  return [...resizeCornersOf(rect), ...sides];
+    .map((edge) => ({ handle: edge, ...edgeAffordancePoint(frame.outline, edge, reach) }))
+    .filter((point) => hitResizeHandle(frame, point, reach) === point.handle);
+  return [...resizeCornersOf(frame.outline), ...sides];
 }
 
 function edgeAffordancePoint(rect: Rect, edge: ResizeEdge, reach: number): Point {
