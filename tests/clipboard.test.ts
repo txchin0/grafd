@@ -2,13 +2,12 @@
 // member remapping, name uniquification, and paste into a `graph:` scope.
 
 import { describe, expect, it, vi } from 'vitest';
-import { parseFlow, serializeFlow, type ContextBlock, type FlowDocument, type FlowNode } from '../src/shared/flow-format.js';
-import { assignMissingIds, allContextBlocks, contextBlockNamed, nodesIn, allNodes } from '../src/client/flow-doc.js';
+import { getProp, parseFlow, serializeFlow, type ContextBlock, type FlowDocument, type FlowNode } from '../src/shared/flow-format.js';
+import { assignMissingIds, allContextBlocks, buildModel, contextBlockNamed, nodesIn, allNodes } from '../src/client/flow-doc.js';
 import type { DocumentOwner } from '../src/client/canvas/expansion.js';
 import type { RegionTarget } from '../src/client/canvas/canvas-view.js';
 import type { DrawingSelection } from '../src/client/canvas/drawing-selection.js';
-import type { OpenFlow } from '../src/client/open-flow.js';
-import { createClipboard, type Clipboard, type ClipboardOptions } from '../src/client/clipboard.js';
+import { createClipboard, type Clipboard, type ClipboardOptions, type PastePlacement } from '../src/client/clipboard.js';
 import {
   applyCapturedVisuals,
   applyRegionVisuals,
@@ -73,13 +72,24 @@ graph: Steps
 const withoutDrawings = {
   selectedDrawings: () => [],
   copyDrawings: () => [],
+  copyDrawingsInScope: () => ({ drawings: [], groups: [] }),
   pasteDrawings: () => [],
   runAction: (body: () => void) => body(),
+  notify: () => {},
 } satisfies Partial<ClipboardOptions>;
+
+const KEYBOARD_POINTER = { x: 0, y: 0 };
+
+// Pastes into `owner`'s graph `scope`: from the keyboard, or from the canvas menu at `point`.
+function pasteInto(clipboard: Clipboard, owner: DocumentOwner, scope: string | null = null, point?: { x: number; y: number }): void {
+  const placement: PastePlacement = point ? 'at-point' : 'beside-originals';
+  clipboard.paste({ target: { owner, scope }, point: point ?? KEYBOARD_POINTER, placement });
+}
 
 interface Harness {
   doc: FlowDocument;
   clipboard: Clipboard;
+  paste: (scope?: string | null, point?: { x: number; y: number }) => void;
   options: {
     select: ReturnType<typeof vi.fn>;
     deleteSelection: ReturnType<typeof vi.fn>;
@@ -91,17 +101,10 @@ interface Harness {
   setSelection: (nodes: FlowNode[], regions: ContextBlock[]) => void;
 }
 
-function harnessFor(text: string, flowOverride?: Partial<OpenFlow>, documentResolvable = true): Harness {
+function harnessFor(text: string): Harness {
   const doc = parseFlow(text);
   assignMissingIds(doc);
   const owner: DocumentOwner = { doc, path: 'main.flow' };
-  const flow: OpenFlow = {
-    doc,
-    path: 'main.flow',
-    scope: null,
-    model: { nodes: [], edges: [], ghosts: [], contexts: [], nodesByName: new Map(), traits: new Map(), sourceDoc: doc, sourcePath: 'main.flow', sourceScope: null },
-    ...flowOverride,
-  };
   let selection: FlowNode[] = [];
   let selectedRegions: RegionTarget[] = [];
   const options = {
@@ -110,13 +113,12 @@ function harnessFor(text: string, flowOverride?: Partial<OpenFlow>, documentReso
     applyToDoc: vi.fn((_owner: DocumentOwner, mutation: () => void) => mutation()),
   };
   const clipboard = createClipboard({
-    openFlow: () => flow,
     selection: () => selection,
     selectedRegions: () => selectedRegions,
     select: (nodes, regions) => options.select(nodes, regions),
     ownerOf: () => owner,
     ownerOfRegion: () => owner,
-    documentAt: (path) => (documentResolvable && path === 'main.flow' ? owner : null),
+    documentAt: (path) => (path === 'main.flow' ? doc : null),
     applyToDoc: (target, mutation) => options.applyToDoc(target, mutation),
     deleteSelection: () => options.deleteSelection(),
     captureVisuals: () => null,
@@ -132,6 +134,7 @@ function harnessFor(text: string, flowOverride?: Partial<OpenFlow>, documentReso
   return {
     doc,
     clipboard,
+    paste: (scope = null, point) => pasteInto(clipboard, owner, scope, point),
     options,
     nodeNamed: (name) => allNodes(doc).find((node) => node.name === name)!,
     regionNamed: (name) => contextBlockNamed(doc, name)!,
@@ -152,7 +155,7 @@ describe('clipboard with regions', () => {
       [harness.regionNamed('Auth')],
     );
     harness.clipboard.copy();
-    harness.clipboard.paste();
+    harness.paste();
 
     const names = harness.blocksIn().map((block) => block.name);
     expect(names).toContain('Auth 2');
@@ -169,13 +172,13 @@ describe('clipboard with regions', () => {
     const harness = harnessFor(MAIN);
     harness.setSelection([harness.nodeNamed('Login')], []);
     harness.clipboard.copy();
-    harness.clipboard.paste();
-    harness.clipboard.paste();
+    harness.paste();
+    harness.paste();
     expect(harness.nodeNamed('Login 2').pos).toEqual({ x: 224, y: 224, w: 200, h: 88 });
     expect(harness.nodeNamed('Login 3').pos).toEqual({ x: 248, y: 248, w: 200, h: 88 });
 
     harness.clipboard.copy();
-    harness.clipboard.paste();
+    harness.paste();
     expect(harness.nodeNamed('Login 4').pos).toEqual({ x: 224, y: 224, w: 200, h: 88 });
   });
 
@@ -183,17 +186,17 @@ describe('clipboard with regions', () => {
     const harness = harnessFor(MAIN);
     harness.setSelection([], [harness.regionNamed('Cart')]);
     harness.clipboard.copy();
-    harness.clipboard.paste();
+    harness.paste();
 
     const pasted = harness.blocksIn().find((block) => block.name === 'Cart 2')!;
     expect(pasted.members).toEqual([]);
   });
 
   it('pastes regions into an open graph scope', () => {
-    const harness = harnessFor(SCOPED, { scope: 'Steps' }, false);
+    const harness = harnessFor(SCOPED);
     harness.setSelection([], [harness.regionNamed('Auth')]);
     harness.clipboard.copy();
-    harness.clipboard.paste();
+    harness.paste('Steps');
 
     expect(harness.blocksIn().map((block) => block.name)).toEqual(['Auth', 'Auth 2']);
     const graph = harness.doc.items.find((item) => item.kind === 'graph');
@@ -201,6 +204,41 @@ describe('clipboard with regions', () => {
       kind: 'context',
       block: expect.objectContaining({ name: 'Auth 2' }),
     });
+  });
+
+  it('pastes from the keyboard into another graph at the pointer, stepping on with each repeat', () => {
+    const harness = harnessFor(SCOPED);
+    harness.setSelection([harness.nodeNamed('Login')], []);
+    harness.clipboard.copy();
+    const target = { owner: { doc: harness.doc, path: 'main.flow' }, scope: null };
+    harness.clipboard.paste({ target, point: { x: 500, y: 100 }, placement: 'beside-originals' });
+    harness.clipboard.paste({ target, point: { x: 500, y: 100 }, placement: 'beside-originals' });
+
+    const topLevel = nodesIn(harness.doc.items);
+    expect(topLevel.map((node) => node.pos)).toEqual([
+      { x: 500, y: 100, w: 200, h: 88 },
+      { x: 524, y: 124, w: 200, h: 88 },
+    ]);
+  });
+
+  it('writes a graph block an expand names but nobody has written yet, to paste into', () => {
+    const harness = harnessFor(MAIN);
+    harness.setSelection([harness.nodeNamed('Checkout')], []);
+    harness.clipboard.copy();
+    harness.paste('Fresh', { x: 0, y: 0 });
+
+    const fresh = harness.doc.items.find((item) => item.kind === 'graph' && item.name === 'Fresh');
+    expect(fresh && fresh.kind === 'graph' ? nodesIn(fresh.items).map((node) => node.name) : null).toEqual(['Checkout']);
+  });
+
+  it("points a pasted node's updates at the region copied with it", () => {
+    const harness = harnessFor(MAIN.replace('  pos: 200, 200, 200, 88', '  pos: 200, 200, 200, 88\n  updates: [Auth]'));
+    harness.setSelection([harness.nodeNamed('Login')], [harness.regionNamed('Auth')]);
+    harness.clipboard.copy();
+    harness.paste();
+
+    expect(getProp(harness.nodeNamed('Login 2'), 'updates')).toBe('[Auth 2]');
+    expect(getProp(harness.nodeNamed('Login'), 'updates')).toBe('[Auth]');
   });
 
   it('duplicates a mixed selection as one cluster with remapped membership', () => {
@@ -237,7 +275,7 @@ describe('clipboard with regions', () => {
     harness.setSelection([], [harness.regionNamed('Auth')]);
     harness.clipboard.copy();
     expect(harness.clipboard.hasContent()).toBe(true);
-    harness.clipboard.paste({ x: 500, y: 500 });
+    harness.paste(null, { x: 500, y: 500 });
     const pasted = harness.blocksIn().find((block) => block.name === 'Auth 2')!;
     expect(pasted.pos).toEqual({ x: 500, y: 500, w: 800, h: 600 });
   });
@@ -249,7 +287,7 @@ describe('clipboard with regions', () => {
       [harness.regionNamed('Auth')],
     );
     harness.clipboard.copy();
-    harness.clipboard.paste();
+    harness.paste();
     const reparsed = parseFlow(textOf(harness.doc));
     expect(contextBlockNamed(reparsed, 'Auth 2')).toBeTruthy();
     expect(nodesIn(reparsed.items).map((node) => node.name)).toContain('Login 2');
@@ -268,20 +306,13 @@ describe('clipboard and the canvas layer', () => {
     setRegionStyle(layer, 'Auth', { color: 'purple', fill: 'dots' });
     let selection: FlowNode[] = [];
     let selectedRegions: RegionTarget[] = [];
-    const flow = {
-      doc,
-      path: 'main.flow',
-      scope: null,
-      model: { nodes: [], edges: [], ghosts: [], contexts: [], nodesByName: new Map(), traits: new Map(), sourceDoc: doc, sourcePath: 'main.flow', sourceScope: null },
-    } as OpenFlow;
     const clipboard = createClipboard({
-      openFlow: () => flow,
       selection: () => selection,
       selectedRegions: () => selectedRegions,
       select: () => {},
       ownerOf: () => owner,
       ownerOfRegion: () => owner,
-      documentAt: () => owner,
+      documentAt: () => doc,
       applyToDoc: (_owner, mutation) => mutation(),
       deleteSelection: () => {},
       captureVisuals: (from, nodes) => captureVisuals(layer, documentIdentities(from.doc), nodes),
@@ -298,7 +329,7 @@ describe('clipboard and the canvas layer', () => {
       selection = names.map((name) => allNodes(doc).find((node) => node.name === name)!);
       selectedRegions = regionNames.map((name) => ({ block: contextBlockNamed(doc, name)!, doc, path: 'main.flow' }));
     };
-    return { doc, layer, clipboard, select };
+    return { doc, layer, clipboard: { ...clipboard, paste: () => pasteInto(clipboard, owner) }, select };
   }
 
   function regionCopiesOf(doc: FlowDocument, sourceName: string): ContextBlock[] {
@@ -354,13 +385,8 @@ describe('clipboard and strokes', () => {
     const doc = parseFlow(MAIN);
     assignMissingIds(doc);
     const owner: DocumentOwner = { doc, path: 'main.flow' };
-    const flow = {
-      doc,
-      path: 'main.flow',
-      scope: null,
-      model: { nodes: [], edges: [], ghosts: [], contexts: [], nodesByName: new Map(), traits: new Map(), sourceDoc: doc, sourcePath: 'main.flow', sourceScope: null },
-    } as OpenFlow;
-    const selectedDrawings: DrawingSelection[] = [{ model: flow.model, id: 's' }];
+    const model = buildModel(doc, null);
+    const selectedDrawings: DrawingSelection[] = [{ model, id: 's' }];
     const deletions: string[] = [];
     let openActions = 0;
     const pasteDrawings = vi.fn((target: { owner: DocumentOwner; scope: string | null }) => [
@@ -368,14 +394,13 @@ describe('clipboard and strokes', () => {
     ]);
     const select = vi.fn();
     const clipboard = createClipboard({
-      openFlow: () => flow,
       selection: () => [],
       selectedRegions: () => [],
       selectedDrawings: () => selectedDrawings,
       select,
       ownerOf: () => owner,
       ownerOfRegion: () => owner,
-      documentAt: () => owner,
+      documentAt: () => doc,
       applyToDoc: (_owner, mutation) => mutation(),
       deleteSelection: () => deletions.push(openActions > 0 ? 'inside an action' : 'alone'),
       captureVisuals: () => null,
@@ -383,12 +408,14 @@ describe('clipboard and strokes', () => {
       captureRegionVisuals: () => null,
       applyRegionVisuals: () => {},
       copyDrawings: () => [{ owner, scope: null, carried }],
+      copyDrawingsInScope: () => ({ drawings: [], groups: [] }),
       pasteDrawings,
       runAction: (body) => {
         openActions += 1;
         body();
         openActions -= 1;
       },
+      notify: () => {},
     } satisfies ClipboardOptions);
     return { owner, clipboard, deletions, pasteDrawings, select };
   }
@@ -399,7 +426,7 @@ describe('clipboard and strokes', () => {
     expect(deletions).toEqual(['inside an action']);
     expect(clipboard.hasContent()).toBe(true);
 
-    clipboard.paste({ x: 110, y: 120 });
+    pasteInto(clipboard, owner, null, { x: 110, y: 120 });
     expect(pasteDrawings).toHaveBeenCalledWith({ owner, scope: null }, carried, { x: 100, y: 100 });
     expect(select).toHaveBeenCalledWith([], [], [{ path: 'main.flow', scope: null, id: 'copy' }]);
   });

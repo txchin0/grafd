@@ -137,6 +137,46 @@ describe('writing text', () => {
   });
 });
 
+describe('placing an image', () => {
+  const ONE_PIXEL_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+  const BOX = { x: 5, y: 6, w: 40, h: 30 };
+
+  function placeIn(harness: ReturnType<typeof createDrawingHarness>, scope: string | null) {
+    return harness.ops.createImage({ target: { owner: { doc: harness.doc(), path: PATH }, scope }, src: ONE_PIXEL_PNG, box: BOX });
+  }
+
+  it('writes it into the scope it was pasted in, as one undoable step', () => {
+    const harness = createDrawingHarness();
+    const stored = placeIn(harness, 'Steps');
+    expect(stored).toMatchObject({ path: PATH, scope: 'Steps' });
+    expect(layerOf(harness).drawings).toEqual([{ id: stored!.id, kind: 'image', graph: 'Steps', box: [5, 6, 40, 30], src: ONE_PIXEL_PNG }]);
+    expect(harness.session.undo()).toEqual([LAYER_PATH]);
+    expect(layerOf(harness).drawings).toEqual([]);
+  });
+
+  it('moves, resizes and is deleted like any drawing, each as one undoable step', () => {
+    const harness = createDrawingHarness();
+    const { id } = placeIn(harness, null)!;
+    harness.ops.moveDrawings([{ model: harness.modelOf(null), id, offset: { x: 10, y: 0 } }]);
+    harness.ops.resizeDrawings([{ model: harness.modelOf(null), id }], { scaleX: 2, scaleY: 2, x: -15, y: -6 });
+    expect(layerOf(harness).drawings[0]).toMatchObject({ box: [15, 6, 80, 60] });
+    harness.ops.deleteDrawings([{ model: harness.modelOf(null), id }]);
+    expect(layerOf(harness).drawings).toEqual([]);
+    harness.session.undo();
+    harness.session.undo();
+    expect(layerOf(harness).drawings[0]).toMatchObject({ box: [15, 6, 40, 30] });
+  });
+
+  it('writes nothing when the layer cannot be read — and says so', () => {
+    const harness = createDrawingHarness();
+    harness.session.forget(LAYER_PATH);
+    harness.store.adoptUnreadable(PATH);
+    expect(placeIn(harness, null)).toBeNull();
+    expect(harness.writes).toEqual([]);
+    expect(harness.notify).toHaveBeenCalled();
+  });
+});
+
 describe('drawing a stroke', () => {
   it('writes it into the scope it was drawn in, as one undoable step', () => {
     const harness = createDrawingHarness();

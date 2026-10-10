@@ -31,6 +31,7 @@ import {
   type DrawingTransform,
 } from '../../shared/drawing-geometry.js';
 import { TEXT_KIND, type TextDrawing } from '../../shared/canvas-text.js';
+import { IMAGE_KIND } from '../../shared/canvas-image.js';
 import { canvasLineMeasurer, drawingAsCarried, type LineMeasurer } from './text-drawing-layout.js';
 import {
   displayRectOf,
@@ -146,6 +147,7 @@ import {
 } from './pinch-gesture.js';
 import { WheelIntentReader, ZOOM_STEP_FACTOR } from './wheel-intent.js';
 import { GridPainter } from './grid-painter.js';
+import { createImageCache, decodeImageInBrowser, type ImageCache, type ImageDecoder } from './image-cache.js';
 import {
   inverseTransformPoint,
   modelsOnScreen,
@@ -504,7 +506,9 @@ export interface HiddenCanvasTitles {
 export const NO_HIDDEN_TITLES: HiddenCanvasTitles = { nodeId: null, regionName: null, drawingId: null };
 
 export type ContextTarget =
-  | { kind: 'node'; node: FlowNode }
+  // `frameInterior` is where the press landed when it was on an unfolded frame's empty interior,
+  // which answers as its host but is also the subgraph's own surface.
+  | { kind: 'node'; node: FlowNode; frameInterior: Point | null }
   | { kind: 'edge'; edge: ModelEdge }
   | { kind: 'region'; region: RegionTarget }
   | { kind: 'drawing' }
@@ -672,8 +676,16 @@ export class CanvasView {
   // is cleared once per pass rather than once per model.
   private edgeGeometry: EdgeGeometryMap = new Map();
 
-  constructor(canvasElement: HTMLCanvasElement, actions: CanvasActions, expansionLayer: ExpansionLayer) {
+  private readonly images: ImageCache;
+
+  constructor(
+    canvasElement: HTMLCanvasElement,
+    actions: CanvasActions,
+    expansionLayer: ExpansionLayer,
+    decodeImage: ImageDecoder = decodeImageInBrowser,
+  ) {
     this.canvas = canvasElement;
+    this.images = createImageCache({ decode: decodeImage, onDecoded: () => this.requestRender() });
     this.liveTarget = targetForCanvas(canvasElement, { width: 0, height: 0 }, window.devicePixelRatio || 1);
     this.target = this.liveTarget;
     this.actions = actions;
@@ -802,12 +814,28 @@ export class CanvasView {
     this.layoutDisplayGeometry(this.model);
   }
 
-  // Which graph a point on the canvas belongs to, and the point in that graph's own
-  // coordinates: the innermost unfolded frame containing it, or the top-level graph.
-  creationTargetAt(world: Point): { frameHost: FlowNode | null; point: Point } {
+  // Where the user is looking, in world coordinates: the pointer while it is over the canvas, the
+  // middle of the viewport otherwise.
+  pointerOrViewportCenter(): Point {
+    const viewportCenter = { x: this.viewport.width / 2, y: this.viewport.height / 2 };
+    return this.hoverPoint ?? this.screenToWorld(viewportCenter);
+  }
+
+  // Which graph a point on the canvas belongs to, the point in that graph's own coordinates, and
+  // how many screen pixels one of its units spans: the innermost unfolded frame containing it, or
+  // the top-level graph.
+  creationTargetAt(world: Point): { frameHost: FlowNode | null; point: Point; screenPixelsPerUnit: number } {
     const frame = this.expansionLayer.frameAt(world);
-    if (!frame) return { frameHost: null, point: world };
-    return { frameHost: frame.host, point: inverseTransformPoint(world, frame.transform) };
+    if (!frame) return { frameHost: null, point: world, screenPixelsPerUnit: this.view.scale };
+    return {
+      frameHost: frame.host,
+      point: inverseTransformPoint(world, frame.transform),
+      screenPixelsPerUnit: this.view.scale * frame.transform.scale,
+    };
+  }
+
+  viewportSize(): ViewportSize {
+    return { ...this.viewport };
   }
 
   // World-space rect of any visible node, including nodes inside unfolded frames: the
@@ -1307,8 +1335,6 @@ export class CanvasView {
     return node;
   }
 
-  // Text scales evenly by a corner, its top or its bottom; a side gives it a width to wrap to
-  // instead, and strokes resized with it stretch.
   private beginDrawingResize(resizable: ResizableDrawings, handle: ResizeHandle, world: Point, screen: Point): Gesture {
     const texts = resizable.members.filter((drawing): drawing is TextDrawing => drawing.kind === TEXT_KIND);
     return {
@@ -1317,7 +1343,7 @@ export class CanvasView {
       storedKeys: resizable.drawings.map((drawing) => storedDrawingKey(drawing.model, drawing.id)),
       handle,
       startBox: boundsOfRects(resizable.members.map(drawingGeometryBox))!,
-      keepAspect: texts.length > 0 && axesOf(handle).y !== 0,
+      keepAspect: keepsAspectWhenResized(resizable.members, handle),
       smallestScaleX: Math.min(1, Math.max(0, ...texts.map((text) => text.size / text.box.w))),
       startWorld: world,
       scale: resizable.surface.transform.scale,
@@ -2034,8 +2060,10 @@ export class CanvasView {
     switch (target.kind) {
       case 'port':
       case 'node-handle':
+        this.openNodeMenu(target.node, screenPoint, null);
+        return;
       case 'node':
-        this.openNodeMenu(target.node, screenPoint);
+        this.openNodeMenu(target.node, screenPoint, this.isFrameBackground(target.node, world) ? world : null);
         return;
       case 'selected-edge-grip':
       case 'edge':
@@ -2059,9 +2087,9 @@ export class CanvasView {
     }
   }
 
-  private openNodeMenu(node: FlowNode, screenPoint: Point): void {
+  private openNodeMenu(node: FlowNode, screenPoint: Point, frameInterior: Point | null): void {
     if (!this.selection.has(node)) this.select(node);
-    this.actions.contextMenu({ kind: 'node', node }, screenPoint);
+    this.actions.contextMenu({ kind: 'node', node, frameInterior }, screenPoint);
   }
 
   private openEdgeMenu(edge: ModelEdge, screenPoint: Point): void {
@@ -2374,7 +2402,14 @@ export class CanvasView {
       hiddenTitles,
       edgeGeometry: this.edgeGeometry,
       expansions: this.expansionLayer,
+      images: (src) => this.images.imageFor(src),
     });
+  }
+
+  // Resolves once every image a paint has asked for is decoded (or known undecodable), to whether
+  // any still had to be. A snapshot drawn before then shows placeholders where the pictures will be.
+  imagesSettled(): Promise<boolean> {
+    return this.images.whenSettled();
   }
 
   private render(): void {
@@ -2707,9 +2742,7 @@ export class CanvasView {
   // A short message beside the pointer — for an edit the canvas could not make, shown where the
   // user is looking rather than somewhere they are not.
   flashNotice(text: string): void {
-    const viewportCenter = { x: this.viewport.width / 2, y: this.viewport.height / 2 };
-    const world = this.hoverPoint ?? this.screenToWorld(viewportCenter);
-    this.notice = { text, world, until: performance.now() + NOTICE_MS };
+    this.notice = { text, world: this.pointerOrViewportCenter(), until: performance.now() + NOTICE_MS };
     this.requestRender();
     setTimeout(() => this.requestRender(), NOTICE_MS);
   }
@@ -2970,6 +3003,14 @@ function hasBecomeDrag(gesture: DragStart, screen: Point): boolean {
   if (!gesture.moved && distanceBetween(screen, gesture.startScreen) < DRAG_THRESHOLD_PX) return false;
   gesture.moved = true;
   return true;
+}
+
+// An image never distorts, so whatever it is resized with scales evenly by every handle. Text
+// scales evenly by a corner, its top or its bottom; a side gives it a width to wrap to instead,
+// and strokes resized with it stretch.
+function keepsAspectWhenResized(members: readonly CanvasDrawing[], handle: ResizeHandle): boolean {
+  if (members.some((drawing) => drawing.kind === IMAGE_KIND)) return true;
+  return members.some((drawing) => drawing.kind === TEXT_KIND) && axesOf(handle).y !== 0;
 }
 
 function isSurfaceStoring(surface: ViewDrawingSurface, stored: StoredDrawing): boolean {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addStroke, addTextDrawing } from '../src/shared/canvas-drawings.js';
+import { addImageDrawing, addStroke, addTextDrawing } from '../src/shared/canvas-drawings.js';
 import { applyDrawingTransform } from '../src/shared/drawing-geometry.js';
 import { emptyCanvasLayer } from '../src/shared/canvas-layer.js';
 import { parseFlow, type FlowNode } from '../src/shared/flow-format.js';
@@ -57,6 +57,28 @@ describe('hitting text', () => {
     const surfaces: DrawingSurface[] = [{ model, transform: IDENTITY, clip: null }];
     expect(drawingsInsideRect(surfaces, { x: 90, y: 90, w: 80, h: 40 }).map((hit) => hit.id)).toEqual(['t']);
     expect(drawingsInsideRect(surfaces, { x: 90, y: 90, w: 60, h: 40 })).toEqual([]);
+    expect(displayRects(model)).toContainEqual(box);
+  });
+});
+
+describe('hitting an image', () => {
+  const box = { x: 100, y: 100, w: 60, h: 40 };
+  const ONE_PIXEL_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+  function modelWithImage(): FlowModel {
+    const layer = emptyCanvasLayer();
+    addImageDrawing(layer, { kind: 'image', id: 'i', graph: null, src: ONE_PIXEL_PNG, box });
+    const model = buildModel(parseFlow('---\nname: demo\n---\n'), null);
+    model.sourcePath = 'a.flow';
+    return dressModel(model, layer);
+  }
+
+  it('hits anywhere in its box, is picked up by a marquee around it, and counts as content', () => {
+    const model = modelWithImage();
+    const surfaces: DrawingSurface[] = [{ model, transform: IDENTITY, clip: null }];
+    expect(hitDrawingAt(surfaces, { x: 130, y: 120 }, 2)?.id).toBe('i');
+    expect(hitDrawingAt(surfaces, { x: 170, y: 120 }, 2)).toBeNull();
+    expect(drawingsInsideRect(surfaces, { x: 90, y: 90, w: 80, h: 60 }).map((hit) => hit.id)).toEqual(['i']);
     expect(displayRects(model)).toContainEqual(box);
   });
 });

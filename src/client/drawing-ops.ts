@@ -1,4 +1,4 @@
-// What the canvas's drawing gestures write. A stroke or a text is stored in the canvas layer of
+// What the canvas's drawing gestures write. A stroke, a text or an image is stored in the canvas layer of
 // the file that owns the graph it was made in, filed under that graph's scope — one made inside an
 // unfolded frame belongs to the subgraph the frame shows, whichever file that lives in.
 //
@@ -9,6 +9,7 @@
 import { canvasLayerPathOf, type CanvasLayer } from '../shared/canvas-layer.js';
 import {
   STROKE_KIND,
+  addImageDrawing,
   addStroke,
   addTextDrawing,
   drawingsToCopy,
@@ -22,8 +23,9 @@ import {
 } from '../shared/canvas-drawings.js';
 import { isStretch, translationBy, type DrawingTransform } from '../shared/drawing-geometry.js';
 import { TEXT_KIND, textDrawingOf, type TextDrawing } from '../shared/canvas-text.js';
+import { IMAGE_KIND, type ImageDrawing } from '../shared/canvas-image.js';
 import { groupDrawings as groupDrawingsIn, ungroupDrawings as ungroupDrawingsIn } from '../shared/canvas-groups.js';
-import { newUuid, type FlowNode } from '../shared/flow-format.js';
+import { newUuid, type FlowNode, type Rect } from '../shared/flow-format.js';
 import type { DrawStyle } from './canvas/canvas-view.js';
 import {
   distinctDrawingMoves,
@@ -52,6 +54,13 @@ export interface NewText {
   frameHost: FlowNode | null;
   color: string | null;
   fontPx: number;
+}
+
+// An image about to be placed: its source and its box in the target graph's own coordinates.
+export interface NewImage {
+  target: CreationTarget;
+  src: string;
+  box: Rect;
 }
 
 // Strokes copied out of one graph, ready to be pasted into any.
@@ -83,6 +92,8 @@ export interface DrawingOps {
   createStroke(points: Point[], frameHost: FlowNode | null, style: DrawStyle): void;
   // Where the new text is stored, or null when nothing could be written.
   createText(newText: NewText): StoredDrawing | null;
+  // Where the new image is stored, or null when nothing could be written.
+  createImage(newImage: NewImage): StoredDrawing | null;
   // Rewrites a text in place: its top-left corner, size and wrap width stay, and its box fits the
   // new words.
   setText(selection: DrawingSelection, text: string): void;
@@ -98,6 +109,8 @@ export interface DrawingOps {
   ungroupDrawings(selections: readonly DrawingSelection[]): void;
   // One entry per graph the selected strokes are drawn in, with the groups among them.
   copyDrawings(selections: readonly DrawingSelection[]): CopiedDrawings[];
+  // Every drawing filed under one `graph:` block, with the groups among them.
+  copyDrawingsInScope(owner: DocumentOwner, scope: string): CarriedDrawings;
   // Copies into the target graph, shifted by `offset`; returns where the copies are stored.
   pasteDrawings(target: CreationTarget, carried: CarriedDrawings, offset: Point): StoredDrawing[];
 }
@@ -122,6 +135,13 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
     const box = textBoxFor(text, topLeft, fontPx, options.measureLine());
     const drawing: TextDrawing = { kind: TEXT_KIND, id: newUuid(), graph: target.scope, color, text, box, size: fontPx, wrap: false };
     const written = writeIntoScope(target, (layer) => addTextDrawing(layer, drawing));
+    reportWrite(target.owner, written);
+    return written ? { path: target.owner.path, scope: target.scope, id: drawing.id } : null;
+  }
+
+  function createImage({ target, src, box }: NewImage): StoredDrawing | null {
+    const drawing: ImageDrawing = { kind: IMAGE_KIND, id: newUuid(), graph: target.scope, src, box };
+    const written = writeIntoScope(target, (layer) => addImageDrawing(layer, drawing));
     reportWrite(target.owner, written);
     return written ? { path: target.owner.path, scope: target.scope, id: drawing.id } : null;
   }
@@ -216,6 +236,13 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
     });
   }
 
+  function copyDrawingsInScope(owner: DocumentOwner, scope: string): CarriedDrawings {
+    const content = layerSync.drawingContentOf(owner);
+    if (!content) return { drawings: [], groups: [] };
+    const ids = new Set(content.drawings.flatMap((drawing) => (drawing.graph === scope && typeof drawing.id === 'string' ? [drawing.id] : [])));
+    return drawingsToCopy(content, ids);
+  }
+
   function selectionsByScope(selections: readonly DrawingSelection[]): DrawingSelection[][] {
     const byScope = new Map<string | null, DrawingSelection[]>();
     for (const selection of selections) {
@@ -269,6 +296,7 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
   return {
     createStroke,
     createText,
+    createImage,
     setText,
     moveDrawings,
     resizeDrawings,
@@ -279,6 +307,7 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
     isAnyGrouped,
     ungroupDrawings,
     copyDrawings,
+    copyDrawingsInScope,
     pasteDrawings,
   };
 }

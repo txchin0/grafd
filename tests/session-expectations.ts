@@ -6,10 +6,11 @@
 
 import type { Tool } from '../src/client/canvas/canvas-view.js';
 import type { Point } from '../src/client/geometry.js';
-import { allNodes, buildModel, regionRectOf, type FlowModel } from '../src/client/flow-doc.js';
-import { parseFlow, type Rect } from '../src/shared/flow-format.js';
+import { allNodes, buildModel, containingGraphBlockName, graphBlockNames, regionRectOf, type FlowModel } from '../src/client/flow-doc.js';
+import { parseFlow, type FlowDocument, type Rect } from '../src/shared/flow-format.js';
 import { canvasLayerPathOf, isCanvasLayerPath, parseCanvasLayer } from '../src/shared/canvas-layer.js';
 import { isDrawableText, textDrawingOf, type TextDrawing } from '../src/shared/canvas-text.js';
+import { imageDrawingOf, type ImageDrawing } from '../src/shared/canvas-image.js';
 import { axesOf, isResizeEdge, type ResizeEdge } from '../src/client/canvas/resize-handles.js';
 import { boundsOfRects, rectContainsRect } from '../src/shared/rect-math.js';
 import { STROKE_KIND, drawingBounds, strokeBounds, strokePointBounds, strokePointsOf, type Stroke } from '../src/shared/canvas-drawings.js';
@@ -26,6 +27,8 @@ const RIGID_MOVE_TOLERANCE = 0.15;
 // A text box is stored to a tenth of a unit too, which can tilt a resized box's proportions by
 // that much over its height.
 const TEXT_PROPORTION_TOLERANCE = 0.02;
+// Each side of an image's box is stored to a tenth of a unit, so either may be up to half that off.
+const BOX_SIDE_ROUNDING = 0.05;
 // A node's or region's sides are stored exactly; a drawing's to a tenth of a unit.
 const EXACT_SIDE_TOLERANCE = 0.01;
 const VIEWPORT = { width: 1280, height: 800 };
@@ -53,7 +56,8 @@ export function graphOnScreen(editor: HeadlessEditor): string {
 }
 
 // The graph of one file as a step left it: its top-level nodes by id, its regions by name, its
-// top-level strokes by id, and every edge as the line that declares it.
+// top-level drawings by id, and every edge as the line that declares it. Text and images are both
+// drawn in a box, and `boxes` holds every such box, so a rule about where boxes go covers both.
 interface GraphState {
   model: FlowModel;
   nodeIds: Set<string>;
@@ -61,6 +65,8 @@ interface GraphState {
   regions: Map<string, { pos: Rect | null; members: string[]; frame: Rect | null }>;
   strokes: Map<string, Stroke>;
   texts: Map<string, TextDrawing>;
+  images: Map<string, ImageDrawing>;
+  boxes: Map<string, Rect>;
   groups: string[][];
   edgesBySource: Map<string, string[]>;
 }
@@ -71,6 +77,7 @@ function graphStateOf(snapshot: FileSnapshot, flowPath: string): GraphState {
   const layer = parseCanvasLayer(snapshot.get(canvasLayerPathOf(flowPath)) ?? null);
   const strokes = new Map<string, Stroke>();
   const texts = new Map<string, TextDrawing>();
+  const images = new Map<string, ImageDrawing>();
   for (const drawing of layer.drawings) {
     const points = strokePointsOf(drawing.points);
     if (drawing.graph == null && points && typeof drawing.id === 'string') {
@@ -78,7 +85,10 @@ function graphStateOf(snapshot: FileSnapshot, flowPath: string): GraphState {
     }
     const text = textDrawingOf(drawing);
     if (text && text.graph == null) texts.set(text.id, text);
+    const image = imageDrawingOf(drawing);
+    if (image && image.graph == null) images.set(image.id, image);
   }
+  const boxes = new Map<string, Rect>([...texts, ...images].map(([id, drawing]) => [id, drawing.box]));
   return {
     model,
     nodeIds: new Set(allNodes(doc).map((node) => node.id ?? node.name)),
@@ -89,6 +99,8 @@ function graphStateOf(snapshot: FileSnapshot, flowPath: string): GraphState {
     ])),
     strokes,
     texts,
+    images,
+    boxes,
     groups: layer.groups.map((group) => drawingIdsOfGroup(group)),
     edgesBySource: new Map(allNodes(doc).map((node) => [node.id ?? node.name, node.edges.map((spec) => JSON.stringify(spec))])),
   };
@@ -130,6 +142,7 @@ export function expectationViolations(step: SessionStep): Violation[] {
     ...emptiedRegionsMovedOffTheirFrame(step, was, now),
     ...edgesDuplicated(step, was, now),
     ...pasteAwayFromThePointer(step, was, now),
+    ...pasteIntoAnotherGraph(step),
     ...copiesLeftUnselected(step, was, now),
     ...deleteThatMissedTheSelection(step, was, now),
     ...abandonedDragThatWrote(step),
@@ -139,6 +152,8 @@ export function expectationViolations(step: SessionStep): Violation[] {
     ...newTextNotAsTyped(step, was, now),
     ...editedTextNotAsTyped(step),
     ...textResizedOtherThanWhole(step, was, now),
+    ...imageResizedOutOfProportion(step, was, now),
+    ...imagePasteNotAsAsked(step),
     ...sideDragThatMovedOtherSides(step, was, now),
   ];
 }
@@ -203,7 +218,7 @@ function regionDragThatLeftDrawings(step: SessionStep, was: GraphState, now: Gra
     const delta = regionTravel(name, was, now);
     const frame = was.regions.get(name)?.frame;
     if (!delta || !frame || (delta.x === 0 && delta.y === 0)) continue;
-    for (const id of [...was.strokes.keys(), ...was.texts.keys()]) {
+    for (const id of [...was.strokes.keys(), ...was.boxes.keys()]) {
       if (!drawingAndGroupInside(id, frame, was)) continue;
       const travel = drawingTravel(id, was, now);
       if (!travel) continue;
@@ -270,6 +285,34 @@ function pasteAwayFromThePointer(step: SessionStep, was: GraphState, now: GraphS
   const at = step.trace.menuAt;
   if (Math.abs(pasted.x - at.x) <= PASTE_TOLERANCE && Math.abs(pasted.y - at.y) <= PASTE_TOLERANCE) return [];
   return violation('paste here lands at the pointer', `asked to paste at ${Math.round(at.x)},${Math.round(at.y)}; the copy's top-left landed at ${Math.round(pasted.x)},${Math.round(pasted.y)}`);
+}
+
+// A paste lands in the graph it was asked into — the one under the pointer, an unfolded frame's
+// subgraph included — whichever graph, or file, the copy came from. A `graph:` block the paste
+// itself wrote is a subgraph carried along with a pasted host, so what lands inside it is the
+// host's to answer for.
+function pasteIntoAnotherGraph(step: SessionStep): Violation[] {
+  const destination = step.trace.pastedInto;
+  if (!destination) return [];
+  const idsBefore = new Set([...flowDocumentsOf(step.before).values()].flatMap((doc) => allNodes(doc).map((node) => node.id)));
+  const strays: string[] = [];
+  for (const [path, doc] of flowDocumentsOf(step.after)) {
+    const before = flowDocumentsOf(step.before).get(path);
+    const blocksBefore = new Set(before ? graphBlockNames(before) : []);
+    for (const node of allNodes(doc)) {
+      if (idsBefore.has(node.id)) continue;
+      const scope = containingGraphBlockName(doc, node);
+      if (path === destination.path && scope === destination.scope) continue;
+      if (scope != null && !blocksBefore.has(scope)) continue;
+      strays.push(`${node.name} in ${path} ${scope ?? '(top level)'}`);
+    }
+  }
+  if (strays.length === 0) return [];
+  return violation('a paste lands in the graph it was pasted into', `asked into ${destination.path} ${destination.scope ?? '(top level)'}; landed: ${strays.join(', ')}`);
+}
+
+function flowDocumentsOf(snapshot: FileSnapshot): Map<string, FlowDocument> {
+  return new Map([...snapshot].filter(([path]) => path.endsWith('.flow')).map(([path, text]) => [path, parseFlow(text)]));
 }
 
 // Pasting the same copy again from the keyboard lands each paste a step further on than the last,
@@ -470,26 +513,81 @@ function rewrapped(before: TextDrawing, after: TextDrawing): boolean {
   return after.wrap && Math.abs(after.size - before.size) <= RIGID_MOVE_TOLERANCE;
 }
 
+// An image is never distorted: however it is resized, alone or in a group, its box keeps its
+// proportions.
+function imageResizedOutOfProportion(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
+  if (isHistoryAction(step.action)) return [];
+  return [...now.images].flatMap(([id, image]) => {
+    const before = was.images.get(id);
+    if (!before || !sizeChanged(before.box, image.box) || keptProportions(before.box, image.box)) return [];
+    return violation('a resized image keeps its proportions', `image ${id} went from ${JSON.stringify(before.box)} to ${JSON.stringify(image.box)}`);
+  });
+}
+
+// Compared crosswise, so that rounding each stored side is allowed for on both.
+function keptProportions(before: Rect, after: Rect): boolean {
+  const skew = Math.abs(after.w * before.h - after.h * before.w);
+  return skew <= BOX_SIDE_ROUNDING * (before.w + before.h) + EXACT_SIDE_TOLERANCE;
+}
+
+// A pasted image lands once, as one undo step, in the graph under the pointer, centred on the
+// pointer, and is what is selected afterwards — as anything pasted is.
+function imagePasteNotAsAsked(step: SessionStep): Violation[] {
+  const { pastedInto, pastedImageAt } = step.trace;
+  if (step.action.type !== 'paste-image' || !pastedInto || !pastedImageAt) return [];
+  const imagesBefore = imagesIn(step.before);
+  const added = [...imagesIn(step.after)].filter(([id]) => !imagesBefore.has(id));
+  if (added.length !== 1 || step.stepsAdded !== 1) {
+    return violation('an image pastes as one undoable step', `pasting an image added ${added.length} image(s) in ${step.stepsAdded} undo step(s)`);
+  }
+  const [[id, { path, image }]] = added;
+  const violations: Violation[] = [];
+  if (path !== canvasLayerPathOf(pastedInto.path) || image.graph !== pastedInto.scope) {
+    violations.push({ invariant: 'a paste lands in the graph it was pasted into', detail: `image asked into ${pastedInto.path} ${pastedInto.scope ?? '(top level)'} landed in ${path} ${image.graph ?? '(top level)'}` });
+  }
+  const center = { x: image.box.x + image.box.w / 2, y: image.box.y + image.box.h / 2 };
+  if (Math.abs(center.x - pastedImageAt.x) > PASTE_TOLERANCE || Math.abs(center.y - pastedImageAt.y) > PASTE_TOLERANCE) {
+    violations.push({ invariant: 'a pasted image lands centred on the pointer', detail: `pasted at ${Math.round(pastedImageAt.x)},${Math.round(pastedImageAt.y)}; centred at ${Math.round(center.x)},${Math.round(center.y)}` });
+  }
+  if (!step.selectionAfter.has(`drawing:${id}`)) {
+    violations.push({ invariant: 'copies are selected after a paste', detail: `pasted image ${id} is not selected; selected: ${[...step.selectionAfter].join(', ') || 'nothing'}` });
+  }
+  return violations;
+}
+
+// Every image in every layer of a snapshot, by id, with the layer it is in.
+function imagesIn(snapshot: FileSnapshot): Map<string, { path: string; image: ImageDrawing }> {
+  const images = new Map<string, { path: string; image: ImageDrawing }>();
+  for (const [path, contents] of snapshot) {
+    if (!isCanvasLayerPath(path)) continue;
+    for (const drawing of parseCanvasLayer(contents).drawings) {
+      const image = imageDrawingOf(drawing);
+      if (image) images.set(image.id, { path, image });
+    }
+  }
+  return images;
+}
+
 // A side drags only its own side: the side opposite it stays, and so does the side at the start
 // of the axis it runs along — the top for a left or right side, the left for a top or bottom.
-// The far end of that axis stays too, unless text is being resized: re-wrapped text grows
-// downward, and text scaled evenly grows rightward.
+// The far end of that axis stays too, unless text or an image is being resized: re-wrapped text
+// grows downward, and text or an image scaled evenly grows rightward.
 function sideDragThatMovedOtherSides(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
   const handle = step.trace.grabbedHandle;
   if (step.action.type !== 'grab-affordance' || !handle || !isResizeEdge(handle)) return [];
-  return reshapedRects(was, now).flatMap(({ what, before, after, holdsText, tolerance }) => {
-    const moved = sidesHeldBy(handle, holdsText).filter((side) => !sideStayed(before, after, side, handle, tolerance));
+  return reshapedRects(was, now).flatMap(({ what, before, after, growsAcross, tolerance }) => {
+    const moved = sidesHeldBy(handle, growsAcross).filter((side) => !sideStayed(before, after, side, handle, tolerance));
     return moved.length === 0 ? [] : violation('a side drag moves only that side', `dragging the ${handle} side moved the ${moved.join(', ')} side of ${what}: ${JSON.stringify(before)} to ${JSON.stringify(after)}`);
   });
 }
 
 type RectSide = 'left' | 'right' | 'top' | 'bottom';
 
-function sidesHeldBy(handle: ResizeEdge, holdsText: boolean): RectSide[] {
+function sidesHeldBy(handle: ResizeEdge, growsAcross: boolean): RectSide[] {
   const axes = axesOf(handle);
   const held: RectSide[] = axes.x !== 0
-    ? [oppositeSideOf(handle), 'top', ...(holdsText ? [] : ['bottom' as const])]
-    : [oppositeSideOf(handle), 'left', ...(holdsText ? [] : ['right' as const])];
+    ? [oppositeSideOf(handle), 'top', ...(growsAcross ? [] : ['bottom' as const])]
+    : [oppositeSideOf(handle), 'left', ...(growsAcross ? [] : ['right' as const])];
   return held;
 }
 
@@ -525,12 +623,21 @@ function sideOf(rect: Rect, side: RectSide): number {
 }
 
 // Everything whose shape a step changed: each node and region on its own, and the drawings — a
-// lone one or a whole group, resized as one — by their combined geometry.
-function reshapedRects(was: GraphState, now: GraphState): { what: string; before: Rect; after: Rect; holdsText: boolean; tolerance: number }[] {
-  const reshaped: { what: string; before: Rect; after: Rect; holdsText: boolean; tolerance: number }[] = [];
+// lone one or a whole group, resized as one — by their combined geometry. `growsAcross` says a
+// side drag may also move the far end of the axis that side runs along, as text and images do.
+interface ReshapedRect {
+  what: string;
+  before: Rect;
+  after: Rect;
+  growsAcross: boolean;
+  tolerance: number;
+}
+
+function reshapedRects(was: GraphState, now: GraphState): ReshapedRect[] {
+  const reshaped: ReshapedRect[] = [];
   for (const [id, node] of now.topNodes) {
     const before = was.topNodes.get(id)?.pos;
-    if (before && node.pos && sizeChanged(before, node.pos)) reshaped.push({ what: `node ${node.name}`, before, after: node.pos, holdsText: false, tolerance: EXACT_SIDE_TOLERANCE });
+    if (before && node.pos && sizeChanged(before, node.pos)) reshaped.push({ what: `node ${node.name}`, before, after: node.pos, growsAcross: false, tolerance: EXACT_SIDE_TOLERANCE });
   }
   // A region is measured from the frame the file gave it — its drawn area grown to hold its
   // members, or their bounds when it has none — since that is what a resize starts from. The one
@@ -539,19 +646,19 @@ function reshapedRects(was: GraphState, now: GraphState): { what: string; before
     const before = was.regions.get(name);
     const posChanged = region.pos && !(before?.pos && sameRect(before.pos, region.pos));
     if (before?.frame && region.pos && posChanged && sizeChanged(before.frame, region.pos)) {
-      reshaped.push({ what: `region ${name}`, before: before.frame, after: region.pos, holdsText: false, tolerance: EXACT_SIDE_TOLERANCE });
+      reshaped.push({ what: `region ${name}`, before: before.frame, after: region.pos, growsAcross: false, tolerance: EXACT_SIDE_TOLERANCE });
     }
   }
   const changedStrokes = [...now.strokes.keys()].filter((id) => was.strokes.has(id) && drawingTravel(id, was, now) === null);
-  const changedTexts = [...now.texts.keys()].filter((id) => was.texts.has(id) && drawingTravel(id, was, now) === null);
+  const changedBoxes = [...now.boxes.keys()].filter((id) => was.boxes.has(id) && drawingTravel(id, was, now) === null);
   const geometryIn = (state: GraphState) => boundsOfRects([
     ...changedStrokes.map((id) => strokePointBounds(state.strokes.get(id)!)),
-    ...changedTexts.map((id) => state.texts.get(id)!.box),
+    ...changedBoxes.map((id) => state.boxes.get(id)!),
   ]);
   const before = geometryIn(was);
   const after = geometryIn(now);
   if (before && after) {
-    reshaped.push({ what: `drawings ${[...changedStrokes, ...changedTexts].join(', ')}`, before, after, holdsText: changedTexts.length > 0, tolerance: RIGID_MOVE_TOLERANCE });
+    reshaped.push({ what: `drawings ${[...changedStrokes, ...changedBoxes].join(', ')}`, before, after, growsAcross: changedBoxes.length > 0, tolerance: RIGID_MOVE_TOLERANCE });
   }
   return reshaped;
 }
@@ -583,12 +690,12 @@ function isCopying(step: SessionStep): boolean {
 function createdAnything(was: GraphState, now: GraphState): boolean {
   return [...now.nodeIds].some((id) => !was.nodeIds.has(id))
     || [...now.strokes.keys()].some((id) => !was.strokes.has(id))
-    || [...now.texts.keys()].some((id) => !was.texts.has(id));
+    || [...now.boxes.keys()].some((id) => !was.boxes.has(id));
 }
 
 // Anything changed in shape rather than only moved: a node or a region's drawn area resized
 // against the frame it had — a resized region always ends with a drawn area (R30) — a stroke
-// whose points did not all travel together, or a text whose box changed size. Judging a stroke by
+// whose points did not all travel together, or a text or an image whose box changed size. Judging a stroke by
 // every point rather than by its size means any transform other than a move counts, whatever it
 // does to the bounds.
 function reshapedAnything(was: GraphState, now: GraphState): boolean {
@@ -598,8 +705,8 @@ function reshapedAnything(was: GraphState, now: GraphState): boolean {
     const before = was.strokes.get(id);
     return before !== undefined && rigidTranslation(before, stroke) === null;
   });
-  const resizedText = [...now.texts].some(([id, text]) => sizeChanged(was.texts.get(id)?.box, text.box));
-  return resizedNode || resizedRegion || reshapedStroke || resizedText;
+  const resizedBox = [...now.boxes].some(([id, box]) => sizeChanged(was.boxes.get(id), box));
+  return resizedNode || resizedRegion || reshapedStroke || resizedBox;
 }
 
 function sizeChanged(before: Rect | null | undefined, after: Rect | null | undefined): boolean {
@@ -640,9 +747,9 @@ function translationsOf(was: GraphState, now: GraphState): { what: string; delta
     const delta = old ? rigidTranslation(old, stroke) : null;
     if (delta && (delta.x !== 0 || delta.y !== 0)) moves.push({ what: `stroke ${id}`, delta });
   }
-  for (const id of now.texts.keys()) {
+  for (const id of now.boxes.keys()) {
     const delta = drawingTravel(id, was, now);
-    if (delta && (delta.x !== 0 || delta.y !== 0)) moves.push({ what: `text ${id}`, delta });
+    if (delta && (delta.x !== 0 || delta.y !== 0)) moves.push({ what: `${now.texts.has(id) ? 'text' : 'image'} ${id}`, delta });
   }
   return moves;
 }
@@ -670,17 +777,17 @@ function drawingAndGroupInside(id: string, frame: Rect, state: GraphState): bool
 function boundsOfDrawing(id: string, state: GraphState): Rect | null {
   const stroke = state.strokes.get(id);
   if (stroke) return strokeBounds(stroke);
-  return state.texts.get(id)?.box ?? null;
+  return state.boxes.get(id) ?? null;
 }
 
-// How far a drawing moved when it only moved: every point of a stroke alike, a text's box at the
-// same size. Null when it changed in any other way, or is not in both states.
+// How far a drawing moved when it only moved: every point of a stroke alike, a text's or an
+// image's box at the same size. Null when it changed in any other way, or is not in both states.
 function drawingTravel(id: string, was: GraphState, now: GraphState): Point | null {
   const [strokeBefore, strokeAfter] = [was.strokes.get(id), now.strokes.get(id)];
   if (strokeBefore && strokeAfter) return rigidTranslation(strokeBefore, strokeAfter);
-  const [textBefore, textAfter] = [was.texts.get(id), now.texts.get(id)];
-  if (!textBefore || !textAfter || sizeChanged(textBefore.box, textAfter.box)) return null;
-  return { x: textAfter.box.x - textBefore.box.x, y: textAfter.box.y - textBefore.box.y };
+  const [boxBefore, boxAfter] = [was.boxes.get(id), now.boxes.get(id)];
+  if (!boxBefore || !boxAfter || sizeChanged(boxBefore, boxAfter)) return null;
+  return { x: boxAfter.x - boxBefore.x, y: boxAfter.y - boxBefore.y };
 }
 
 function boundsOfAdded(was: GraphState, now: GraphState): Point | null {
@@ -688,7 +795,7 @@ function boundsOfAdded(was: GraphState, now: GraphState): Point | null {
   for (const [id, node] of now.topNodes) if (!was.nodeIds.has(id) && node.pos) corners.push(node.pos);
   for (const [name, region] of now.regions) if (!was.regions.has(name) && region.pos) corners.push(region.pos);
   for (const [id, stroke] of now.strokes) if (!was.strokes.has(id)) corners.push(...stroke.points);
-  for (const [id, text] of now.texts) if (!was.texts.has(id)) corners.push(text.box);
+  for (const [id, box] of now.boxes) if (!was.boxes.has(id)) corners.push(box);
   if (corners.length === 0) return null;
   return { x: Math.min(...corners.map((corner) => corner.x)), y: Math.min(...corners.map((corner) => corner.y)) };
 }

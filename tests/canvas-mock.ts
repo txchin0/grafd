@@ -23,6 +23,7 @@ export function createContextMock() {
     stroke: vi.fn(),
     fill: vi.fn(),
     fillText: vi.fn(),
+    drawImage: vi.fn(),
     measureText: vi.fn(() => ({ width: 0 })),
     createPattern: vi.fn(() => ({ setTransform: vi.fn() })),
     globalAlpha: 1,

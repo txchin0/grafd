@@ -8,7 +8,7 @@
 // sideways gives it a width to wrap to and keeps its size.
 
 import { isLayerColor, type Drawing } from './canvas-layer.js';
-import { isFiniteNumber, roundCoordinate } from './drawing-geometry.js';
+import { drawingBoxOf, isFiniteNumber, storedDrawingBox } from './drawing-geometry.js';
 import type { Rect } from './flow-format.js';
 
 export const TEXT_KIND = 'text';
@@ -41,7 +41,7 @@ export function textDrawingOf(drawing: Drawing): TextDrawing | null {
   if (drawing.kind !== TEXT_KIND || typeof drawing.id !== 'string' || drawing.id === '') return null;
   if (drawing.graph !== undefined && typeof drawing.graph !== 'string') return null;
   if (!isDrawableText(drawing.text)) return null;
-  const box = textBoxOf(drawing.box);
+  const box = drawingBoxOf(drawing.box);
   if (!box) return null;
   return {
     kind: TEXT_KIND,
@@ -63,20 +63,9 @@ export function isTextSize(value: unknown): value is number {
   return isFiniteNumber(value) && value > 0;
 }
 
-// `[x, y, w, h]` with a positive width and height.
-export function textBoxOf(raw: unknown): Rect | null {
-  if (!Array.isArray(raw) || raw.length !== 4 || !raw.every(isFiniteNumber)) return null;
-  const [x, y, w, h] = raw as number[];
-  return w > 0 && h > 0 ? { x, y, w, h } : null;
-}
-
-export function storedTextBox(box: Rect): [number, number, number, number] {
-  return [roundCoordinate(box.x), roundCoordinate(box.y), roundCoordinate(box.w), roundCoordinate(box.h)];
-}
-
 // What a text's layout is stored as. `wrap` is written only when set, as other defaults are not.
 export function storedTextLayout(text: Pick<TextDrawing, 'box' | 'size' | 'wrap'>): Record<string, unknown> {
-  const stored: Record<string, unknown> = { box: storedTextBox(text.box), size: Math.round(text.size * SIZE_PRECISION) / SIZE_PRECISION };
+  const stored: Record<string, unknown> = { box: storedDrawingBox(text.box), size: Math.round(text.size * SIZE_PRECISION) / SIZE_PRECISION };
   if (text.wrap) stored.wrap = true;
   return stored;
 }

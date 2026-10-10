@@ -46,6 +46,17 @@ export function transformedRect(rect: Rect, transform: DrawingTransform): Rect {
   return { x: topLeft.x, y: topLeft.y, w: rect.w * transform.scaleX, h: rect.h * transform.scaleY };
 }
 
+// `[x, y, w, h]` with a positive width and height: the box a text or an image is stored as.
+export function drawingBoxOf(raw: unknown): Rect | null {
+  if (!Array.isArray(raw) || raw.length !== 4 || !raw.every(isFiniteNumber)) return null;
+  const [x, y, w, h] = raw as number[];
+  return w > 0 && h > 0 ? { x, y, w, h } : null;
+}
+
+export function storedDrawingBox(box: Rect): [number, number, number, number] {
+  return [roundCoordinate(box.x), roundCoordinate(box.y), roundCoordinate(box.w), roundCoordinate(box.h)];
+}
+
 export function roundCoordinate(value: number): number {
   return Math.round(value * COORDINATE_PRECISION) / COORDINATE_PRECISION;
 }

@@ -10,6 +10,8 @@
 
 import { vi } from 'vitest';
 import { createEditorCore, type EditorCore, type EditorOverlays, type EditorShell } from '../src/client/editor-core.js';
+import type { ImageDecoder } from '../src/client/canvas/image-cache.js';
+import type { PreparedImage } from '../src/client/pasted-image.js';
 import type { Workspace, WorkspaceDelegate } from '../src/client/workspace.js';
 import type { MenuItem } from '../src/client/context-menu.js';
 import type { Point } from '../src/client/geometry.js';
@@ -128,6 +130,9 @@ export interface HeadlessEditor {
   // (Ctrl+Enter), committing what was typed as the real editor does.
   openText(): TextEditRequest | null;
   finishText(text: string): Promise<void>;
+  // An image off the system clipboard, already prepared as the page prepares one, pasted at a
+  // point as Ctrl+V pastes it at the pointer.
+  pasteImage(image: PreparedImage, world: Point): Promise<void>;
   // How many ids the editor has minted so far, and a way to mint the same ones again — for
   // comparing an operation with a replay of it from the same starting point.
   idsIssued(): number;
@@ -151,7 +156,7 @@ export async function createHeadlessEditor(
     commit: (request, text) => core.commitText(request, text),
     shownText: (request) => (request.kind === 'existing' ? core.view.laidOutText(request.drawing)?.text.text ?? '' : ''),
   });
-  const core = createEditorCore({ canvas, shell: createInertShell(menus, textEditor) });
+  const core = createEditorCore({ canvas, shell: createInertShell(menus, textEditor), decodeImage: decodeAtOnce });
   const workspace = new MemoryWorkspace(files);
   await core.switchWorkspace(workspace, { preferredPath: open });
 
@@ -261,6 +266,10 @@ export async function createHeadlessEditor(
       textEditor.close();
       await settle();
     },
+    async pasteImage(image, world) {
+      core.pasteImage(image, world);
+      await settle();
+    },
     idsIssued: () => idsIssued,
     rewindIds: (to) => {
       idsIssued = to;
@@ -299,7 +308,7 @@ function createHeadlessContext() {
   const drawingCalls = [
     'setTransform', 'clearRect', 'fillRect', 'strokeRect', 'save', 'restore', 'beginPath', 'moveTo', 'lineTo',
     'bezierCurveTo', 'quadraticCurveTo', 'ellipse', 'stroke', 'fill', 'fillText', 'setLineDash', 'clip', 'rect',
-    'roundRect', 'arc', 'closePath', 'translate', 'scale',
+    'roundRect', 'arc', 'closePath', 'translate', 'scale', 'drawImage',
   ];
   return {
     ...Object.fromEntries(drawingCalls.map((name) => [name, doNothing])),
@@ -316,6 +325,10 @@ function createHeadlessContext() {
     lineJoin: 'miter',
   };
 }
+
+// Every image decodes at once into a stand-in its painter draws nothing from: what a session checks
+// is where an image is and what it is filed under, never its pixels.
+const decodeAtOnce: ImageDecoder = async (src) => ({ src }) as unknown as CanvasImageSource;
 
 function countedUuid(count: number): `${string}-${string}-${string}-${string}-${string}` {
   return `00000000-0000-4000-8000-${count.toString(16).padStart(12, '0')}`;

@@ -46,7 +46,9 @@ import { CanvasView, type ContextTarget, type EdgeDrop } from './canvas/canvas-v
 import { storedDrawingOf, type DrawingMove, type StoredDrawing } from './canvas/drawing-selection.js';
 import type { TextEditRequest } from './text-drawing-editor.js';
 import { DEFAULT_TEXT_FONT_SIZE, isDrawableText } from '../shared/canvas-text.js';
-import { createDrawingOps } from './drawing-ops.js';
+import { createDrawingOps, type CreationTarget } from './drawing-ops.js';
+import { pastedImageBox, type PreparedImage } from './pasted-image.js';
+import type { ImageDecoder } from './canvas/image-cache.js';
 import type { MenuItem } from './context-menu.js';
 import type { EditorCommand } from './editor-commands.js';
 import {
@@ -75,7 +77,7 @@ import { createCanvasLayerSync } from './canvas-layer-sync.js';
 import type { EdgeStylePatch } from '../shared/canvas-edge-style.js';
 import { dressModel } from './model-visuals.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
-import { createClipboard } from './clipboard.js';
+import { createClipboard, type PastePlacement } from './clipboard.js';
 import { createWorkspaceUiState } from './workspace-ui-state.js';
 import type { OpenFlow } from './open-flow.js';
 import { createContextOrchestration, type ContextOrchestration } from './context/index.js';
@@ -122,11 +124,13 @@ export interface EditorShell {
 export interface EditorCoreOptions {
   canvas: HTMLCanvasElement;
   shell: EditorShell;
+  // How images on the canvas are decoded; the browser's own decoder when left out.
+  decodeImage?: ImageDecoder;
 }
 
 export type EditorCore = ReturnType<typeof createEditorCore>;
 
-export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
+export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptions) {
   const { editors } = shell;
 
   let openFlow: OpenFlow | null = null;
@@ -195,7 +199,6 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
   // needs — the selection, the owning document of a node, the routed mutation — is reached
   // through callbacks, so nothing it depends on has to exist yet.
   const clipboard = createClipboard({
-    openFlow: () => openFlow,
     selection: () => [...view.selection],
     selectedRegions: () => view.selectedRegionTargets(),
     selectedDrawings: () => view.selectedDrawings,
@@ -207,10 +210,7 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     },
     ownerOf,
     ownerOfRegion: (region) => contextOps.ownerOfRegion(region),
-    documentAt: (path) => {
-      const doc = expansions.documentAt(path);
-      return doc ? { doc, path } : null;
-    },
+    documentAt: (path) => expandTargetDoc(path),
     // Every clipboard mutation is a structural edit, so none of them wait on the typing debounce.
     applyToDoc: (owner, mutation) => applyToDoc(owner, mutation, { commit: 'now' }),
     deleteSelection: () => deleteSelection(),
@@ -219,8 +219,10 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     captureRegionVisuals: (owner, regions) => layerSync.captureRegionVisuals(owner, regions),
     applyRegionVisuals: (owner, copies, visuals) => layerSync.applyRegionVisuals(owner, copies, visuals),
     copyDrawings: (selections) => drawingOps.copyDrawings(selections),
+    copyDrawingsInScope: (owner, scope) => drawingOps.copyDrawingsInScope(owner, scope),
     pasteDrawings: (target, drawings, offset) => drawingOps.pasteDrawings(target, drawings, offset),
     runAction: (body) => session.runAction(body),
+    notify: (text) => view.flashNotice(text),
   });
 
   function modelFor(flow: Omit<OpenFlow, 'model'>): FlowModel {
@@ -1573,7 +1575,7 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
       if (openFlow) scheduleManifestSave();
     },
     afterRender: () => shell.canvasRendered(),
-  }, expansions);
+  }, expansions, decodeImage);
 
   contextOps = createContextOrchestration({
     openFlowDoc: () => openFlow ? { doc: openFlow.doc, path: openFlow.path } : null,
@@ -1608,14 +1610,14 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
   }
 
   function menuItemsFor(target: ContextTarget, screenPoint: Point): MenuItem[] {
-    return target.kind === 'node' ? nodeMenuItems(target.node, screenPoint)
+    return target.kind === 'node' ? nodeMenuItems(target.node, screenPoint, target.frameInterior)
       : target.kind === 'edge' ? edgeMenuItems(target.edge)
       : target.kind === 'region' ? contextOps.regionMenuItems(target.region, screenPoint)
       : target.kind === 'drawing' ? drawingMenuItems()
       : canvasMenuItems(target.world);
   }
 
-  function nodeMenuItems(node: FlowNode, screenPoint: Point): MenuItem[] {
+  function nodeMenuItems(node: FlowNode, screenPoint: Point, frameInterior: Point | null): MenuItem[] {
     const selectionCount = view.selection.size;
     const regionCount = view.selectedRegions.size;
     const items: MenuItem[] = [];
@@ -1635,6 +1637,9 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     }
     items.push({ label: 'Copy', onSelect: clipboard.copy });
     items.push({ label: 'Cut', onSelect: clipboard.cut });
+    if (frameInterior) {
+      items.push({ label: 'Paste', disabled: !clipboard.hasContent(), onSelect: () => pasteAt(frameInterior, 'at-point') });
+    }
     if (getProp(node, 'expand')) {
       items.push({ label: 'Open ⤢', onSelect: () => void openExpand(node) });
       items.push({
@@ -1761,7 +1766,7 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
         clipboard.cut();
         return true;
       case 'paste':
-        clipboard.paste();
+        pasteAt(view.pointerOrViewportCenter(), 'beside-originals');
         return true;
       case 'duplicate':
         clipboard.duplicateSelection();
@@ -1803,6 +1808,29 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     else view.clearSelection();
   }
 
+  // A paste goes into the graph at `world` — an unfolded frame's subgraph, or the graph on screen —
+  // with the point in that graph's own coordinates.
+  function pasteTargetAt(world: Point): { target: CreationTarget; point: Point; screenPixelsPerUnit: number } | null {
+    const creation = view.creationTargetAt(world);
+    const target = creationTargetFor(creation.frameHost);
+    return target ? { target, point: creation.point, screenPixelsPerUnit: creation.screenPixelsPerUnit } : null;
+  }
+
+  function pasteAt(world: Point, placement: PastePlacement): void {
+    const destination = pasteTargetAt(world);
+    if (destination) clipboard.paste({ ...destination, placement });
+  }
+
+  // An image from the system clipboard lands centred where the user is looking, in the graph
+  // under that point, and is selected — as any paste is.
+  function pasteImage(image: PreparedImage, world: Point): void {
+    const destination = openFlow ? pasteTargetAt(world) : null;
+    if (!destination) return;
+    const box = pastedImageBox(image, destination.point, destination.screenPixelsPerUnit, view.viewportSize());
+    const stored = drawingOps.createImage({ target: destination.target, src: image.src, box });
+    if (stored) view.setSelection([], [], [stored]);
+  }
+
   function canvasMenuItems(world: Point): MenuItem[] {
     const creation = view.creationTargetAt(world);
     return [
@@ -1810,7 +1838,7 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
         label: 'Add node here',
         onSelect: () => createNodeAndEdit(centeredDefaultRect(creation.point), creation.frameHost),
       },
-      { label: 'Paste', disabled: !clipboard.hasContent(), onSelect: () => clipboard.paste(world) },
+      { label: 'Paste', disabled: !clipboard.hasContent(), onSelect: () => pasteAt(world, 'at-point') },
       { separator: true },
       { label: 'Fit to content', onSelect: () => view.fitToContent() },
       { label: 'Reset zoom', onSelect: () => view.setZoom(1) },
@@ -1931,9 +1959,11 @@ export function createEditorCore({ canvas, shell }: EditorCoreOptions) {
     toggleInlineExpansion,
     menuItemsFor,
     hasCopyableSelection,
+    pasteTargetAt,
     groupSelectedDrawings,
     ungroupSelectedDrawings,
     commitText,
     runCommand,
+    pasteImage,
   };
 }

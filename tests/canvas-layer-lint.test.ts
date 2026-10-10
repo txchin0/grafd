@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lintCanvasLayer } from '../src/shared/canvas-layer-lint.js';
+import { LARGE_IMAGE_SOURCE_LENGTH, lintCanvasLayer } from '../src/shared/canvas-layer-lint.js';
 import { lintWorkspace } from '../src/shared/flow-lint-workspace.js';
 import { lintFlowFile } from '../src/shared/flow-lint.js';
 import { countDiagnostics } from '../src/shared/flow-diagnostics.js';
@@ -97,8 +97,25 @@ describe('lintCanvasLayer on drawings', () => {
 
   const GOOD_TEXT = { id: 'words', kind: 'text', graph: 'Steps', color: 'blue', text: 'Hello\nthere', box: [0, 0, 60, 50], size: 20, wrap: true };
 
-  it('passes valid strokes and text, and drawings of kinds it does not know', () => {
-    expect(rulesOf(layerWithDrawings([GOOD, GOOD_TEXT, { id: 'pin', kind: 'sticker' }]), FLOW_WITH_BLOCK)).toEqual([]);
+  const GOOD_IMAGE = { id: 'picture', kind: 'image', graph: 'Steps', box: [0, 0, 40, 30], src: 'data:image/png;base64,iVBORw0KGgo=' };
+
+  it('passes valid strokes, text and images, and drawings of kinds it does not know', () => {
+    expect(rulesOf(layerWithDrawings([GOOD, GOOD_TEXT, GOOD_IMAGE, { id: 'pin', kind: 'sticker' }]), FLOW_WITH_BLOCK)).toEqual([]);
+  });
+
+  it('flags an image it cannot draw, and one heavy enough to slow every write of its layer', () => {
+    const images = layerWithDrawings([
+      { ...GOOD_IMAGE, id: 'remote', src: 'https://example.com/picture.png' },
+      { ...GOOD_IMAGE, id: 'flat', box: [0, 0, 40, 0] },
+      { ...GOOD_IMAGE, id: 'lost', graph: 'Gone' },
+      { ...GOOD_IMAGE, id: 'huge', src: `data:image/png;base64,${'A'.repeat(LARGE_IMAGE_SOURCE_LENGTH)}` },
+    ]);
+    expect(rulesOf(images, FLOW_WITH_BLOCK)).toEqual([
+      'warning invalid-image',
+      'warning invalid-image',
+      'info unknown-drawing-graph',
+      'info large-image',
+    ]);
   });
 
   it('flags text it cannot draw, and text in a colour it does not know', () => {

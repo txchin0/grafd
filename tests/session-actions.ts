@@ -7,15 +7,18 @@
 import fc from 'fast-check';
 import type { PressTargetKind, Tool } from '../src/client/canvas/canvas-view.js';
 import { regionRectOf } from '../src/client/flow-doc.js';
-import { collapseToSingleLine, type FlowNode } from '../src/shared/flow-format.js';
-import type { Point } from '../src/client/geometry.js';
+import { collapseToSingleLine, type FlowNode, type Rect } from '../src/shared/flow-format.js';
+import { rectContains, type Point } from '../src/client/geometry.js';
 import type { MenuItem } from '../src/client/context-menu.js';
 import { nodeBadges } from '../src/client/canvas/node-badges.js';
 import { EDITOR_COMMANDS, type EditorCommand } from '../src/client/editor-commands.js';
 import { STROKE_KIND, type Stroke } from '../src/shared/canvas-drawings.js';
 import { TEXT_KIND, type TextDrawing } from '../src/shared/canvas-text.js';
+import { IMAGE_KIND, type ImageDrawing } from '../src/shared/canvas-image.js';
+import type { PreparedImage } from '../src/client/pasted-image.js';
 import type { TextEditRequest } from '../src/client/text-drawing-editor.js';
 import type { ResizeHandle } from '../src/client/canvas/resize-handles.js';
+import type { GraphUnit } from '../src/client/paste-transplant.js';
 import type { HeadlessEditor } from './editor-harness.js';
 
 // What a pick can aim at. Handles, ports and grips are all one kind, `affordance`, resolved
@@ -32,8 +35,10 @@ export const TARGET_KINDS = [
   'edge-line',
   'stroke',
   'text',
+  'image',
   'affordance',
   'empty',
+  'frame-inside',
 ] as const;
 export type TargetKind = (typeof TARGET_KINDS)[number];
 
@@ -115,6 +120,8 @@ export type SessionAction =
   | { type: 'rename-graph'; name: number }
   // Typed into the inline text editor, if a step before opened it, and finished with Ctrl+Enter.
   | { type: 'type-text'; text: number }
+  // An image from the system clipboard, pasted with the pointer over a pick.
+  | { type: 'paste-image'; at: TargetPick; image: number }
   | { type: 'command'; command: Command };
 
 // What an action actually did once its picks were resolved, for rules that judge an outcome
@@ -134,7 +141,21 @@ export interface ActionTrace {
   grabbedHandle: ResizeHandle | null;
   // What the press that began a drag landed on, as the view settled it just before pressing.
   pressedKind: PressTargetKind | null;
+  // The graph a paste was asked into — the one under the pointer as the paste began.
+  pastedInto: GraphUnit | null;
+  // Where an image was pasted, in the coordinates of the graph it was pasted into.
+  pastedImageAt: Point | null;
 }
+
+const ONE_PIXEL_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+// Images as the page prepares them off the clipboard. Only their size matters to where one lands:
+// one small, one wider than any viewport, one taller.
+export const PASTED_IMAGES: readonly PreparedImage[] = [
+  { src: ONE_PIXEL_PNG, width: 120, height: 80 },
+  { src: ONE_PIXEL_PNG, width: 1600, height: 300 },
+  { src: ONE_PIXEL_PNG, width: 200, height: 1500 },
+];
 
 export const MAX_PICK_INDEX = 7;
 // Enough to reach every affordance of the busiest selection: a lone node's four corners, four
@@ -174,6 +195,7 @@ export const sessionAction: fc.Arbitrary<SessionAction> = fc.oneof(
   { weight: 1, arbitrary: fc.record({ type: fc.constant('rename-region' as const), region: fc.nat(MAX_PICK_INDEX), name: fc.nat(TYPED_NAMES.length - 1) }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('rename-graph' as const), name: fc.nat(TYPED_NAMES.length - 1) }) },
   { weight: 2, arbitrary: fc.record({ type: fc.constant('type-text' as const), text: fc.nat(TYPED_TEXTS.length - 1) }) },
+  { weight: 1, arbitrary: fc.record({ type: fc.constant('paste-image' as const), at: targetPick, image: fc.nat(PASTED_IMAGES.length - 1) }) },
   { weight: 3, arbitrary: fc.record({ type: fc.constant('command' as const), command: fc.constantFrom(...COMMANDS) }) },
 );
 
@@ -228,10 +250,50 @@ function anchorOf(editor: HeadlessEditor, pick: TargetPick): Point | null {
       const text = itemAt((model.visuals?.drawings() ?? []).filter((drawing): drawing is TextDrawing => drawing.kind === TEXT_KIND), pick.index);
       return text ? { x: text.box.x + text.box.w / 2, y: text.box.y + text.box.h / 2 } : null;
     }
+    case 'image': {
+      const image = itemAt((model.visuals?.drawings() ?? []).filter((drawing): drawing is ImageDrawing => drawing.kind === IMAGE_KIND), pick.index);
+      return image ? { x: image.box.x + image.box.w / 2, y: image.box.y + image.box.h / 2 } : null;
+    }
 
     case 'empty':
       return { x: EMPTY_ORIGIN.x + pick.index * EMPTY_SPACING, y: EMPTY_ORIGIN.y };
+    case 'frame-inside':
+      return itemAt(frameInteriorPoints(editor), pick.index);
   }
+}
+
+// One point per unfolded frame on its empty interior: the subgraph's own surface, which a press
+// answers as the frame's host and a paste or a new node lands in. Found by asking the view what is
+// there, over a lattice across the frame, rather than by working out where the frame draws.
+function frameInteriorPoints(editor: HeadlessEditor): Point[] {
+  const { core } = editor;
+  const { view } = core;
+  const visible = [...view.model.nodes, ...(core.expansions.locus?.keys() ?? [])];
+  const unfolded = [...new Set(visible)].filter((node) => core.expansions.isOpen(node.id));
+  return unfolded.flatMap((host) => {
+    const point = latticeOver(view.rect(host)).find((candidate) => isFrameInterior(editor, host, candidate));
+    return point ? [point] : [];
+  });
+}
+
+const FRAME_LATTICE_STEPS = 7;
+
+function latticeOver({ x, y, w, h }: Rect): Point[] {
+  const points: Point[] = [];
+  for (let row = 1; row < FRAME_LATTICE_STEPS; row++) {
+    for (let column = 1; column < FRAME_LATTICE_STEPS; column++) {
+      points.push({ x: x + (w * column) / FRAME_LATTICE_STEPS, y: y + (h * row) / FRAME_LATTICE_STEPS });
+    }
+  }
+  return points;
+}
+
+function isFrameInterior(editor: HeadlessEditor, host: FlowNode, point: Point): boolean {
+  const { core } = editor;
+  const { view } = core;
+  if (view.creationTargetAt(point).frameHost !== host || view.pressTargetKindAt(point) !== 'node') return false;
+  const embedded = [...(core.expansions.locus?.keys() ?? [])].filter((node) => core.expansions.isEmbedded(node));
+  return !embedded.some((node) => rectContains(view.rect(node), point));
 }
 
 // A node on screen: one of the graph's own for most picks, one inside an unfolded frame for a
@@ -255,7 +317,7 @@ export function choosableItems(menu: readonly MenuItem[]): { label: string; onSe
 }
 
 function emptyTrace(): ActionTrace {
-  return { path: null, menuAt: null, menuItem: null, editedNode: null, typed: null, textRequest: null, grabbedHandle: null, pressedKind: null };
+  return { path: null, menuAt: null, menuItem: null, editedNode: null, typed: null, textRequest: null, grabbedHandle: null, pressedKind: null, pastedInto: null, pastedImageAt: null };
 }
 
 export async function performAction(editor: HeadlessEditor, action: SessionAction): Promise<ActionTrace> {
@@ -339,6 +401,7 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       const choice = choices[action.choice % choices.length];
       trace.menuAt = point;
       trace.menuItem = choice.label;
+      if (choice.label === 'Paste') trace.pastedInto = pasteDestinationAt(editor, point);
       choice.onSelect();
       await editor.settle();
       return trace;
@@ -386,11 +449,26 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       await editor.finishText(trace.typed);
       return trace;
     }
+    case 'paste-image': {
+      const point = resolveTarget(editor, action.at);
+      if (!point) return trace;
+      trace.path = [point];
+      trace.pastedInto = pasteDestinationAt(editor, point);
+      trace.pastedImageAt = editor.core.pasteTargetAt(point)?.point ?? null;
+      await editor.pasteImage(PASTED_IMAGES[action.image], point);
+      return trace;
+    }
     case 'command':
+      if (action.command === 'paste') trace.pastedInto = pasteDestinationAt(editor, editor.core.view.pointerOrViewportCenter());
       editor.core.runCommand(action.command);
       await editor.settle();
       return trace;
   }
+}
+
+function pasteDestinationAt(editor: HeadlessEditor, world: Point): GraphUnit | null {
+  const destination = editor.core.pasteTargetAt(world);
+  return destination ? { path: destination.target.owner.path, scope: destination.target.scope } : null;
 }
 
 // A drag passes through intermediate points, as a real pointer does, so gestures that only

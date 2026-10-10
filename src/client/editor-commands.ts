@@ -27,6 +27,11 @@ export type EditorCommand = (typeof EDITOR_COMMANDS)[number];
 // made must be undoable from there, and select-all is about the canvas wherever focus is.
 export const COMMANDS_PAST_EDITOR_CONTROLS: ReadonlySet<EditorCommand> = new Set(['undo', 'redo', 'select-all']);
 
+// The commands the page runs from the browser's own copy, cut and paste events rather than from
+// the key. Those events carry the system clipboard — an image copied in another program, say — and
+// handling the key would cancel them before they fire.
+export const CLIPBOARD_EVENT_COMMANDS: ReadonlySet<EditorCommand> = new Set(['copy', 'cut', 'paste']);
+
 // `key` is compared lowercased. A modifier left out matches either way.
 interface KeyBinding {
   key: string;

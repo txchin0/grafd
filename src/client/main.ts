@@ -13,6 +13,8 @@
 import { quoteValue, unquote } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { DrawStyle, Tool } from './canvas/canvas-view.js';
+import type { Point } from './geometry.js';
+import { hasDrawingColor } from '../shared/canvas-drawings.js';
 import { createColorSwatches, createStrokeWidthPicker } from './visual-pickers.js';
 import { createContextMenu, type MenuItem } from './context-menu.js';
 import type { Modal } from './modal.js';
@@ -34,7 +36,8 @@ import { createSidebarFiles } from './sidebar-files.js';
 import { createGraphPanel } from './graph-panel.js';
 import { getBlockProp, setBlockProp } from './context/index.js';
 import { createEditorCore } from './editor-core.js';
-import { commandForKey } from './editor-commands.js';
+import { CLIPBOARD_EVENT_COMMANDS, commandForKey } from './editor-commands.js';
+import { imageFileOf, preparePastedImage } from './pasted-image.js';
 
 let currentPreferences: Preferences = loadPreferences();
 applyTheme(currentPreferences.theme);
@@ -339,12 +342,20 @@ function setTool(tool: Tool): void {
 // The pen's colour and width show while drawing or writing, and while drawings are selected — a
 // swatch picked outside the draw tool then recolours them as well. With the pen in hand it only
 // sets the pen: drawings still selected from before are not what the user is choosing a colour
-// for. Text has a colour but no line, so the width row stays out of the text tool's way.
+// for. Text has a colour but no line, so the width row stays out of the text tool's way, and an
+// image has neither, so a selection of images alone shows no pen at all.
 function showDrawStyleWhenRelevant(): void {
-  const relevant = currentTool === 'draw' || currentTool === 'text' || view.selectedDrawings.length > 0;
+  const relevant = currentTool === 'draw' || currentTool === 'text' || anySelectedDrawingHasColor();
   if (elements.drawStyle.hidden === relevant) elements.drawStyle.hidden = !relevant;
   const widthRelevant = currentTool !== 'text';
   if (elements.drawWidth.hidden === widthRelevant) elements.drawWidth.hidden = !widthRelevant;
+}
+
+function anySelectedDrawingHasColor(): boolean {
+  return view.selectedDrawings.some(({ model, id }) => {
+    const drawing = model.visuals?.drawings().find((candidate) => candidate.id === id);
+    return drawing != null && hasDrawingColor(drawing);
+  });
 }
 
 const drawColorPicker = createColorSwatches(elements.drawColor, (color) => {
@@ -429,6 +440,43 @@ function preventPageSelectAll(): void {
   }, true);
 }
 
+// Ctrl+C, Ctrl+X and Ctrl+V arrive here as the browser's clipboard events (CLIPBOARD_EVENT_COMMANDS).
+// A copy also writes what it copied to the system clipboard as words, which displaces any image
+// held there: whichever was copied last, here or in another program, is what a paste brings back.
+function wireClipboard(): void {
+  window.addEventListener('copy', (event) => copyToSystemClipboard(event, 'copy'));
+  window.addEventListener('cut', (event) => copyToSystemClipboard(event, 'cut'));
+  window.addEventListener('paste', (event) => {
+    if (!clipboardEventIsTheCanvas(event)) return;
+    const image = imageFileOf(event.clipboardData);
+    if (!image) {
+      if (core.runCommand('paste')) event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    void pasteImageFile(image, view.pointerOrViewportCenter());
+  });
+}
+
+function copyToSystemClipboard(event: ClipboardEvent, command: 'copy' | 'cut'): void {
+  if (!clipboardEventIsTheCanvas(event) || !core.runCommand(command)) return;
+  event.clipboardData?.setData('text/plain', core.clipboard.plainText());
+  event.preventDefault();
+}
+
+// A text field keeps the browser's own clipboard, and a modal keeps the canvas out of reach.
+function clipboardEventIsTheCanvas(event: ClipboardEvent): boolean {
+  return !isTypingTarget(event.target) && !openModal();
+}
+
+async function pasteImageFile(file: File, world: Point): Promise<void> {
+  try {
+    core.pasteImage(await preparePastedImage(file), world);
+  } catch {
+    view.flashNotice('Image not pasted: the clipboard image could not be read.');
+  }
+}
+
 function wireKeyboard(): void {
   preventPageSelectAll();
   window.addEventListener('keydown', (event) => {
@@ -449,7 +497,7 @@ function wireKeyboard(): void {
 
     const command = commandForKey(event);
     if (command) {
-      if (core.runCommand(command)) event.preventDefault();
+      if (!CLIPBOARD_EVENT_COMMANDS.has(command) && core.runCommand(command)) event.preventDefault();
       return;
     }
 
@@ -566,6 +614,7 @@ async function boot(): Promise<void> {
   wireSidebarToggle();
   wireHelp();
   wireKeyboard();
+  wireClipboard();
   wireWorkspaceControls();
   applyPreferences(loadPreferences());
   setTool('select');

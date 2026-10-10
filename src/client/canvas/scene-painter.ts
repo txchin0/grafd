@@ -34,12 +34,15 @@ import {
   type EdgeBendOverrides,
   type EdgeGeometryMap,
 } from './edge-layout.js';
-import { STROKE_KIND, STROKE_LINE_WIDTHS, type CanvasDrawing } from '../../shared/canvas-drawings.js';
+import { STROKE_KIND, STROKE_LINE_WIDTHS, unknownDrawingKind, type CanvasDrawing } from '../../shared/canvas-drawings.js';
+import { IMAGE_KIND } from '../../shared/canvas-image.js';
+import { TEXT_KIND } from '../../shared/canvas-text.js';
 import type { DrawingTransform } from '../../shared/drawing-geometry.js';
 import { storedDrawingKey } from './drawing-selection.js';
 import type { ExpansionLayer, FrameExpansion } from './expansion.js';
 import { drawingInkColor, inkStroke } from './stroke-painter.js';
 import { inkText } from './text-painter.js';
+import { inkImage } from './image-painter.js';
 import { canvasLineMeasurer, drawingAsCarried } from './text-drawing-layout.js';
 import { BADGE_DIAMETER, BADGE_SYMBOLS, nodeBadges } from './node-badges.js';
 import { outlinePathData, shapeOutline, shapeTextBox, type ShapeOutline } from './node-shapes.js';
@@ -175,6 +178,8 @@ export interface ScenePainterOptions {
   drawingTransforms?: ReadonlyMap<string, DrawingTransform> | null;
   // The bend an edge being dragged would take, painted before anything is written.
   edgeBends?: EdgeBendOverrides | null;
+  // An image's decoded pixels, or null while it is not decoded yet.
+  images(src: string): CanvasImageSource | null;
 }
 
 function seedFrom(text: string): number {
@@ -196,6 +201,7 @@ export class ScenePainter {
   private readonly regionRects: ReadonlyMap<ContextBlock, Rect> | null;
   private readonly drawingTransforms: ReadonlyMap<string, DrawingTransform> | null;
   private readonly edgeBends: EdgeBendOverrides | null;
+  private readonly images: (src: string) => CanvasImageSource | null;
 
   constructor(options: ScenePainterOptions) {
     this.ctx = options.ctx;
@@ -208,6 +214,7 @@ export class ScenePainter {
     this.regionRects = options.regionRects ?? null;
     this.drawingTransforms = options.drawingTransforms ?? null;
     this.edgeBends = options.edgeBends ?? null;
+    this.images = options.images;
   }
 
   // Labels get their own pass after nodes so they stay readable even where an edge dives under
@@ -241,9 +248,19 @@ export class ScenePainter {
   }
 
   private drawDrawing(drawing: CanvasDrawing): void {
-    const color = drawingInkColor(drawing.color);
-    if (drawing.kind === STROKE_KIND) inkStroke(this.ctx, drawing.points, color, STROKE_LINE_WIDTHS[drawing.width]);
-    else if (drawing.id !== this.hiddenTitles.drawingId) inkText(this.ctx, drawing, color);
+    switch (drawing.kind) {
+      case STROKE_KIND:
+        inkStroke(this.ctx, drawing.points, drawingInkColor(drawing.color), STROKE_LINE_WIDTHS[drawing.width]);
+        return;
+      case TEXT_KIND:
+        if (drawing.id !== this.hiddenTitles.drawingId) inkText(this.ctx, drawing, drawingInkColor(drawing.color));
+        return;
+      case IMAGE_KIND:
+        inkImage(this.ctx, this.images(drawing.src), drawing.box);
+        return;
+      default:
+        unknownDrawingKind(drawing);
+    }
   }
 
   // A region is an enclosure, not a container: by default a hachure fill and a dashed outline, so

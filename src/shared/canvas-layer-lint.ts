@@ -26,7 +26,9 @@ import {
 } from './canvas-edge-style.js';
 import { REGION_FILL_PATTERNS, isRegionFillPattern } from './canvas-region-style.js';
 import { STROKE_KIND, STROKE_WIDTHS, isStrokeWidth, strokePointsOf } from './canvas-drawings.js';
-import { TEXT_KIND, isDrawableText, isTextSize, textBoxOf } from './canvas-text.js';
+import { TEXT_KIND, isDrawableText, isTextSize } from './canvas-text.js';
+import { IMAGE_KIND, isImageSource } from './canvas-image.js';
+import { drawingBoxOf } from './drawing-geometry.js';
 import { DRAWING_MEMBER_KIND, groupMembersOf, type Group } from './canvas-groups.js';
 import { byLine, info, warning, type Diagnostic } from './flow-diagnostics.js';
 import { parseFlow, type FlowDocument } from './flow-format.js';
@@ -135,6 +137,7 @@ function drawingDiagnostics(layerText: string, flow: FlowDocument | null): Diagn
     }
     if (entry.kind === STROKE_KIND) diagnostics.push(...strokeDiagnostics(entry, line, blockNames));
     if (entry.kind === TEXT_KIND) diagnostics.push(...textDiagnostics(entry, line, blockNames));
+    if (entry.kind === IMAGE_KIND) diagnostics.push(...imageDiagnostics(entry, line, blockNames));
   });
   return diagnostics;
 }
@@ -184,6 +187,11 @@ interface DrawingKindTerms {
 
 const STROKE_TERMS: DrawingKindTerms = { noun: 'stroke', invalidCode: 'invalid-stroke', colorCode: 'invalid-stroke-color' };
 const TEXT_TERMS: DrawingKindTerms = { noun: 'text', invalidCode: 'invalid-text', colorCode: 'invalid-text-color' };
+const IMAGE_TERMS: DrawingKindTerms = { noun: 'image', invalidCode: 'invalid-image', colorCode: 'invalid-image-color' };
+
+// Past this many characters of source, one image makes every write of its layer heavy: the layer
+// is rewritten whole on each edit and kept whole in each undo step.
+export const LARGE_IMAGE_SOURCE_LENGTH = 2_000_000;
 
 function strokeDiagnostics(stroke: Record<string, unknown>, line: number, blockNames: Set<string> | null): Diagnostic[] {
   const diagnostics = commonDrawingDiagnostics(stroke, line, blockNames, STROKE_TERMS);
@@ -201,7 +209,7 @@ function textDiagnostics(text: Record<string, unknown>, line: number, blockNames
   if (!isDrawableText(text.text)) {
     diagnostics.push(warning('invalid-text', line, 'This text\'s `text` must be a string with something besides spaces in it; it is not drawn.'));
   }
-  if (!textBoxOf(text.box)) {
+  if (!drawingBoxOf(text.box)) {
     diagnostics.push(warning('invalid-text', line, 'This text\'s `box` must be [x, y, width, height] with a positive width and height; it is not drawn.'));
   }
   if (text.size !== undefined && !isTextSize(text.size)) {
@@ -209,6 +217,19 @@ function textDiagnostics(text: Record<string, unknown>, line: number, blockNames
   }
   if (text.wrap !== undefined && typeof text.wrap !== 'boolean') {
     diagnostics.push(warning('invalid-text-wrap', line, `Invalid wrap ${JSON.stringify(text.wrap)}; the text is not wrapped. \`wrap\` is true or false.`));
+  }
+  return diagnostics;
+}
+
+function imageDiagnostics(image: Record<string, unknown>, line: number, blockNames: Set<string> | null): Diagnostic[] {
+  const diagnostics = commonDrawingDiagnostics(image, line, blockNames, IMAGE_TERMS);
+  if (!isImageSource(image.src)) {
+    diagnostics.push(warning('invalid-image', line, "This image's `src` must be a base64 `data:image/png`, `jpeg`, `webp` or `gif` URL; it is not drawn."));
+  } else if (image.src.length > LARGE_IMAGE_SOURCE_LENGTH) {
+    diagnostics.push(info('large-image', line, `This image is ${Math.round(image.src.length / 1_000_000)} MB of text; every edit to this layer rewrites it. A smaller picture keeps edits quick.`));
+  }
+  if (!drawingBoxOf(image.box)) {
+    diagnostics.push(warning('invalid-image', line, "This image's `box` must be [x, y, width, height] with a positive width and height; it is not drawn."));
   }
   return diagnostics;
 }

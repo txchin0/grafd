@@ -1,33 +1,60 @@
 // Copy, cut, paste and duplicate for canvas nodes, context regions and drawn strokes.
 //
-// The clipboard is session-local and holds detached node copies alongside the path and
-// `graph:` scope they came from, so paste can route back into the .flow file that owns them —
-// which for nodes selected inside an inline-expanded frame is not the open file. Cloning at
-// copy time means later edits to (or deletion of) the originals never disturb a later paste.
-// Regions ride the same groups: a region belongs to the graph scope that declares it, so a
-// paste whose target is a `graph:` block writes the block into that scope. The canvas visuals of
-// nodes and regions are captured with them, positionally, since a copy shares no id or name with
-// its source.
-// Strokes ride the same groups too, in the same scope coordinates as the nodes beside them, so a
-// paste keeps a stroke where it was drawn relative to them.
+// The clipboard is session-local and holds detached copies grouped by the graph they came from —
+// a file and a `graph:` scope, which for nodes selected inside an inline-expanded frame is not the
+// open file. Cloning at copy time means later edits to (or deletion of) the originals never
+// disturb a later paste. Regions and strokes ride the same groups, in the same scope coordinates
+// as the nodes beside them, so a paste keeps them where they were relative to those nodes. The
+// canvas visuals of nodes and regions are captured with them, positionally, since a copy shares no
+// id or name with its source.
+//
+// A paste goes into whichever graph the caller names — the one under the pointer — not back to
+// where the copy came from. Pasted into another graph, a copy is adapted to it first
+// (paste-transplant.ts): edges to nodes left behind are dropped, and pasted into another file, its
+// `expand` links are respelled and the local subgraphs it expands into are carried along, captured
+// at copy time like everything else.
 
 import { drawingAnchorPoints, type CarriedDrawings } from '../shared/canvas-drawings.js';
+import { textDrawingOf } from '../shared/canvas-text.js';
 import type { CapturedRegionVisuals, CapturedVisuals } from '../shared/canvas-layer.js';
-import type { ContextBlock, FlowNode } from '../shared/flow-format.js';
+import type { ContextBlock, FlowDocument, FlowItem, FlowNode } from '../shared/flow-format.js';
 import * as FlowDoc from './flow-doc.js';
 import type { Point } from './geometry.js';
 import type { DocumentOwner } from './canvas/expansion.js';
 import type { RegionTarget } from './canvas/canvas-view.js';
 import type { DrawingSelection, StoredDrawing } from './canvas/drawing-selection.js';
 import type { CopiedDrawings, CreationTarget } from './drawing-ops.js';
-import type { OpenFlow } from './open-flow.js';
+import {
+  assignSubgraphNames,
+  expansionOf,
+  expansionReaches,
+  keepEdgesWithinCopy,
+  localSubgraphNames,
+  rebaseExpandLinks,
+  renameLocalExpands,
+  renameUpdatedRegions,
+  sameGraph,
+  type GraphUnit,
+} from './paste-transplant.js';
 
-// How far a duplicate lands from its original, and where a paste with no pointer position goes.
+// How far a duplicate lands from its original, and how far each repeated keyboard paste steps on.
 const DUPLICATE_STEP = 24;
+const IN_PLACE: Point = { x: 0, y: 0 };
+
+// `at-point` puts the top-left of what was copied at the point. `beside-originals` steps away from
+// the originals like a duplicate when pasting back into the graph they came from, and is at the
+// point otherwise — the originals' coordinates mean nothing in another graph.
+export type PastePlacement = 'at-point' | 'beside-originals';
+
+export interface PasteRequest {
+  target: CreationTarget;
+  // In the target graph's own coordinates.
+  point: Point;
+  placement: PastePlacement;
+}
 
 interface ClipboardGroup {
-  path: string;
-  scope: string | null;
+  source: GraphUnit;
   nodes: FlowNode[];
   regions: ContextBlock[];
   visuals: CapturedVisuals | null;
@@ -35,20 +62,35 @@ interface ClipboardGroup {
   drawings: CarriedDrawings;
 }
 
-interface CopiedGroup extends Omit<ClipboardGroup, 'visuals' | 'regionVisuals'> {
+interface CopiedGroup {
   owner: DocumentOwner;
+  scope: string | null;
+  nodes: FlowNode[];
+  regions: ContextBlock[];
+  drawings: CarriedDrawings;
+}
+
+// A `graph:` block a copied node expands into, carried whole so a paste into another file can
+// write it there.
+interface CarriedSubgraph {
+  name: string;
+  nodes: FlowNode[];
+  regions: ContextBlock[];
+  visuals: CapturedVisuals | null;
+  regionVisuals: CapturedRegionVisuals | null;
+  drawings: CarriedDrawings;
 }
 
 export interface ClipboardOptions {
-  openFlow(): OpenFlow | null;
   selection(): FlowNode[];
   selectedRegions(): RegionTarget[];
   selectedDrawings(): DrawingSelection[];
   select(nodes: FlowNode[], regions: ContextBlock[], drawings: StoredDrawing[]): void;
   ownerOf(node: FlowNode): DocumentOwner;
   ownerOfRegion(region: RegionTarget): DocumentOwner;
-  // Resolves a path this session has loaded, so a paste can reach a frame's own document.
-  documentAt(path: string): DocumentOwner | null;
+  // Resolves a path this session has loaded, so a paste can tell whether it would put a node
+  // inside its own expansion.
+  documentAt(path: string): FlowDocument | null;
   applyToDoc(owner: DocumentOwner, mutation: () => void): void;
   deleteSelection(): void;
   captureVisuals(owner: DocumentOwner, nodes: FlowNode[]): CapturedVisuals | null;
@@ -58,24 +100,34 @@ export interface ClipboardOptions {
   // Like applyCapturedVisuals, runs inside the mutation that made the copies.
   applyRegionVisuals(owner: DocumentOwner, copies: readonly ContextBlock[], visuals: CapturedRegionVisuals | null): void;
   copyDrawings(selections: DrawingSelection[]): CopiedDrawings[];
+  // Every drawing filed under one graph, for a subgraph carried whole.
+  copyDrawingsInScope(owner: DocumentOwner, scope: string): CarriedDrawings;
   pasteDrawings(target: CreationTarget, drawings: CarriedDrawings, offset: Point): StoredDrawing[];
   // Cut, paste and duplicate each write several documents; this makes each one undo step.
   runAction(body: () => void): void;
+  // Says why a paste wrote nothing.
+  notify(text: string): void;
 }
 
 export interface Clipboard {
   copy(): void;
   cut(): void;
-  paste(world?: Point): void;
+  paste(request: PasteRequest): void;
   duplicateSelection(): void;
   hasContent(): boolean;
+  // What was copied as words, one name or text per line, for the system clipboard: another
+  // program pastes something readable, and the copy displaces whatever image the system clipboard
+  // held, so the most recent copy is the one a paste brings back.
+  plainText(): string;
 }
 
 export function createClipboard(options: ClipboardOptions): Clipboard {
   let groups: ClipboardGroup[] = [];
-  // How many pastes with no pointer position this clipboard's content has had. Each lands one step
-  // further from the originals than the last, so repeated pastes cascade instead of stacking.
-  let unplacedPasteCount = 0;
+  // Per source file, the subgraphs its copied nodes expand into.
+  let subgraphsByPath = new Map<string, CarriedSubgraph[]>();
+  // How many keyboard pastes this clipboard's content has had. Each lands one step further on
+  // than the last, so repeated pastes cascade instead of stacking.
+  let besidePasteCount = 0;
 
   function groupFor(byScope: Map<string, CopiedGroup>, owner: DocumentOwner, scope: string | null): CopiedGroup {
     const { path } = owner;
@@ -83,7 +135,7 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
     const key = `${path}\0${scope ?? ''}`;
     let group = byScope.get(key);
     if (!group) {
-      group = { owner, path, scope, nodes: [], regions: [], drawings: { drawings: [], groups: [] } };
+      group = { owner, scope, nodes: [], regions: [], drawings: { drawings: [], groups: [] } };
       byScope.set(key, group);
     }
     return group;
@@ -111,16 +163,50 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
     for (const { owner, scope, carried } of options.copyDrawings(options.selectedDrawings())) {
       groupFor(byScope, owner, scope).drawings = carried;
     }
-    groups = [...byScope.values()].map((group) => ({
-      path: group.path,
-      scope: group.scope,
+    const copied = [...byScope.values()];
+    groups = copied.map((group) => ({
+      source: { path: group.owner.path, scope: group.scope },
       nodes: FlowDoc.cloneNodesDetached(group.nodes),
       regions: group.regions,
       visuals: options.captureVisuals(group.owner, group.nodes),
       regionVisuals: options.captureRegionVisuals(group.owner, group.regions),
       drawings: group.drawings,
     }));
-    unplacedPasteCount = 0;
+    subgraphsByPath = carriedSubgraphsOf(copied);
+    besidePasteCount = 0;
+  }
+
+  // Captured for every source file, though only a paste into another file writes them: by then
+  // the originals may have been edited or deleted.
+  function carriedSubgraphsOf(copied: CopiedGroup[]): Map<string, CarriedSubgraph[]> {
+    const nodesByPath = new Map<string, { owner: DocumentOwner; nodes: FlowNode[] }>();
+    for (const group of copied) {
+      const entry = nodesByPath.get(group.owner.path) ?? { owner: group.owner, nodes: [] };
+      entry.nodes.push(...group.nodes);
+      nodesByPath.set(group.owner.path, entry);
+    }
+    const carried = new Map<string, CarriedSubgraph[]>();
+    for (const [path, { owner, nodes }] of nodesByPath) {
+      const subgraphs = localSubgraphNames(owner.doc, nodes).map((name) => carriedSubgraph(owner, name));
+      if (subgraphs.length > 0) carried.set(path, subgraphs);
+    }
+    return carried;
+  }
+
+  // A block an `expand` names but nobody has written yet is carried empty, so the expand still
+  // resolves where it lands.
+  function carriedSubgraph(owner: DocumentOwner, name: string): CarriedSubgraph {
+    const items: FlowItem[] = FlowDoc.graphBlockNames(owner.doc).includes(name) ? FlowDoc.scopeItems(owner.doc, name) : [];
+    const nodes = FlowDoc.nodesIn(items);
+    const regions = FlowDoc.contextBlocksIn(items);
+    return {
+      name,
+      nodes: FlowDoc.cloneNodesDetached(nodes),
+      regions: regions.map((region) => structuredClone(region)),
+      visuals: options.captureVisuals(owner, nodes),
+      regionVisuals: options.captureRegionVisuals(owner, regions),
+      drawings: options.copyDrawingsInScope(owner, name),
+    };
   }
 
   function cut(): void {
@@ -131,6 +217,19 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
 
   function hasContent(): boolean {
     return groups.some((group) => group.nodes.length > 0 || group.regions.length > 0 || group.drawings.drawings.length > 0);
+  }
+
+  // Never empty: an empty text might not displace an image the system clipboard holds, and a copy
+  // of drawings alone has no words of its own.
+  function plainText(): string {
+    const words = groups.flatMap((group) => [
+      ...group.nodes.map((node) => node.name),
+      ...group.regions.map((region) => region.name),
+      ...group.drawings.drawings.flatMap((drawing) => textDrawingOf(drawing)?.text ?? []),
+    ]);
+    if (words.length > 0) return words.join('\n');
+    const drawingCount = groups.reduce((count, group) => count + group.drawings.drawings.length, 0);
+    return drawingCount === 1 ? '1 drawing' : `${drawingCount} drawings`;
   }
 
   // Duplicates nodes and regions of a selection as one cluster, per owning document. A region
@@ -200,18 +299,20 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
     if (nodes.length + regions.length + drawings.length > 0) options.select(nodes, regions, drawings);
   }
 
-  // Paste at the pointer puts the top-left corner of everything copied under it, the rest kept in
-  // formation — whatever order it was selected in; with no pointer position it steps away from the
-  // originals like a duplicate instead, one step further on each paste.
-  function pasteOffset(world: Point | undefined): Point {
-    const pointerOffset = world ? offsetPlacingTopLeftAt(world) : null;
-    if (pointerOffset) return pointerOffset;
-    unplacedPasteCount += 1;
-    const distance = DUPLICATE_STEP * unplacedPasteCount;
-    return { x: distance, y: distance };
+  // The top-left corner of everything copied lands where it is asked to, the rest kept in
+  // formation — whatever order it was selected in.
+  function pasteOffset({ target, point, placement }: PasteRequest): Point {
+    if (placement === 'at-point') return offsetPlacingTopLeftAt(point) ?? IN_PLACE;
+    besidePasteCount += 1;
+    const stepsOn = DUPLICATE_STEP * besidePasteCount;
+    const destination = unitOf(target);
+    if (groups.every((group) => sameGraph(group.source, destination))) return { x: stepsOn, y: stepsOn };
+    const atPoint = offsetPlacingTopLeftAt(point) ?? IN_PLACE;
+    const stepsPastThePoint = stepsOn - DUPLICATE_STEP;
+    return { x: atPoint.x + stepsPastThePoint, y: atPoint.y + stepsPastThePoint };
   }
 
-  function offsetPlacingTopLeftAt(world: Point): Point | null {
+  function offsetPlacingTopLeftAt(point: Point): Point | null {
     const corners = groups
       .flatMap((group) => [
         ...group.nodes.map((node) => node.pos),
@@ -221,50 +322,128 @@ export function createClipboard(options: ClipboardOptions): Clipboard {
       .filter((pos): pos is Point => pos != null);
     if (corners.length === 0) return null;
     const topLeft = { x: Math.min(...corners.map((corner) => corner.x)), y: Math.min(...corners.map((corner) => corner.y)) };
-    return { x: Math.round(world.x - topLeft.x), y: Math.round(world.y - topLeft.y) };
+    return { x: Math.round(point.x - topLeft.x), y: Math.round(point.y - topLeft.y) };
   }
 
-  function paste(world?: Point): void {
-    const flow = options.openFlow();
-    if (!flow || !hasContent()) return;
-    options.runAction(() => pasteInto(flow, world));
+  function paste(request: PasteRequest): void {
+    if (!hasContent()) return;
+    const refusal = expansionLoopRefusal(unitOf(request.target));
+    if (refusal) {
+      options.notify(refusal);
+      return;
+    }
+    options.runAction(() => pasteInto(request));
   }
 
-  function pasteInto(flow: OpenFlow, world: Point | undefined): void {
-    // A group whose original document is no longer loaded falls back to the open flow, where
-    // the user can at least see what they pasted.
-    const fallback: DocumentOwner = { doc: flow.doc, path: flow.path };
-    const offset = pasteOffset(world);
+  // A node pasted inside its own expansion would unfold into itself forever.
+  function expansionLoopRefusal(destination: GraphUnit): string | null {
+    for (const group of groups) {
+      for (const node of group.nodes) {
+        const expansion = expansionOf(node, group.source.path);
+        if (expansion && expansionReaches(expansion, destination, options.documentAt)) {
+          return `Can't paste ${node.name} here: it expands into this graph`;
+        }
+      }
+    }
+    return null;
+  }
+
+  function pasteInto(request: PasteRequest): void {
+    const { target } = request;
+    const { owner } = target;
+    const destination = unitOf(target);
+    const offset = pasteOffset(request);
     const pastedNodes: FlowNode[] = [];
     const pastedRegions: ContextBlock[] = [];
     const pastedDrawings: StoredDrawing[] = [];
-    for (const group of groups) {
-      const resolved = options.documentAt(group.path);
-      const owner = resolved ?? fallback;
-      const scope = resolved ? group.scope : flow.scope;
-      const items = FlowDoc.scopeItems(owner.doc, scope);
+    const subgraphRenamesByPath = new Map<string, Map<string, string>>();
+    const carriedDrawings: { scope: string; drawings: CarriedDrawings }[] = [];
+    const subgraphsFromOtherFiles = [...subgraphsByPath].filter(([sourcePath]) => sourcePath !== owner.path);
+    if (subgraphsFromOtherFiles.length > 0) {
       options.applyToDoc(owner, () => {
-        const copies = FlowDoc.duplicateNodes(items, group.nodes, offset);
-        options.applyCapturedVisuals(owner, copies, group.visuals);
+        for (const [sourcePath, subgraphs] of subgraphsFromOtherFiles) {
+          const written = writeCarriedSubgraphs(owner, sourcePath, subgraphs);
+          subgraphRenamesByPath.set(sourcePath, written.renames);
+          carriedDrawings.push(...written.drawings);
+        }
+      });
+    }
+    for (const { scope, drawings } of carriedDrawings) options.pasteDrawings({ owner, scope }, drawings, IN_PLACE);
+    for (const group of groups) {
+      const crossesGraphs = !sameGraph(group.source, destination);
+      const adapted = crossesGraphs ? keepEdgesWithinCopy(group.nodes, group.visuals) : { nodes: group.nodes, visuals: group.visuals };
+      rebaseExpandLinks(adapted.nodes, group.source.path, owner.path);
+      renameLocalExpands(adapted.nodes, subgraphRenamesByPath.get(group.source.path) ?? new Map());
+      options.applyToDoc(owner, () => {
+        const items = FlowDoc.ensureScopeItems(owner.doc, target.scope);
+        const copies = FlowDoc.duplicateNodes(items, adapted.nodes, offset);
+        options.applyCapturedVisuals(owner, copies, adapted.visuals);
         pastedNodes.push(...copies);
-        const renamedMembers = new Map(group.nodes.map((source, index) => [source.name, copies[index].name]));
-        const nested = items !== owner.doc.items;
-        const regionCopies = FlowDoc.duplicateContextBlocks(
-          items,
-          group.regions,
-          offset,
-          renamedMembers,
-          FlowDoc.inheritedContextNames(owner.doc),
-          FlowDoc.allContextBlocks(owner.doc).map((block) => block.name),
-          nested ? 'before-nodes' : 'end',
-        );
+        const renamedMembers = new Map(adapted.nodes.map((source, index) => [source.name, copies[index].name]));
+        const regionCopies = duplicateRegionsInto(owner.doc, items, group.regions, offset, renamedMembers);
+        renameUpdatedRegions(copies, renamesOf(group.regions, regionCopies));
         options.applyRegionVisuals(owner, regionCopies, group.regionVisuals);
         pastedRegions.push(...regionCopies);
+        if (crossesGraphs) FlowDoc.removeUnreadableUpdates(owner.doc, copies);
       });
-      pastedDrawings.push(...options.pasteDrawings({ owner, scope }, group.drawings, offset));
+      pastedDrawings.push(...options.pasteDrawings(target, group.drawings, offset));
     }
     selectIfAny(pastedNodes, pastedRegions, pastedDrawings);
   }
 
-  return { copy, cut, paste, duplicateSelection, hasContent };
+  // Writes the subgraphs copied out of `sourcePath` into the destination file, each under a name
+  // no block there uses yet. Returns those names, which the pasted hosts' `expand` must follow, and
+  // the drawings to file under them — written once the blocks exist.
+  function writeCarriedSubgraphs(
+    owner: DocumentOwner,
+    sourcePath: string,
+    subgraphs: CarriedSubgraph[],
+  ): { renames: Map<string, string>; drawings: { scope: string; drawings: CarriedDrawings }[] } {
+    const renames = assignSubgraphNames(FlowDoc.graphBlockNames(owner.doc), subgraphs.map((subgraph) => subgraph.name));
+    const drawings: { scope: string; drawings: CarriedDrawings }[] = [];
+    for (const subgraph of subgraphs) {
+      const blockName = renames.get(subgraph.name)!;
+      const nodes = FlowDoc.cloneNodesDetached(subgraph.nodes);
+      rebaseExpandLinks(nodes, sourcePath, owner.path);
+      renameLocalExpands(nodes, renames);
+      const items = FlowDoc.ensureScopeItems(owner.doc, blockName);
+      const copies = FlowDoc.duplicateNodes(items, nodes, IN_PLACE);
+      options.applyCapturedVisuals(owner, copies, subgraph.visuals);
+      const sameNames = new Map(nodes.map((node, index) => [node.name, copies[index].name]));
+      const regionCopies = duplicateRegionsInto(owner.doc, items, subgraph.regions, IN_PLACE, sameNames);
+      renameUpdatedRegions(copies, renamesOf(subgraph.regions, regionCopies));
+      options.applyRegionVisuals(owner, regionCopies, subgraph.regionVisuals);
+      FlowDoc.removeUnreadableUpdates(owner.doc, copies);
+      drawings.push({ scope: blockName, drawings: subgraph.drawings });
+    }
+    return { renames, drawings };
+  }
+
+  function duplicateRegionsInto(
+    doc: FlowDocument,
+    items: FlowItem[],
+    regions: readonly ContextBlock[],
+    offset: Point,
+    renamedMembers: ReadonlyMap<string, string>,
+  ): ContextBlock[] {
+    return FlowDoc.duplicateContextBlocks(
+      items,
+      regions,
+      offset,
+      renamedMembers,
+      FlowDoc.inheritedContextNames(doc),
+      FlowDoc.allContextBlocks(doc).map((block) => block.name),
+      items !== doc.items ? 'before-nodes' : 'end',
+    );
+  }
+
+  return { copy, cut, paste, duplicateSelection, hasContent, plainText };
+}
+
+function unitOf(target: CreationTarget): GraphUnit {
+  return { path: target.owner.path, scope: target.scope };
+}
+
+function renamesOf(sources: readonly ContextBlock[], copies: readonly ContextBlock[]): Map<string, string> {
+  return new Map(sources.map((source, index) => [source.name, copies[index].name]));
 }

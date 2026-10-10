@@ -2,7 +2,8 @@
 // land on — nodes inside and outside regions, a drawn region, one sized by its members and one
 // nested inside another that lists its member too, edges,
 // a subgraph host, an edge to a node that does not exist yet (drawn as a ghost), loose strokes and
-// a group of them, text loose, wrapped, inside a region, inside a subgraph and grouped with a stroke — so that a sequence of gestures has every pairing of kind and destination within
+// a group of them, text loose, wrapped, inside a region, inside a subgraph and grouped with a
+// stroke, and images placed the same ways — so that a sequence of gestures has every pairing of kind and destination within
 // reach. A kind added to the canvas belongs here too, or no session ever touches it; the coverage
 // test in editor-sessions.test.ts fails until one is.
 
@@ -10,6 +11,8 @@ import { parseFlow, serializeFlow } from '../src/shared/flow-format.js';
 import { canvasLayerPathOf, parseCanvasLayer, serializeCanvasLayer } from '../src/shared/canvas-layer.js';
 
 export const SESSION_FLOW_PATH = 'main.flow';
+
+const ONE_PIXEL_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 const SESSION_FLOW = `---
 name: Session
@@ -77,10 +80,16 @@ const SESSION_LAYER = {
     { id: 'captioned', kind: 'text', text: 'Caption', box: [1300, 420, 80, 25] },
     { id: 'wrapped-text', kind: 'text', text: 'Several words wrapped', box: [760, 720, 90, 75], size: 20, wrap: true },
     { id: 'underline', kind: 'stroke', width: 'thin', points: [[1300, 455], [1380, 455]] },
+    { id: 'loose-image', kind: 'image', box: [960, 560, 80, 60], src: ONE_PIXEL_PNG },
+    { id: 'region-image', kind: 'image', box: [560, 260, 70, 50], src: ONE_PIXEL_PNG },
+    { id: 'inner-image', kind: 'image', graph: 'Delta', box: [80, 120, 60, 40], src: ONE_PIXEL_PNG },
+    { id: 'pictured', kind: 'image', box: [1500, 100, 80, 60], src: ONE_PIXEL_PNG },
+    { id: 'picture-frame', kind: 'stroke', width: 'thin', points: [[1500, 175], [1580, 175]] },
   ],
   groups: [
     { id: 'pair', members: [{ kind: 'drawing', id: 'grouped-a' }, { kind: 'drawing', id: 'grouped-b' }] },
     { id: 'mixed', members: [{ kind: 'drawing', id: 'captioned' }, { kind: 'drawing', id: 'underline' }] },
+    { id: 'framed', members: [{ kind: 'drawing', id: 'pictured' }, { kind: 'drawing', id: 'picture-frame' }] },
   ],
 };
 

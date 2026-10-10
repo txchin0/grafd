@@ -1105,7 +1105,7 @@ function graphBlockByName(doc: FlowDocument, name: string): GraphItem | null {
   return doc.items.find((item): item is GraphItem => item.kind === 'graph' && item.name === name) ?? null;
 }
 
-function localExpandTargets(nodes: FlowNode[]): string[] {
+export function localExpandTargets(nodes: FlowNode[]): string[] {
   const targets: string[] = [];
   for (const node of nodes) {
     const expandValue = getProp(node, 'expand');
@@ -1115,7 +1115,7 @@ function localExpandTargets(nodes: FlowNode[]): string[] {
 }
 
 /** Blocks reachable from `startNames` by following local `expand` references. */
-function reachableBlockNames(doc: FlowDocument, startNames: string[]): Set<string> {
+export function reachableBlockNames(doc: FlowDocument, startNames: string[]): Set<string> {
   const reached = new Set<string>();
   const pending = [...startNames];
   while (pending.length > 0) {

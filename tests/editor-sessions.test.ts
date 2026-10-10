@@ -120,6 +120,20 @@ const SESSION_REGRESSIONS: [SessionAction[]][] = [
     { type: 'command', command: 'copy' },
     { type: 'menu', target: { kind: 'empty', index: 0, nudge: { x: 0, y: 0 } }, choice: 1 },
   ]],
+  // Paste inside an unfolded frame landed in the graph the copy came from, not the frame.
+  [[
+    { type: 'click', target: { kind: 'badge', index: 1, nudge: { x: 0, y: 0 } }, shift: false },
+    { type: 'click', target: nodePick(0), shift: false },
+    { type: 'command', command: 'copy' },
+    { type: 'menu', target: { kind: 'frame-inside', index: 0, nudge: { x: 0, y: 0 } }, choice: 4 },
+  ]],
+  // A copy out of an unfolded frame pasted on the canvas went back into the frame's subgraph.
+  [[
+    { type: 'click', target: { kind: 'badge', index: 1, nudge: { x: 0, y: 0 } }, shift: false },
+    { type: 'click', target: { kind: 'frame-node', index: 0, nudge: { x: 0, y: 0 } }, shift: false },
+    { type: 'command', command: 'copy' },
+    { type: 'menu', target: { kind: 'empty', index: 0, nudge: { x: 0, y: 0 } }, choice: 1 },
+  ]],
   // Pasting again landed the new copy exactly on top of the last one.
   [[
     { type: 'click', target: nodePick(0), shift: false },

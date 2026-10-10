@@ -114,9 +114,16 @@ export function createScreenshotDialog(context: ScreenshotContext): ScreenshotDi
     });
   }
 
+  // The first draw asks for every image in the graph, and those not yet decoded show placeholders
+  // until a second draw once they are.
+  async function drawWithImagesInto(canvas: HTMLCanvasElement, size: SnapshotPixelSize): Promise<void> {
+    drawInto(canvas, size);
+    if (await context.view.imagesSettled()) drawInto(canvas, size);
+  }
+
   function renderPreview(): void {
     const { css, device } = previewLayoutFor(logicalSize, window.devicePixelRatio || 1);
-    drawInto(elements.preview, device);
+    void drawWithImagesInto(elements.preview, device);
     elements.preview.style.width = `${css.width}px`;
     elements.preview.style.height = `${css.height}px`;
   }
@@ -176,7 +183,7 @@ export function createScreenshotDialog(context: ScreenshotContext): ScreenshotDi
     if (exceedsSnapshotLimits(size)) return;
     try {
       const canvas = document.createElement('canvas');
-      drawInto(canvas, size);
+      await drawWithImagesInto(canvas, size);
       downloadBlob(await canvasToPngBlob(canvas), `${context.fileStem()}.png`);
       modal.close();
     } catch (error) {

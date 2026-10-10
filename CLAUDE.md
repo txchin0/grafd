@@ -57,8 +57,8 @@ through the same read/write path as .flow files.
 All styling lives outside the .flow too, in each graph's **canvas layer**
 `<file>.flow.canvas.json` (FLOW-SPEC.md §2.1, §11.5; `src/shared/canvas-layer.ts`): node shapes and
 text sizes keyed by node `id`, edge colours keyed by a key derived from the edge, region colours and
-backgrounds keyed by the provider's name (unique in its file), freehand strokes and free
-text in a `drawings` list (each filed under the graph scope it was made in — `graph` names the
+backgrounds keyed by the provider's name (unique in its file), freehand strokes, free
+text and pasted images in a `drawings` list (each filed under the graph scope it was made in — `graph` names the
 block, absent for the body — in that scope's coordinates), groups of things picked up as one (a `groups` list
 of typed members — drawings for now, built to take nodes later), plus unknown keys carried
 through verbatim. It is purely cosmetic — losing it
@@ -102,9 +102,13 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   a document's visuals are keyed by), `followIdentityChanges` (re-keying after an edit), and
   positional capture/apply for copies (one record per copied node). An `on_error` edge's key is
   filed under its node in `edgeKeys`, since the property has no stable EdgeSpec object.
-  `canvas-drawings.ts` reads and edits the drawings — strokes (`points`) and text (`box`,
-  `canvas-text.ts`) — and moves and resizes either kind as one `DrawingTransform`
-  (`drawing-geometry.ts`) applied to whichever geometry the entry has. A text stores its box and
+  `canvas-drawings.ts` reads and edits the drawings — strokes (`points`), text (`box`,
+  `canvas-text.ts`) and images (`box`, `canvas-image.ts`) — and moves and resizes every kind as
+  one `DrawingTransform` (`drawing-geometry.ts`) applied to whichever geometry the entry has.
+  Whatever depends on a drawing's kind switches over every kind and ends in `unknownDrawingKind`,
+  so a new kind does not compile until each such place answers for it. An image carries its pixels
+  as a base64 `data:` URL (raster types only, never a remote URL), so it travels through the same
+  text-only reads and writes as everything else in the layer, and it has no colour. A text stores its box and
   its font `size`; it either fits its box to its own lines, or (`wrap`) wraps its words to the
   box's width. Scaled evenly its size scales with its box; stretched sideways it keeps its size and
   wraps to the new width, and the editor measures its height again.
@@ -205,6 +209,11 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
     drawing's two identities — where it is drawn (one per frame showing it) and where it is stored
     (what every write uses). A grouped drawing is never selected alone — selecting it selects its
     whole group.
+  - `image-cache.ts` / `image-painter.ts` — images: painting is synchronous and decoding is not,
+    so the view keeps decoded pixels per source (an LRU that never evicts what the current paint
+    drew), paints a placeholder outline until they land, then paints again. Exports await
+    `imagesSettled()` before drawing for good. An image resizes evenly from every handle, and
+    whatever is resized with it does too.
   - `text-drawing-layout.ts` / `text-painter.ts` — free text: its lines (wrapped to its width, if
     it has one), the size it is drawn at, the box new words or a new width need (the one place the
     painter, the inline text editor and the writes agree on), and how its lines are inked.
@@ -256,6 +265,20 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   layer of the file that owns the graph it was made in (an unfolded frame's subgraph, whichever
   file that is), a text rewritten keeps where it starts and its size, and moves, recolours and
   deletes join whatever action is open.
+- `src/client/clipboard.ts` / `paste-transplant.ts` — copy, cut, paste and duplicate. A copy is
+  detached and grouped by the graph it came from; a paste goes into whichever graph is under the
+  pointer (an unfolded frame's subgraph included — its interior's menu offers Paste), never back
+  to the source. Pasted into another graph, the copy keeps only edges between copied nodes;
+  pasted into another file, its `expand` links are respelled and the local `graph:` blocks it
+  expands into are carried along (renamed if taken, with their visuals and drawings). A host is
+  never pasted inside its own expansion.
+- `src/client/pasted-image.ts` — an image off the system clipboard: found in a `paste` event,
+  scaled down to at most 1600 px on its longest side and encoded as whichever of PNG or WebP is
+  smaller, then placed by `EditorCore.pasteImage` centred on the pointer, shown pixel for pixel
+  at the current zoom unless that overflows the viewport. Ctrl+C, Ctrl+X and Ctrl+V run from the
+  browser's copy, cut and paste events (`CLIPBOARD_EVENT_COMMANDS`), never from the key, which
+  would cancel them; an in-app copy writes its names as text to the system clipboard, so whichever
+  copy came last wins a paste.
 - `src/client/text-drawing-editor.ts` — the textarea laid over a text being written or edited
   (opened by the text tool on bare canvas, or a double-click on a text). It commits whenever it
   closes; blank text writes nothing, and an existing text emptied out is deleted.
@@ -302,7 +325,8 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   and the node and region tools leave every object as grabbable as the select tool does — and
   what a user expects of the step itself, in `session-expectations.ts`: a click writes nothing, a
   plain click selects one thing and a shift-click changes exactly one, a drag carries what it
-  grabbed the whole way, an abandoned drag writes nothing, and the commands do what they say. A
+  grabbed the whole way, an abandoned drag writes nothing, a paste lands in the graph under the
+  pointer, and the commands do what they say. A
   failure is shrunk to the shortest session that still breaks the rule, and once fixed it joins
   the pinned regressions that run first on every `npm test`. `SESSION_RUNS=<n>` searches deeper
   than `npm test` does.

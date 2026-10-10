@@ -4,23 +4,28 @@
 // unfolded inside a frame. `followIdentityChanges` (canvas-layer.ts) keeps `graph` in step with
 // block renames and removals.
 //
-// This editor draws two kinds: a freehand stroke (its geometry is `points`) and free text (its
-// geometry is a `box`, canvas-text.ts). Drawings of other kinds, and fields this editor does not
-// know, are kept verbatim and simply not drawn.
+// This editor draws three kinds: a freehand stroke (its geometry is `points`), free text (its
+// geometry is a `box`, canvas-text.ts) and an image (also a `box`, canvas-image.ts). Drawings of
+// other kinds, and fields this editor does not know, are kept verbatim and simply not drawn.
+//
+// Whatever depends on the kind switches over every kind and ends in `unknownDrawingKind`, so a
+// kind added to `CanvasDrawing` fails to compile wherever it has not been given its own answer.
 
 import { isLayerColor, type CanvasLayer, type Drawing } from './canvas-layer.js';
 import { groupsForCopies, pruneGroups, type Group } from './canvas-groups.js';
 import {
+  TEXT_KIND,
   isTextSize,
   storedTextLayout,
-  textBoxOf,
   textDrawingOf,
   textDrawingRecord,
   type TextDrawing,
 } from './canvas-text.js';
+import { IMAGE_KIND, imageDrawingOf, imageDrawingRecord, type ImageDrawing } from './canvas-image.js';
 import {
   applyDrawingTransform,
   isFiniteNumber,
+  storedDrawingBox,
   isStretch,
   roundCoordinate,
   transformedRect,
@@ -49,14 +54,18 @@ export interface Stroke {
 }
 
 // Every drawing this editor can draw, read from the layer.
-export type CanvasDrawing = Stroke | TextDrawing;
+export type CanvasDrawing = Stroke | TextDrawing | ImageDrawing;
+
+export function unknownDrawingKind(drawing: never): never {
+  throw new Error(`No drawing kind ${(drawing as { kind: unknown }).kind}`);
+}
 
 export function isStrokeWidth(value: unknown): value is StrokeWidth {
   return (STROKE_WIDTHS as readonly unknown[]).includes(value);
 }
 
 export function drawingOf(drawing: Drawing): CanvasDrawing | null {
-  return strokeOf(drawing) ?? textDrawingOf(drawing);
+  return strokeOf(drawing) ?? textDrawingOf(drawing) ?? imageDrawingOf(drawing);
 }
 
 // Null for anything that is not a drawable stroke. A bad colour or width only costs the stroke
@@ -113,19 +122,33 @@ function storedCoordinatePair(point: DrawingPoint): [number, number] {
 
 // Where a drawing's ink reaches: what selection outlines, marquees and frames measure.
 export function drawingBounds(drawing: CanvasDrawing): Rect {
-  return drawing.kind === STROKE_KIND ? strokeBounds(drawing) : drawing.box;
-}
-
-// The box a resize stretches: a stroke's points (its line width is style and stays), a text's box.
-export function drawingGeometryBox(drawing: CanvasDrawing): Rect {
-  return drawing.kind === STROKE_KIND ? strokePointBounds(drawing) : drawing.box;
-}
-
-export function transformedDrawing<Shown extends CanvasDrawing>(drawing: Shown, transform: DrawingTransform): Shown {
-  if (drawing.kind === STROKE_KIND) {
-    return { ...drawing, points: drawing.points.map((point) => applyDrawingTransform(point, transform)) };
+  switch (drawing.kind) {
+    case STROKE_KIND: return strokeBounds(drawing);
+    case TEXT_KIND:
+    case IMAGE_KIND: return drawing.box;
+    default: return unknownDrawingKind(drawing);
   }
-  return { ...drawing, ...transformedTextLayout(drawing, transform) };
+}
+
+// The box a resize stretches: a stroke's points (its line width is style and stays), a text's or
+// an image's box.
+export function drawingGeometryBox(drawing: CanvasDrawing): Rect {
+  switch (drawing.kind) {
+    case STROKE_KIND: return strokePointBounds(drawing);
+    case TEXT_KIND:
+    case IMAGE_KIND: return drawing.box;
+    default: return unknownDrawingKind(drawing);
+  }
+}
+
+export function transformedDrawing<Shown extends CanvasDrawing>(drawing: Shown, transform: DrawingTransform): Shown;
+export function transformedDrawing(drawing: CanvasDrawing, transform: DrawingTransform): CanvasDrawing {
+  switch (drawing.kind) {
+    case STROKE_KIND: return { ...drawing, points: drawing.points.map((point) => applyDrawingTransform(point, transform)) };
+    case TEXT_KIND: return { ...drawing, ...transformedTextLayout(drawing, transform) };
+    case IMAGE_KIND: return { ...drawing, box: transformedRect(drawing.box, transform) };
+    default: return unknownDrawingKind(drawing);
+  }
 }
 
 // A text scaled evenly scales its size with its box. Stretched sideways, it keeps its size and
@@ -162,10 +185,11 @@ export function strokePointBounds(stroke: Pick<Stroke, 'points'>): Rect {
 // The points a stored drawing's geometry passes through, whatever its kind — what a paste
 // anchors on. Empty for a drawing with no geometry this editor reads.
 export function drawingAnchorPoints(drawing: Drawing): DrawingPoint[] {
-  const points = strokePointsOf(drawing.points);
-  if (points) return points;
-  const box = textBoxOf(drawing.box);
-  return box ? [{ x: box.x, y: box.y }, { x: box.x + box.w, y: box.y + box.h }] : [];
+  const readable = drawingOf(drawing);
+  if (!readable) return [];
+  if (readable.kind === STROKE_KIND) return readable.points;
+  const box = drawingGeometryBox(readable);
+  return [{ x: box.x, y: box.y }, { x: box.x + box.w, y: box.y + box.h }];
 }
 
 export function addStroke(layer: CanvasLayer, stroke: Stroke): void {
@@ -174,6 +198,10 @@ export function addStroke(layer: CanvasLayer, stroke: Stroke): void {
 
 export function addTextDrawing(layer: CanvasLayer, text: TextDrawing): void {
   layer.drawings = [...layer.drawings, textDrawingRecord(text)];
+}
+
+export function addImageDrawing(layer: CanvasLayer, image: ImageDrawing): void {
+  layer.drawings = [...layer.drawings, imageDrawingRecord(image)];
 }
 
 export function removeDrawings(layer: CanvasLayer, ids: ReadonlySet<string>): void {
@@ -191,16 +219,31 @@ export function transformDrawings(layer: CanvasLayer, transforms: ReadonlyMap<st
 // The stored drawing with whichever geometry it has carried by the transform. A drawing whose
 // geometry this editor cannot read is left exactly as it is.
 function withTransformedGeometry(drawing: Drawing, transform: DrawingTransform): Drawing {
-  const points = strokePointsOf(drawing.points);
-  if (points) return { ...drawing, points: points.map((point) => storedCoordinatePair(applyDrawingTransform(point, transform))) };
-  const text = textDrawingOf(drawing);
-  if (text) return { ...drawing, ...storedTextLayout(transformedTextLayout(text, transform)) };
-  return drawing;
+  const readable = drawingOf(drawing);
+  if (!readable) return drawing;
+  switch (readable.kind) {
+    case STROKE_KIND: return { ...drawing, points: readable.points.map((point) => storedCoordinatePair(applyDrawingTransform(point, transform))) };
+    case TEXT_KIND: return { ...drawing, ...storedTextLayout(transformedTextLayout(readable, transform)) };
+    case IMAGE_KIND: return { ...drawing, box: storedDrawingBox(transformedRect(readable.box, transform)) };
+    default: return unknownDrawingKind(readable);
+  }
+}
+
+// An image is drawn in its own pixels, so it has no colour to change.
+export function hasDrawingColor(drawing: CanvasDrawing): boolean {
+  switch (drawing.kind) {
+    case STROKE_KIND:
+    case TEXT_KIND: return true;
+    case IMAGE_KIND: return false;
+    default: return unknownDrawingKind(drawing);
+  }
 }
 
 export function setDrawingColor(layer: CanvasLayer, ids: ReadonlySet<string>, color: string | null): void {
   layer.drawings = layer.drawings.map((drawing) => {
     if (!hasIdIn(drawing, ids)) return drawing;
+    const readable = drawingOf(drawing);
+    if (readable && !hasDrawingColor(readable)) return drawing;
     const recolored = { ...drawing };
     if (color == null) delete recolored.color;
     else recolored.color = color;
