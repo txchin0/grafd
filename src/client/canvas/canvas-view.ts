@@ -2932,17 +2932,19 @@ export class CanvasView {
     this.drawingsToHold = [];
   }
 
-  // World rects of the selected drawings, following any drag in progress.
+  // World rects of the selected drawings that are not grouped, following any drag in progress. A
+  // grouped drawing is outlined only by its group's outline.
   private selectedDrawingOutlines(): Rect[] {
     const surfaces = this.drawingSurfaces();
     return this.heldDrawings.flatMap((held) => {
+      if (this.groupOfDrawing(held).length > 1) return [];
       const surface = surfaces.find((candidate) => candidate.model === held.model);
       const laidOut = surface?.model.visuals?.drawings().find((candidate) => candidate.id === held.id);
       return surface && laidOut ? [worldBoundsOf(this.drawingAsShown(held, laidOut), surface)] : [];
     });
   }
 
-  // One solid outline around each selected group, around the dashed ones of its members.
+  // One solid outline around each selected group, standing in for its members' own.
   private selectedGroupOutlines(): Rect[] {
     const surfaces = this.drawingSurfaces();
     const outlined = new Set<string>();

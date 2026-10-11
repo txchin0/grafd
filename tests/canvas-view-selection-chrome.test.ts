@@ -2,7 +2,11 @@
 
 import { beforeAll, describe, expect, it, type Mock } from 'vitest';
 import { parseFlow } from '../src/shared/flow-format.js';
+import { addStroke } from '../src/shared/canvas-drawings.js';
+import { groupDrawings } from '../src/shared/canvas-groups.js';
+import { emptyCanvasLayer } from '../src/shared/canvas-layer.js';
 import { allNodes, assignMissingIds, buildModel } from '../src/client/flow-doc.js';
+import { dressModel } from '../src/client/model-visuals.js';
 import type { CanvasActions } from '../src/client/canvas/canvas-view.js';
 import type { Point } from '../src/client/geometry.js';
 import { createCanvasMock, createExpansionLayer, stubCanvasGlobals } from './canvas-mock.js';
@@ -65,5 +69,36 @@ function handleOffsetsFromOutlineCornersAt(scale: number): number[] {
 describe('a selected node\'s corner handles', () => {
   it.each([1, EXTREME_ZOOM])('sit on its outline\'s corners at zoom %d', (scale) => {
     for (const offset of handleOffsetsFromOutlineCornersAt(scale)) expect(offset).toBeCloseTo(0, 6);
+  });
+});
+
+function selectedGroupOfStrokesOnCanvas() {
+  const layer = emptyCanvasLayer();
+  addStroke(layer, { kind: 'stroke', id: 's1', graph: null, color: null, width: 'medium', points: [{ x: 0, y: 0 }, { x: 80, y: 40 }] });
+  addStroke(layer, { kind: 'stroke', id: 's2', graph: null, color: null, width: 'medium', points: [{ x: 200, y: 100 }, { x: 260, y: 160 }] });
+  groupDrawings(layer, new Set(['s1', 's2']));
+  const model = buildModel(parseFlow(ONE_NODE_FLOW), null);
+  model.sourcePath = 'chrome.flow';
+  const canvas = createCanvasMock();
+  const view = new CanvasView(canvas, {} as CanvasActions, createExpansionLayer());
+  view.setModel(dressModel(model, layer));
+  view.setSelection([], [], [{ path: 'chrome.flow', scope: null, id: 's1' }]);
+  return { view, context: canvas.getContext('2d') as unknown as { strokeRect: Mock } };
+}
+
+describe('a selected group', () => {
+  it('is outlined once, around all its members, and its members are not outlined on their own', () => {
+    const { view, context } = selectedGroupOfStrokesOnCanvas();
+    view.requestRender();
+    context.strokeRect.mockClear();
+    view.requestRender();
+
+    const outlines = context.strokeRect.mock.calls as RectCall[];
+    expect(outlines).toHaveLength(1);
+    const [[x, y, w, h]] = outlines;
+    expect(x).toBeLessThan(0);
+    expect(y).toBeLessThan(0);
+    expect(x + w).toBeGreaterThan(260);
+    expect(y + h).toBeGreaterThan(160);
   });
 });
