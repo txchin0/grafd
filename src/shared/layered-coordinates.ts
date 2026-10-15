@@ -72,7 +72,7 @@ export function assignCrossCoordinates(
       }
     }
   }
-  stackBands(bands, centres, sizeOf);
+  stackBands(layering, bands, centres, sizeOf);
   return centres;
 }
 
@@ -287,17 +287,68 @@ export function closestOrderedPlacement(desired: number[], weights: number[], se
   return placed;
 }
 
-// Moves every band to start a gap below where the band before it ends. Everything in a band is
-// counted — where its edges pass as well as its nodes — so no rank's items fall out of order.
-function stackBands(bands: number[][][], centres: number[], sizeOf: (item: number) => number): void {
-  let previousBottom: number | null = null;
-  for (const bandLayers of bands) {
+// Moves each band, in order, level with the bands already placed that it joins — where the edges
+// between them run most nearly straight — when that keeps it a gap clear of every placed band
+// sharing one of its ranks; otherwise it starts a gap below everything placed. Only bands sharing a
+// rank can bring a node inside another's region frame or put a rank's items out of order, since
+// ranks lie farther apart than a frame reaches. Everything in a band is counted — where its edges
+// pass as well as its nodes.
+function stackBands(layering: ProperLayering, bands: number[][][], centres: number[], sizeOf: (item: number) => number): void {
+  const placed: BandSpan[] = [];
+  const bandOfPlaced = new Set<number>();
+  for (const [band, bandLayers] of bands.entries()) {
     const items = bandLayers.flat();
     if (items.length === 0) continue;
-    const top = Math.min(...items.map((item) => centres[item] - sizeOf(item) / 2));
-    const bottom = Math.max(...items.map((item) => centres[item] + sizeOf(item) / 2));
-    const shift: number = previousBottom === null ? 0 : previousBottom + BAND_GAP - top;
+    const span = bandSpanOf(layering, items, centres, sizeOf);
+    const level = levelShiftOf(layering, band, bandOfPlaced, centres);
+    const levelIsClear = level !== null && placed.every((other) => !sharesRank(span, other) || isClearOf(shiftedSpan(span, level), other));
+    const lowestBottom = Math.max(...placed.map((other) => other.bottom));
+    const shift = levelIsClear ? level : placed.length === 0 ? 0 : lowestBottom + BAND_GAP - span.top;
     for (const item of items) centres[item] += shift;
-    previousBottom = bottom + shift;
+    placed.push(shiftedSpan(span, shift));
+    bandOfPlaced.add(band);
   }
+}
+
+interface BandSpan {
+  firstRank: number;
+  lastRank: number;
+  top: number;
+  bottom: number;
+}
+
+function bandSpanOf(layering: ProperLayering, items: number[], centres: number[], sizeOf: (item: number) => number): BandSpan {
+  const ranks = items.map((item) => layering.items[item].rank);
+  return {
+    firstRank: Math.min(...ranks),
+    lastRank: Math.max(...ranks),
+    top: Math.min(...items.map((item) => centres[item] - sizeOf(item) / 2)),
+    bottom: Math.max(...items.map((item) => centres[item] + sizeOf(item) / 2)),
+  };
+}
+
+function shiftedSpan(span: BandSpan, shift: number): BandSpan {
+  return { ...span, top: span.top + shift, bottom: span.bottom + shift };
+}
+
+function sharesRank(span: BandSpan, other: BandSpan): boolean {
+  return span.firstRank <= other.lastRank && other.firstRank <= span.lastRank;
+}
+
+function isClearOf(span: BandSpan, other: BandSpan): boolean {
+  return span.top >= other.bottom + BAND_GAP || span.bottom + BAND_GAP <= other.top;
+}
+
+// The shift that lines a band up with the placed bands it is joined to: the median of how far each
+// joining segment's far end lies from its near end. Null for a band joined to none of them.
+function levelShiftOf(layering: ProperLayering, band: number, placedBands: Set<number>, centres: number[]): number | null {
+  const offsets = layering.segments.flatMap(({ upper, lower }) => {
+    const [upperBand, lowerBand] = [layering.items[upper].band, layering.items[lower].band];
+    if (upperBand === band && placedBands.has(lowerBand)) return [centres[lower] - centres[upper]];
+    if (lowerBand === band && placedBands.has(upperBand)) return [centres[upper] - centres[lower]];
+    return [];
+  });
+  if (offsets.length === 0) return null;
+  const sorted = offsets.sort((first, second) => first - second);
+  return sorted[Math.floor((sorted.length - 1) / 2)];
 }

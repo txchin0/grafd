@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { buildModel } from '../src/client/flow-doc.js';
 import { placeAroundPinned } from '../src/shared/anchored-placement.js';
 import { parseFlow, type Rect } from '../src/shared/flow-format.js';
+import { scoreDocumentText } from '../src/shared/document-score.js';
 import { NODE_GAP } from '../src/shared/layered-coordinates.js';
 import { layOutLayered, RANK_GAP, rankGapFor } from '../src/shared/layered-layout.js';
 import { CANVAS_SNAP, padRect, rectCenter, regionRectFrom } from '../src/shared/rect-math.js';
@@ -116,6 +117,64 @@ describe('a new region member', () => {
     ].join('\n\n');
     const rects = rectsByName(text);
     expect(rects.get('Member')!.y).toBe(0);
+  });
+});
+
+// A login graph laid out by hand, with an MFA branch added after "Authenticate". Placed beside it
+// as one block, the branch's edges ran through "Generate Token" and its retry loop's label lay on
+// "Code Valid?".
+const MFA_ADDED_TO_A_PLACED_LOGIN = `Validate Input
+  pos: 80, 232, 200, 88
+  -> Authenticate : "input valid"
+  -> Return Validation Error : "input invalid"
+
+Authenticate
+  pos: 368, 224, 200, 96
+  -> MFA Enabled? : "credentials valid"
+  -> Return Auth Error : "credentials invalid"
+
+MFA Enabled?
+  -> Enter TOTP Code : "yes"
+  -> Generate Token : "no"
+
+Enter TOTP Code
+  -> Code Valid?
+
+Code Valid?
+  -> Generate Token : "valid"
+  -> Tries Left? : "invalid"
+
+Tries Left?
+  -> Enter TOTP Code : "retry"
+  -> Return MFA Error : "no"
+
+Generate Token
+  pos: 672, 136, 210, 88
+  -> Return Success
+
+Return Success
+  pos: 320, 72, 180, 72
+
+Return Validation Error
+  pos: 376, 448, 190, 72
+
+Return Auth Error
+  pos: 680, 360, 190, 72
+
+Return MFA Error
+`;
+
+describe('new nodes polished among placed ones', () => {
+  it('steps them aside until no edge of theirs runs through a node or a label lies on one', () => {
+    const [body] = scoreDocumentText(MFA_ADDED_TO_A_PLACED_LOGIN, null);
+    expect(body.current.counts['edge-through-node']).toBe(0);
+    expect(body.current.findings.filter((finding) => finding.kind === 'label-collision' && finding.message.includes('Code Valid?'))).toEqual([]);
+  });
+
+  it('moves none of the placed nodes', () => {
+    const rects = rectsByName(MFA_ADDED_TO_A_PLACED_LOGIN);
+    expect(rects.get('Generate Token')).toEqual({ x: 672, y: 136, w: 210, h: 88 });
+    expect(rects.get('Return Success')).toEqual({ x: 320, y: 72, w: 180, h: 72 });
   });
 });
 

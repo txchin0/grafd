@@ -139,8 +139,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   long edge passes (`layered-ordering.ts`), then positions across the ranks (`layered-coordinates.ts`):
   the edges on every longest path run straight, a fork with matching branches stays symmetric,
   and a long edge's lane lies on the straight line the canvas draws it along. Each region's
-  members form a band laid out on its own, bands stacked apart, so no node lands inside a region
-  it is not a member of. Node sizes come from `node-size-estimate.ts`, which estimates text width
+  members form a band laid out on its own, bands that share a rank stacked apart, so no node
+  lands inside a region it is not a member of; a band sharing no rank with those placed before it
+  stands level with what it joins, so a region on part of the main path keeps the path straight. Node sizes come from `node-size-estimate.ts`, which estimates text width
   per character (the linter has no canvas to measure with) and wraps through
   `node-text-metrics.ts`, the same wrap the painter uses. Nodes added to an already laid-out scope
   are placed by `anchored-placement.ts` and nothing placed ever moves: new nodes joined to one
@@ -148,7 +149,12 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   them, in the direction the placed graph already flows; a block whose spot is taken slides across
   the flow to the nearest one clear of nodes that keeps non-members out of regions and regions out
   of each other, giving up looks before honesty. Region members are placed first; new nodes joined
-  to nothing placed go below everything. `document-layout.ts` applies all of this to a parsed
+  to nothing placed go below everything. Both a fresh drawing and new nodes placed among placed
+  ones are then polished (`layout-polish.ts`): the moves the score's findings carry are taken one
+  at a time while each raises the score and adds nothing the layered layout promises to avoid.
+  When none does, the nodes a finding names (`Finding.nodes`) try a few steps aside, except a node
+  lined up with a neighbour, which holds the line the score cannot see. Placing moves only the new
+  nodes, which may also step aside as a block. `document-layout.ts` applies all of this to a parsed
   document — reading a graph scope as a `LayoutScope` (`layoutScopeOfItems`, the one reader the
   canvas, Arrange and `grafd layout` share), filling missing positions, and arranging a scope
   afresh (`arrangeScope`: flowing the way it already does, from its old top-left corner, releasing
@@ -158,8 +164,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   measured from the same pill metrics the painter draws with). Arranging also settles bends: an
   edge spanning several ranks bends through the middle of the lane the layout kept clear for it,
   unless it runs between two bands, and an edge of a node arranged on its own runs straight. The
-  editor writes those bends to the layer in the same undo step as the moves; `grafd layout`
-  writes no layer, so it leaves bends as they are.
+  editor writes those bends to the layer in the same undo step as the moves; `grafd layout --all`
+  writes them too (`setPlannedBends`), first giving every node an id, since a bend is filed under
+  the ids at both ends of its edge. Placing missing nodes never touches a layer.
 - `src/shared/layout-score.ts` — how readable a laid-out graph is, out of 100: overlaps, edges
   through nodes, non-members inside regions, overlapping regions, crossings, label collisions,
   crowding, cut-off text and near-misses in alignment, each costing a fixed penalty and carrying
@@ -174,7 +181,8 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   datastore, io, external, event, error) and the shape each role draws it in; `inferRoles` reads
   the structural ones off a graph by the same entry and decision rules the canvas marks nodes
   with. `styleByRoles` writes the shapes into the canvas layer, marks edges into an error red and
-  dashed, and grows a node whose text no longer fits its new shape. `src/tools/flow-style.ts` is
+  dashed, and grows a node whose text no longer fits its new shape. Nodes `grafd style` placed
+  itself are settled again once grown (`settleNewlyPlacedNodes`). `src/tools/flow-style.ts` is
   `grafd style`, the one way SAVE-GUIDE.md lets an agent style a graph; its role table is held to
   `ROLE_SHAPES` by a test. Node colour stays the trait colours — roles set shapes only.
 - `src/shared/shape-text-box.ts` — the box a shape leaves its text and the proportions its outline

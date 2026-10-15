@@ -116,6 +116,17 @@ describe('each finding, and the fix it gives', () => {
     expectFixToClear(graph, 'label-collision');
   });
 
+  it('catches two labels lying side by side and moves one edge far enough to part them', () => {
+    // Top to bottom, one node forking to two below: both labels sit halfway down, next to each other.
+    const graph: ScoredGraph = {
+      nodes: [node('A', 0, 0), node('B', 0, 240), node('C', 256, 240)],
+      edges: [edge(0, 1, 'payment received from the bank'), edge(0, 2, 'cancelled or expired unpaid')],
+      regions: [],
+    };
+    expect(findingsOf(graph, 'label-collision')).toHaveLength(1);
+    expectFixToClear(graph, 'label-collision');
+  });
+
   it('catches text a node is too small to show and gives the size that shows it', () => {
     const graph: ScoredGraph = {
       nodes: [{ name: 'Reconcile the ledger against every bank statement', rect: { x: 0, y: 0, w: 120, h: 64 }, description: null, shape: 'rectangle' }],

@@ -5,8 +5,8 @@
 
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { canvasLayerIsUnreadable, canvasLayerPathOf, emptyCanvasLayer, parseCanvasLayer, serializeCanvasLayer } from '../shared/canvas-layer.js';
-import { placeMissingPositions } from '../shared/document-layout.js';
+import { canvasLayerIsUnreadable, canvasLayerPathOf, emptyCanvasLayer, nodeShapeOf, parseCanvasLayer, serializeCanvasLayer } from '../shared/canvas-layer.js';
+import { placeMissingPositions, settleNewlyPlacedNodes } from '../shared/document-layout.js';
 import { parseFlow, serializeFlow, type FlowItem, type FlowNode, type GraphItem } from '../shared/flow-format.js';
 import { isNodeRole, NODE_ROLES, ROLE_MEANINGS, ROLE_SHAPES, rolesToApply, styleByRoles, type NodeRole } from '../shared/node-roles.js';
 
@@ -93,11 +93,14 @@ export async function styleFlowFile(options: Options): Promise<string[] | string
   const named = await namedRoles(options, items);
   if (typeof named === 'string') return named;
   // As the editor does on opening the file, so every node has a place to be sized about.
+  const unplaced = new Set(nodesIn(items).filter((node) => !node.pos));
   const placed = placeMissingPositions(doc);
   const roles = rolesToApply(items, layer, named, options.infer);
   const styling = styleByRoles(doc, items, layer, roles);
+  const grownNew = new Set(styling.resized.map(({ node }) => node).filter((node) => unplaced.has(node)));
+  const settled = settleNewlyPlacedNodes(items, grownNew.size > 0 ? unplaced : new Set(), (node) => nodeShapeOf(layer, node.id));
 
-  if (placed || styling.flowChanged) await writeFile(flowFile, serializeFlow(doc));
+  if (placed || styling.flowChanged || settled) await writeFile(flowFile, serializeFlow(doc));
   const layerOut = serializeCanvasLayer(layer);
   if (layerOut === null) await rm(layerFile, { force: true });
   else await writeFile(layerFile, layerOut);
@@ -107,6 +110,10 @@ export async function styleFlowFile(options: Options): Promise<string[] | string
     ...styling.resized.map(({ node, size }) => `"${node.name}" grown to ${size.w}×${size.h} so its text fits its shape`),
     ...(styling.edgesIntoErrors > 0 ? [`${styling.edgesIntoErrors} edge(s) into an error drawn red and dashed`] : []),
   ];
+}
+
+function nodesIn(items: FlowItem[]): FlowNode[] {
+  return items.flatMap((item) => (item.kind === 'node' ? [item.node] : []));
 }
 
 function scopeItemsOf(items: FlowItem[], graph: string | null): FlowItem[] | null {

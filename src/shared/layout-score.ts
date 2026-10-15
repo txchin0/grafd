@@ -96,8 +96,14 @@ export interface Finding {
   fix: string;
   // The one node move that does it, when there is one.
   move?: NodeMove;
+  // The same node stepping aside the other way, when it can: longer, but sometimes the only way
+  // that does not walk into something else.
+  otherMove?: NodeMove;
   // The size that does it, for text that is cut off.
   resize?: { node: string; w: number; h: number };
+  // Every node the finding is about — an edge's ends as well as what it runs through — for when
+  // moving one of them some other way clears it where `move` cannot.
+  nodes?: string[];
 }
 
 export interface GraphScore {
@@ -159,6 +165,8 @@ function edgesThroughNodes(graph: ScoredGraph, sketches: (EdgeSketch | null)[]):
         message: `${edgeName(graph, edge)} runs through "${node.name}".`,
         fix: `${describeMove(move)} (or ${describeMove(otherWay, false)}), or bend the edge around it.`,
         move,
+        otherMove: otherWay,
+        nodes: namesOf(graph, [edge.from, edge.to, nodeIndex]),
       }];
     });
   });
@@ -203,6 +211,7 @@ function crossings(graph: ScoredGraph, sketches: (EdgeSketch | null)[]): Finding
       kind: 'crossing' as const,
       message: `${edgeName(graph, graph.edges[first])} crosses ${edgeName(graph, graph.edges[second])}.`,
       fix: 'Move one of their ends so the two no longer cross, or arrange the graph.',
+      nodes: namesOf(graph, [graph.edges[first], graph.edges[second]].flatMap((crossing) => [crossing.from, crossing.to])),
     }];
   });
 }
@@ -223,20 +232,29 @@ function labelCollisions(graph: ScoredGraph, sketches: (EdgeSketch | null)[]): F
       kind: 'label-collision' as const,
       message: `${label} does not fit between its nodes.`,
       ...withMove(roomForLabel(graph, edge, pill)),
+      nodes: namesOf(graph, ends),
     }] : [];
     const coveredFindings = graph.nodes.flatMap((node, nodeIndex) => {
       if (ends.includes(nodeIndex) || !pillCovers(pill, node)) return [];
-      return [{ kind: 'label-collision' as const, message: `${label} lies on "${node.name}".`, ...withMove(exitMove(node, pill)) }];
+      return [{
+        kind: 'label-collision' as const,
+        message: `${label} lies on "${node.name}".`,
+        ...withMove(exitMove(node, pill)),
+        nodes: namesOf(graph, [...ends, nodeIndex]),
+      }];
     });
     return [...squeezedFinding, ...coveredFindings];
   });
   const onLabels = pairsOf(pills.length).flatMap(([first, second]) => {
     const [a, b] = [pills[first], pills[second]];
     if (!a || !b || joinSameNodes(graph.edges[first], graph.edges[second]) || !rectsOverlap(a, b)) return [];
+    const move = labelsApart(graph, graph.edges[second], a, b);
     return [{
       kind: 'label-collision' as const,
       message: `The labels of ${edgeName(graph, graph.edges[first])} and ${edgeName(graph, graph.edges[second])} overlap.`,
-      fix: 'Move the nodes of one edge away from the other, or bend one of them.',
+      fix: `${describeMove(move)}, or bend one of the edges.`,
+      move,
+      nodes: namesOf(graph, [graph.edges[first], graph.edges[second]].flatMap((labelled) => [labelled.from, labelled.to])),
     }];
   });
   return [...onNodes, ...onLabels];
@@ -338,6 +356,18 @@ function roomForLabel(graph: ScoredGraph, edge: ScoredEdge, pill: Rect): NodeMov
   return { node: graph.nodes[edge.to].name, dx: level ? distance : 0, dy: level ? 0 : distance };
 }
 
+// Moves the far end of `edge` until its label `pill` clears `other`, along whichever axis they
+// overlap least. A label sits midway along its edge, so it moves half as far as the node does.
+function labelsApart(graph: ScoredGraph, edge: ScoredEdge, other: Rect, pill: Rect): NodeMove {
+  const acrossX = Math.min(other.x + other.w, pill.x + pill.w) - Math.max(other.x, pill.x) + LABEL_ROOM;
+  const acrossY = Math.min(other.y + other.h, pill.y + pill.h) - Math.max(other.y, pill.y) + LABEL_ROOM;
+  const away = (pillCentre: number, otherCentre: number): number => (pillCentre >= otherCentre ? 1 : -1);
+  const node = graph.nodes[edge.to].name;
+  return acrossX <= acrossY
+    ? { node, dx: away(rectCenter(pill).x, rectCenter(other).x) * snapUp(2 * acrossX), dy: 0 }
+    : { node, dx: 0, dy: away(rectCenter(pill).y, rectCenter(other).y) * snapUp(2 * acrossY) };
+}
+
 // Whether a label's pill lies on any of a node as drawn — judged by points around the pill and
 // across it, so a pill beside a diamond's empty corner is not counted as lying on it.
 function pillCovers(pill: Rect, node: ScoredNode): boolean {
@@ -398,6 +428,10 @@ function facingGap(a: Rect, b: Rect): number | null {
   if (overlapY > 0) return -overlapX;
   if (overlapX > 0) return -overlapY;
   return null;
+}
+
+function namesOf(graph: ScoredGraph, nodes: number[]): string[] {
+  return [...new Set(nodes)].map((node) => graph.nodes[node].name);
 }
 
 function edgeName(graph: ScoredGraph, edge: ScoredEdge): string {

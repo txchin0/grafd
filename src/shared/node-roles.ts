@@ -9,7 +9,8 @@
 
 import { DEFAULT_NODE_SHAPE, documentIdentities, nodeShapeOf, setNodeShape, type CanvasLayer, type NodeShape } from './canvas-layer.js';
 import { setEdgeStyle } from './canvas-edge-style.js';
-import { getProp, newUuid, parseEdgeExpression, unquote, type FlowDocument, type FlowItem, type FlowNode, type Rect } from './flow-format.js';
+import { assignMissingNodeIds } from './document-layout.js';
+import { getProp, parseEdgeExpression, unquote, type FlowDocument, type FlowItem, type FlowNode, type Rect } from './flow-format.js';
 import { estimateNodeSize, textCutOff } from './node-size-estimate.js';
 import { rectCenter, snapToCanvasGrid } from './rect-math.js';
 
@@ -89,12 +90,7 @@ export interface RoleStyling {
 export function styleByRoles(doc: FlowDocument, items: FlowItem[], layer: CanvasLayer, roles: ReadonlyMap<FlowNode, NodeRole>): RoleStyling {
   // Every node of the scope, as the editor does on opening a file: an edge's key in the layer is
   // made of the ids at both its ends.
-  let idsAssigned = false;
-  for (const node of nodesOf(items)) {
-    if (node.id) continue;
-    node.id = newUuid();
-    idsAssigned = true;
-  }
+  const idsAssigned = assignMissingNodeIds(items);
   const styled = [...roles].map(([node, role]) => {
     setNodeShape(layer, node.id!, ROLE_SHAPES[role]);
     return { node, role, shape: ROLE_SHAPES[role] };

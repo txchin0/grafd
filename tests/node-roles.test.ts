@@ -12,6 +12,7 @@ import { estimateNodeSize, textCutOff } from '../src/shared/node-size-estimate.j
 import { inferRoles, rolesToApply, ROLE_SHAPES, styleByRoles, type NodeRole } from '../src/shared/node-roles.js';
 import { shapeContainsPoint, shapeTextBox } from '../src/shared/shape-text-box.js';
 import { runFlowStyle } from '../src/tools/flow-style.js';
+import { scoreDocumentText } from '../src/shared/document-score.js';
 
 const CHECKOUT = `---
 name: Checkout
@@ -180,4 +181,65 @@ describe('grafd style', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(await runFlowStyle(['main.flow'])).toBe(2);
   });
+
+  it('settles the nodes it placed once their shapes have grown them, and moves no placed node', async () => {
+    const root = await workspaceWith(DECISION_ADDED_TO_A_PLACED_FLOW);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const roles = ['MFA Enabled?', 'Code Valid?', 'Tries Left?'].map((name) => `--role=${name}=decision`);
+    expect(await runFlowStyle([path.join(root, 'main.flow'), ...roles, '--role=Enter TOTP Code=io'])).toBe(0);
+    const text = await readFile(path.join(root, 'main.flow'), 'utf8');
+    const layer = parseCanvasLayer(await readFile(canvasLayerPathOf(path.join(root, 'main.flow')), 'utf8'));
+    const [body] = scoreDocumentText(text, layer);
+    expect(body.current.counts.crowded + body.current.counts.overlap).toBe(0);
+    expect(nodeNamed(parseFlow(text), 'Generate Token').pos).toEqual({ x: 672, y: 136, w: 210, h: 88 });
+  });
 });
+
+// A login laid out by hand, with an MFA check added after "Authenticate": the new diamonds grow
+// once styled, into the room placement left between them as rectangles.
+const DECISION_ADDED_TO_A_PLACED_FLOW = `---
+name: Login Flow
+---
+
+Validate Input
+  id: validate
+  pos: 80, 232, 200, 88
+  -> Authenticate : "input valid"
+
+Authenticate
+  id: authenticate
+  pos: 368, 224, 200, 96
+  -> MFA Enabled? : "credentials valid"
+  -> Return Auth Error : "credentials invalid"
+
+MFA Enabled?
+  -> Enter TOTP Code : "yes"
+  -> Generate Token : "no"
+
+Enter TOTP Code
+  description: "Authenticator code, 3 tries max"
+  -> Code Valid?
+
+Code Valid?
+  -> Generate Token : "valid"
+  -> Tries Left? : "invalid"
+
+Tries Left?
+  -> Enter TOTP Code : "retry"
+  -> Return MFA Error : "no"
+
+Generate Token
+  id: generate
+  pos: 672, 136, 210, 88
+  -> Return Success
+
+Return Success
+  id: success
+  pos: 320, 72, 180, 72
+
+Return Auth Error
+  id: auth-error
+  pos: 680, 360, 190, 72
+
+Return MFA Error
+`;

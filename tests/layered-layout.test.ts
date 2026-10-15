@@ -169,6 +169,16 @@ describe('the shape of a layered layout', () => {
     expect(b.x).toBeLessThan(c.x);
   });
 
+  it('keeps a region at the start of a chain level with the rest of it', () => {
+    const rects = rectsByName('context: Cart\n  nodes:\n    - A\n    - B\n\nA\n  -> B\n\nB\n  -> C\n\nC\n  -> D\n\nD\n');
+    expect(new Set(['A', 'B', 'C', 'D'].map((name) => rectCenter(rects.get(name)!).y)).size).toBe(1);
+  });
+
+  it('stacks a region below the others when they share a rank', () => {
+    const rects = rectsByName('context: Side\n  nodes:\n    - S\n\nA\n  -> B\n  -> S\n\nB\n\nS\n');
+    expect(rects.get('S')!.y).toBeGreaterThan(rects.get('B')!.y + rects.get('B')!.h);
+  });
+
   it('centres a fork between its branches and their join', () => {
     const rects = rectsByName('Start\n  -> Left\n  -> Right\n\nLeft\n  -> End\n\nRight\n  -> End\n\nEnd\n');
     const middleOf = (name: string): number => rectCenter(rects.get(name)!).y;

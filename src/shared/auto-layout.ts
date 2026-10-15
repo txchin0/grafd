@@ -14,6 +14,7 @@ import type { EdgeKind } from './canvas-edge-style.js';
 import type { NodeShape } from './canvas-layer.js';
 import type { Rect } from './flow-format.js';
 import { layOutLayered, layOutLayeredDrawing, type LayeredGraph, type LayoutDirection } from './layered-layout.js';
+import { polishArrangement, polishPlacement } from './layout-polish.js';
 import { DEFAULT_NODE_SIZE } from './node-size-estimate.js';
 import { snapToCanvasGrid, type Point } from './rect-math.js';
 
@@ -56,7 +57,7 @@ export interface LayoutScope {
 export function placeNodes(scope: LayoutScope): Rect[] {
   if (scope.nodes.every((node) => node.pos)) return scope.nodes.map((node) => node.pos!);
   if (scope.nodes.every((node) => !node.pos)) return layOutLayered(layeredGraphOf(scope), 'LR', LAYOUT_ORIGIN);
-  return placeAroundPinned(pinnedGraphOf(scope));
+  return polishPlacement(scope, placeAroundPinned(pinnedGraphOf(scope)));
 }
 
 export interface Arrangement {
@@ -73,23 +74,32 @@ export interface Arrangement {
 // jumping. Every edge it lays out gets the bend that runs it along its lane, or none. Arranging an
 // arranged scope changes nothing: a scope already laid out in either direction keeps it, since the
 // direction guessed from its edges can come out the other way — a graph whose regions stack bands
-// has edges running down between them however it flows.
-export function arrangeScope(scope: LayoutScope): Arrangement {
+// has edges running down between them however it flows. A `direction` given turns it that way
+// instead.
+export function arrangeScope(scope: LayoutScope, direction?: LayoutDirection): Arrangement {
   const placed = scope.nodes.flatMap((node) => (node.pos ? [node.pos] : []));
   const origin = placed.length === 0
     ? LAYOUT_ORIGIN
     : { x: snapToCanvasGrid(Math.min(...placed.map((rect) => rect.x))), y: snapToCanvasGrid(Math.min(...placed.map((rect) => rect.y))) };
   const { graph, scopeEdgeOf } = layeredGraphWithEdgesOf(scope);
   const guessed = flowDirectionOf(pinnedGraphOf(scope));
-  const directions: LayoutDirection[] = guessed === 'LR' ? ['LR', 'TB'] : ['TB', 'LR'];
-  const drawings = directions.map((direction) => layOutLayeredDrawing(graph, direction, origin));
-  const drawing = drawings.find(({ rects }) => rects.every((rect, index) => sameRect(rect, scope.nodes[index].pos))) ?? drawings[0];
+  const directions: LayoutDirection[] = direction ? [direction] : guessed === 'LR' ? ['LR', 'TB'] : ['TB', 'LR'];
+  const arrangementFlowing = (way: LayoutDirection): Arrangement => {
+    const drawing = layOutLayeredDrawing(graph, way, origin);
+    const bendPoints = new Map<number, Point | null>();
+    graph.edges.forEach((edge, index) => {
+      if (edge.from !== edge.to) bendPoints.set(scopeEdgeOf[index], drawing.bendPoints[index]);
+    });
+    return polishArrangement(scope, { rects: drawing.rects, bendPoints });
+  };
+  const first = arrangementFlowing(directions[0]);
+  if (directions.length === 1 || isCurrentLayout(scope, first)) return first;
+  const second = arrangementFlowing(directions[1]);
+  return isCurrentLayout(scope, second) ? second : first;
+}
 
-  const bendPoints = new Map<number, Point | null>();
-  graph.edges.forEach((edge, index) => {
-    if (edge.from !== edge.to) bendPoints.set(scopeEdgeOf[index], drawing.bendPoints[index]);
-  });
-  return { rects: drawing.rects, bendPoints };
+function isCurrentLayout(scope: LayoutScope, arrangement: Arrangement): boolean {
+  return arrangement.rects.every((rect, index) => sameRect(rect, scope.nodes[index].pos));
 }
 
 function sameRect(rect: Rect, other: Rect | null): boolean {

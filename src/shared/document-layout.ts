@@ -5,10 +5,13 @@
 // a test.
 
 import { arrangeScope, arrangeSelected, placeNodes, type Arrangement, type LayoutScope } from './auto-layout.js';
-import { bendThroughPoint, type EdgeBend } from './canvas-edge-style.js';
-import type { NodeShape } from './canvas-layer.js';
+import { polishPlacement } from './layout-polish.js';
+import type { LayoutDirection } from './layered-layout.js';
+import { bendThroughPoint, setEdgeStyle, type EdgeBend } from './canvas-edge-style.js';
+import { documentIdentities, type CanvasLayer, type NodeShape } from './canvas-layer.js';
 import {
   getProp,
+  newUuid,
   parseEdgeExpression,
   unquote,
   type ContextItem,
@@ -94,19 +97,43 @@ export function placeMissingPositions(doc: FlowDocument): boolean {
   return placedAny;
 }
 
+// Steps `settling` — nodes placed just now and since resized, as styling grows a node to fit its
+// shape — clear of whatever their new size crowds or covers, as placing them would have; every
+// other node stays where it is. Says whether any moved.
+export function settleNewlyPlacedNodes(items: FlowItem[], settling: ReadonlySet<FlowNode>, shapeOf: (node: FlowNode) => NodeShape): boolean {
+  const nodes = nodesOf(items);
+  if (!nodes.some((node) => settling.has(node)) || nodes.some((node) => !node.pos)) return false;
+  const { scope } = layoutScopeWithEdgesOf(items, shapeOf);
+  const movable = { ...scope, nodes: scope.nodes.map((node, index) => (settling.has(nodes[index]) ? { ...node, pos: null } : node)) };
+  const settled = polishPlacement(movable, nodes.map((node) => node.pos!));
+  let moved = false;
+  nodes.forEach((node, index) => {
+    if (sameRect(node.pos!, settled[index])) return;
+    node.pos = settled[index];
+    moved = true;
+  });
+  return moved;
+}
+
 // Lays a scope out afresh — or only `chosen` of its nodes, around the rest — moving its nodes, and
 // says which edges should bend where. Arranging a whole scope also lets go of the area each region
 // reserved beyond its members: drawn around the old layout, it would now cover nodes that are not
-// its members. The bends are not written here: they belong to the canvas layer, which only the
-// editor writes.
+// its members. The bends are not written here: they belong to the canvas layer, which the editor
+// and `grafd layout --all` write.
 // `shapeOf` tells it how each node is drawn, so a diamond or an ellipse is sized for the text it has
-// room for; without it every node is sized as a rectangle.
-export function arrangeGraphScope(items: FlowItem[], chosen?: Set<FlowNode>, shapeOf?: (node: FlowNode) => NodeShape): ArrangeOutcome {
+// room for; without it every node is sized as a rectangle. A whole scope flows the way it already
+// does, unless given a `direction`.
+export function arrangeGraphScope(
+  items: FlowItem[],
+  chosen?: Set<FlowNode>,
+  shapeOf?: (node: FlowNode) => NodeShape,
+  direction?: LayoutDirection,
+): ArrangeOutcome {
   const nodes = nodesOf(items);
   const { scope, edges } = layoutScopeWithEdgesOf(items, shapeOf);
   const chosenIndices = chosen && new Set([...nodes.keys()].filter((index) => chosen.has(nodes[index])));
   const wholeScope = !chosenIndices || chosenIndices.size === nodes.length;
-  const arrangement = wholeScope ? arrangeScope(scope) : arrangeSelected(scope, chosenIndices);
+  const arrangement = wholeScope ? arrangeScope(scope, direction) : arrangeSelected(scope, chosenIndices);
 
   let moved = false;
   nodes.forEach((node, index) => {
@@ -136,9 +163,34 @@ function worthwhileBend(bend: EdgeBend | null, from: { x: number; y: number }, t
   return Math.abs(bend.across) * chordLength < MIN_BEND_DEVIATION ? null : bend;
 }
 
-// Bends are left as they are: `grafd layout` never writes a canvas layer.
-export function arrangeDocument(doc: FlowDocument, shapeOf?: (node: FlowNode) => NodeShape): boolean {
-  return graphScopesOf(doc).map((items) => arrangeGraphScope(items, undefined, shapeOf).moved).some((moved) => moved);
+// Arranges every graph scope of a document. The bends it settles are for the document's canvas
+// layer, through `setPlannedBends`.
+export function arrangeDocument(doc: FlowDocument, shapeOf?: (node: FlowNode) => NodeShape, direction?: LayoutDirection): ArrangeOutcome {
+  const outcomes = graphScopesOf(doc).map((items) => arrangeGraphScope(items, undefined, shapeOf, direction));
+  return { moved: outcomes.some((outcome) => outcome.moved), bends: outcomes.flatMap((outcome) => outcome.bends) };
+}
+
+// Files each planned bend in the layer where the editor files it. An edge is keyed by the ids at
+// both its ends, so an edge from a node with no id is skipped: give the nodes ids first
+// (`assignMissingNodeIds`).
+export function setPlannedBends(layer: CanvasLayer, doc: FlowDocument, bends: readonly PlannedBend[]): void {
+  const identities = documentIdentities(doc);
+  for (const { node, spec, bend } of bends) {
+    const key = identities.edgeKeys.get(spec ?? node);
+    if (key) setEdgeStyle(layer, key, { bend }, spec ? 'flow' : 'error');
+  }
+}
+
+// Gives every node of a scope that has no id one, as the editor does on opening a file; says
+// whether any lacked one.
+export function assignMissingNodeIds(items: FlowItem[]): boolean {
+  let assigned = false;
+  for (const node of nodesOf(items)) {
+    if (node.id) continue;
+    node.id = newUuid();
+    assigned = true;
+  }
+  return assigned;
 }
 
 function releaseReservedAreas(items: FlowItem[], nodes: FlowNode[]): boolean {

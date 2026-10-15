@@ -8,10 +8,11 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { allNodes, contextBlockNamed } from '../src/client/flow-doc.js';
 import { arrangeScope, type LayoutScope } from '../src/shared/auto-layout.js';
-import { arrangeDocument, arrangeGraphScope, placeMissingPositions } from '../src/shared/document-layout.js';
+import { arrangeDocument, arrangeGraphScope, assignMissingNodeIds, placeMissingPositions, setPlannedBends } from '../src/shared/document-layout.js';
+import { scoreDocumentText } from '../src/shared/document-score.js';
 import { parseFlow, serializeFlow, type FlowDocument, type FlowNode, type Rect } from '../src/shared/flow-format.js';
 import { runFlowLayout } from '../src/tools/flow-layout.js';
-import { canvasLayerPathOf, parseCanvasLayer } from '../src/shared/canvas-layer.js';
+import { canvasLayerPathOf, emptyCanvasLayer, parseCanvasLayer, setNodeShape, type NodeShape } from '../src/shared/canvas-layer.js';
 import { createHeadlessEditor, disposeHeadlessEditor, type HeadlessEditor } from './editor-harness.js';
 import type { LayeredGraph } from '../src/shared/layered-layout.js';
 import { arbitraryGraph, overlaps } from './layout-fixtures.js';
@@ -63,12 +64,12 @@ function posOf(text: string, name: string): Rect {
 }
 
 describe('arranging a whole graph', () => {
-  it('lays it out as a layered drawing from the corner it started at, the region member in a band of its own', () => {
+  it('lays it out as a layered drawing from the corner it started at, the region member level with what it leads to', () => {
     const doc = parseFlow(UNTIDY_FLOW);
     expect(arrangeGraphScope(doc.items).moved).toBe(true);
     const [a, b, c] = ['A', 'B', 'C'].map((name) => nodeNamed(doc, name).pos!);
     expect(b.y).toBe(c.y);
-    expect(a.y).not.toBe(b.y);
+    expect(a.y).toBe(b.y);
     expect(a.x).toBe(40);
     expect(a.x).toBeLessThan(b.x);
     expect(b.x).toBeLessThan(c.x);
@@ -90,7 +91,7 @@ describe('arranging a whole graph', () => {
 
   it('arranges every graph scope of a document', () => {
     const doc = parseFlow(UNTIDY_FLOW);
-    expect(arrangeDocument(doc)).toBe(true);
+    expect(arrangeDocument(doc).moved).toBe(true);
     expect(nodeNamed(doc, 'X').pos).not.toBeNull();
     expect(nodeNamed(doc, 'Y').pos!.x).toBeGreaterThan(nodeNamed(doc, 'X').pos!.x);
   });
@@ -111,6 +112,99 @@ describe('arrangeScope on any graph', () => {
       const arranged = arrangeScope(scopeOf(graph, graph.nodes.map(() => null)));
       expect(arrangeScope(scopeOf(graph, arranged.rects))).toEqual(arranged);
     }));
+  });
+});
+
+// The layered drawing puts "Payment Provider" in the row below the spine, right where the edge
+// looping back from "Ask Another Card" crosses it; arranging steps it out of that edge's way.
+const LOOP_PAST_A_LEAF_FLOW = `---
+name: Take Payment
+---
+
+Choose Method
+  -> Authorize Card
+
+Authorize Card
+  -> Payment Provider
+  -> Approved?
+
+Approved?
+  -> Capture Funds : "yes"
+  -> Ask Another Card : "no"
+
+Ask Another Card
+  -> Choose Method
+
+Capture Funds
+
+Payment Provider
+`;
+
+// Every step can fail into "Alert Data Team", drawn below the spine; the edge from "Load Warehouse"
+// runs through the "Warehouse" cylinder beside it, and the moves that would step the cylinder up
+// or down walk into other nodes.
+const FAILURES_PAST_A_STORE_FLOW = `---
+name: Nightly Ingestion
+---
+
+Nightly Trigger
+  -> Extract Sources
+
+Extract Sources
+  on_error: -> Alert Data Team
+  -> Validate Schemas
+
+Validate Schemas
+  -> Transform Data : "valid"
+  -> Quarantine Bad Rows : "bad rows"
+
+Transform Data
+  on_error: -> Alert Data Team
+  -> Load Warehouse
+
+Load Warehouse
+  on_error: -> Alert Data Team
+  -> Refresh Dashboards
+  -> Warehouse
+
+Refresh Dashboards
+  -> Run Complete
+
+Run Complete
+
+Quarantine Bad Rows
+
+Warehouse
+
+Alert Data Team
+`;
+
+describe('arranging polishes the layered drawing', () => {
+  it('steps a node off the spine aside when the move for the node in the way walks into another', () => {
+    const doc = parseFlow(FAILURES_PAST_A_STORE_FLOW);
+    assignMissingNodeIds(doc.items);
+    const shapes: Record<string, NodeShape> = {
+      'Nightly Trigger': 'ellipse', 'Run Complete': 'rounded', 'Alert Data Team': 'parallelogram',
+      'Quarantine Bad Rows': 'cylinder', Warehouse: 'cylinder',
+    };
+    const shapeOf = (node: FlowNode): NodeShape => shapes[node.name] ?? 'rectangle';
+    const layer = emptyCanvasLayer();
+    for (const node of allNodes(doc)) setNodeShape(layer, node.id!, shapeOf(node));
+    setPlannedBends(layer, doc, arrangeGraphScope(doc.items, undefined, shapeOf).bends);
+    const [body] = scoreDocumentText(serializeFlow(doc), layer);
+    expect(body.current.counts['edge-through-node']).toBe(0);
+    const spine = ['Transform Data', 'Load Warehouse', 'Refresh Dashboards'].map((name) => nodeNamed(doc, name).pos!);
+    expect(new Set(spine.map((rect) => rect.y + rect.h / 2)).size).toBe(1);
+  });
+
+  it('steps a node out of the way of an edge drawn through it', () => {
+    const doc = parseFlow(LOOP_PAST_A_LEAF_FLOW);
+    assignMissingNodeIds(doc.items);
+    const layer = emptyCanvasLayer();
+    setPlannedBends(layer, doc, arrangeGraphScope(doc.items).bends);
+    const [body] = scoreDocumentText(serializeFlow(doc), layer);
+    expect(body.current.counts['edge-through-node']).toBe(0);
+    expect(body.current.score).toBe(body.arranged);
   });
 });
 
@@ -307,6 +401,48 @@ describe('grafd layout', () => {
     expect(await runFlowLayout([root, '--all'])).toBe(0);
     const text = await readFile(file, 'utf8');
     expect(posOf(text, 'B').y).toBe(posOf(text, 'C').y);
+  });
+
+  it('writes the bends Arrange lays to the canvas layer with --all, and nothing the second time', async () => {
+    const { root, file } = await workspaceWith(SKIPPING_FLOW);
+    await runFlowLayout([root, '--all']);
+    const layerText = await readFile(canvasLayerPathOf(file), 'utf8');
+    expect(Object.keys(parseCanvasLayer(layerText).edges)).toEqual(['a-1 -> #d-1 : "skip"']);
+
+    const flowText = await readFile(file, 'utf8');
+    await runFlowLayout([root, '--all']);
+    expect(await readFile(file, 'utf8')).toBe(flowText);
+    expect(await readFile(canvasLayerPathOf(file), 'utf8')).toBe(layerText);
+  });
+
+  it('gives every node an id with --all, so the bends can be filed under them', async () => {
+    const { root, file } = await workspaceWith(SKIPPING_FLOW.replace(/^ {2}id: .*\n/gm, ''));
+    await runFlowLayout([root, '--all']);
+    const doc = parseFlow(await readFile(file, 'utf8'));
+    expect(allNodes(doc).every((node) => node.id)).toBe(true);
+    const layer = parseCanvasLayer(await readFile(canvasLayerPathOf(file), 'utf8'));
+    expect(Object.keys(layer.edges)).toEqual([`${nodeNamed(doc, 'A').id} -> #${nodeNamed(doc, 'D').id} : "skip"`]);
+  });
+
+  it('leaves a layer it cannot read as it is, and still arranges', async () => {
+    const { root, file } = await workspaceWith(SKIPPING_FLOW);
+    await writeFile(canvasLayerPathOf(file), '{ not json');
+    await runFlowLayout([root, '--all']);
+    expect(await readFile(canvasLayerPathOf(file), 'utf8')).toBe('{ not json');
+    expect(posOf(await readFile(file, 'utf8'), 'C')).not.toEqual({ x: 600, y: 600, w: 200, h: 88 });
+  });
+
+  it('turns every graph the way --direction says', async () => {
+    const { root, file } = await workspaceWith(SKIPPING_FLOW);
+    await runFlowLayout([root, '--all', '--direction=TB']);
+    const text = await readFile(file, 'utf8');
+    expect(posOf(text, 'B').y).toBeGreaterThan(posOf(text, 'A').y);
+    expect(posOf(text, 'C').y).toBeGreaterThan(posOf(text, 'B').y);
+  });
+
+  it('refuses a direction without --all, or one it does not know', async () => {
+    expect(await runFlowLayout(['--direction=TB'])).toBe(2);
+    expect(await runFlowLayout(['--all', '--direction=diagonal'])).toBe(2);
   });
 
   it('refuses an option it does not know', async () => {
