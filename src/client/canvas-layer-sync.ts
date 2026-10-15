@@ -39,7 +39,7 @@ import {
   type NodeShape,
   type NodeTextSize,
 } from '../shared/canvas-layer.js';
-import { edgeStyleOf, setEdgeStyle, type EdgeStyle, type EdgeStylePatch } from '../shared/canvas-edge-style.js';
+import { edgeStyleOf, setEdgeStyle, type EdgeBend, type EdgeStyle, type EdgeStylePatch } from '../shared/canvas-edge-style.js';
 import { regionStyleOf, setRegionStyle, type RegionStyle, type RegionStylePatch } from '../shared/canvas-region-style.js';
 import type { CarriedDrawings } from '../shared/canvas-drawings.js';
 import type { ContextBlock, FlowDocument, FlowNode } from '../shared/flow-format.js';
@@ -61,6 +61,8 @@ export interface CanvasLayerSync {
   setShape(owner: DocumentOwner, node: FlowNode, shape: NodeShape): boolean;
   setTextSize(owner: DocumentOwner, node: FlowNode, textSize: NodeTextSize): boolean;
   setEdgeStyle(owner: DocumentOwner, edge: ModelEdge, patch: EdgeStylePatch): boolean;
+  // Many edges' bends in one layer write, as an arrange lays them; null straightens an edge.
+  setEdgeBends(owner: DocumentOwner, bends: readonly { edge: ModelEdge; bend: EdgeBend | null }[]): boolean;
   setRegionStyle(owner: DocumentOwner, block: ContextBlock, patch: RegionStylePatch): boolean;
   // Drawing edits, each its own undoable action — or part of the one already open, so a stroke
   // moved or deleted with nodes lands in the same undo step. False when there was no layer.
@@ -145,6 +147,17 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
   function setEdgeStyleOf(owner: DocumentOwner, edge: ModelEdge, patch: EdgeStylePatch): boolean {
     const key = edgeLayerKey(owner.doc, edge);
     return key != null && editLayer(owner.path, (layer) => setEdgeStyle(layer, key, patch, edge.kind));
+  }
+
+  function setEdgeBends(owner: DocumentOwner, bends: readonly { edge: ModelEdge; bend: EdgeBend | null }[]): boolean {
+    const keyed = bends.flatMap(({ edge, bend }) => {
+      const key = edgeLayerKey(owner.doc, edge);
+      return key == null ? [] : [{ key, bend, kind: edge.kind }];
+    });
+    if (keyed.length === 0) return false;
+    return editLayer(owner.path, (layer) => {
+      for (const { key, bend, kind } of keyed) setEdgeStyle(layer, key, { bend }, kind);
+    });
   }
 
   function setRegionStyleOf(owner: DocumentOwner, block: ContextBlock, patch: RegionStylePatch): boolean {
@@ -247,6 +260,7 @@ export function createCanvasLayerSync(session: () => EditSession, layers: Canvas
     setShape,
     setTextSize,
     setEdgeStyle: setEdgeStyleOf,
+    setEdgeBends,
     setRegionStyle: setRegionStyleOf,
     editDrawings,
     drawingsAreEditable,

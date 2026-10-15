@@ -11,7 +11,8 @@ import { arrangeScope, type LayoutScope } from '../src/shared/auto-layout.js';
 import { arrangeDocument, arrangeGraphScope, placeMissingPositions } from '../src/shared/document-layout.js';
 import { parseFlow, serializeFlow, type FlowDocument, type FlowNode, type Rect } from '../src/shared/flow-format.js';
 import { runFlowLayout } from '../src/tools/flow-layout.js';
-import { createHeadlessEditor, disposeHeadlessEditor } from './editor-harness.js';
+import { canvasLayerPathOf, parseCanvasLayer } from '../src/shared/canvas-layer.js';
+import { createHeadlessEditor, disposeHeadlessEditor, type HeadlessEditor } from './editor-harness.js';
 import type { LayeredGraph } from '../src/shared/layered-layout.js';
 import { arbitraryGraph, overlaps } from './layout-fixtures.js';
 
@@ -64,7 +65,7 @@ function posOf(text: string, name: string): Rect {
 describe('arranging a whole graph', () => {
   it('lays it out as a layered drawing from the corner it started at, the region member in a band of its own', () => {
     const doc = parseFlow(UNTIDY_FLOW);
-    expect(arrangeGraphScope(doc.items)).toBe(true);
+    expect(arrangeGraphScope(doc.items).moved).toBe(true);
     const [a, b, c] = ['A', 'B', 'C'].map((name) => nodeNamed(doc, name).pos!);
     expect(b.y).toBe(c.y);
     expect(a.y).not.toBe(b.y);
@@ -77,7 +78,7 @@ describe('arranging a whole graph', () => {
     const doc = parseFlow(UNTIDY_FLOW);
     arrangeGraphScope(doc.items);
     const arranged = serializeFlow(doc);
-    expect(arrangeGraphScope(doc.items)).toBe(false);
+    expect(arrangeGraphScope(doc.items).moved).toBe(false);
     expect(serializeFlow(doc)).toBe(arranged);
   });
 
@@ -100,7 +101,7 @@ describe('arrangeScope on any graph', () => {
     const nameOf = (node: number): string => `n${node}`;
     return {
       nodes: graph.nodes.map((node, index) => ({ name: nameOf(index), pos: positions[index], description: node.description, entrypoint: node.entrypoint })),
-      edges: graph.edges.map((edge) => ({ from: edge.from, target: nameOf(edge.to), kind: edge.kind })),
+      edges: graph.edges.map((edge) => ({ from: edge.from, target: nameOf(edge.to), kind: edge.kind, label: edge.label })),
       regions: graph.regions.map((members) => ({ members: members.map(nameOf), pos: null })),
     };
   }
@@ -108,7 +109,7 @@ describe('arrangeScope on any graph', () => {
   it('leaves an arranged graph exactly as it is', () => {
     fc.assert(fc.property(arbitraryGraph, (graph) => {
       const arranged = arrangeScope(scopeOf(graph, graph.nodes.map(() => null)));
-      expect(arrangeScope(scopeOf(graph, arranged))).toEqual(arranged);
+      expect(arrangeScope(scopeOf(graph, arranged.rects))).toEqual(arranged);
     }));
   });
 });
@@ -139,6 +140,87 @@ describe('placing missing positions', () => {
     expect(nodeNamed(doc, 'B').pos).toEqual({ x: 600, y: 700, w: 200, h: 88 });
     expect(nodeNamed(doc, 'X').pos).not.toBeNull();
     expect(placeMissingPositions(doc)).toBe(false);
+  });
+});
+
+// A→D skips over B and C, so arranged on one row the straight line from A to D would run through
+// both; the bend Arrange gives it runs it along the lane kept clear beside them.
+const SKIPPING_FLOW = `---
+name: Skipping
+---
+
+A
+  id: a-1
+  pos: 40, 40, 200, 88
+  -> B
+  -> D : "skip"
+
+B
+  id: b-1
+  pos: 40, 400, 200, 88
+  -> C
+
+C
+  id: c-1
+  pos: 600, 600, 200, 88
+  -> D
+
+D
+  id: d-1
+  pos: 900, 40, 200, 88
+`;
+
+function edgeBendsIn(editor: HeadlessEditor): Record<string, unknown> {
+  const layer = parseCanvasLayer(editor.workspace.file(canvasLayerPathOf(FLOW_PATH)));
+  return Object.fromEntries(Object.entries(layer.edges).flatMap(([key, entry]) => ('bend' in entry ? [[key, entry.bend]] : [])));
+}
+
+describe('the bends Arrange lays', () => {
+  afterEach(() => disposeHeadlessEditor());
+
+  it('plans a bend for the long edge and none for the short ones', () => {
+    const doc = parseFlow(SKIPPING_FLOW);
+    const { bends } = arrangeGraphScope(doc.items);
+    const bent = bends.filter((plan) => plan.bend !== null);
+    expect(bent.map((plan) => `${plan.node.name} -> ${plan.spec?.target}`)).toEqual(['A -> D']);
+    expect(bends).toHaveLength(4);
+  });
+
+  it('writes the bends with the moves, in one undo step', async () => {
+    const editor = await createHeadlessEditor({ [FLOW_PATH]: SKIPPING_FLOW }, { open: FLOW_PATH });
+    editor.core.runCommand('arrange');
+    await editor.settle();
+    expect(Object.keys(edgeBendsIn(editor))).toHaveLength(1);
+
+    editor.core.undo();
+    await editor.settle();
+    expect(edgeBendsIn(editor)).toEqual({});
+    expect(posOf(editor.workspace.file(FLOW_PATH)!, 'C')).toEqual({ x: 600, y: 600, w: 200, h: 88 });
+  });
+
+  it('writes nothing when arranged again', async () => {
+    const editor = await createHeadlessEditor({ [FLOW_PATH]: SKIPPING_FLOW }, { open: FLOW_PATH });
+    editor.core.runCommand('arrange');
+    await editor.settle();
+    const files = editor.workspace.snapshot();
+    const depth = editor.core.session.undoDepth;
+
+    editor.core.runCommand('arrange');
+    await editor.settle();
+    expect(editor.workspace.snapshot()).toEqual(files);
+    expect(editor.core.session.undoDepth).toBe(depth);
+  });
+
+  it('straightens the edges of the nodes it arranges on their own', async () => {
+    const editor = await createHeadlessEditor({ [FLOW_PATH]: SKIPPING_FLOW }, { open: FLOW_PATH });
+    editor.core.runCommand('arrange');
+    await editor.settle();
+    const d = editor.core.view.model.nodes.find((node) => node.name === 'D')!;
+    editor.core.view.setSelection([d], [], []);
+
+    editor.core.runCommand('arrange');
+    await editor.settle();
+    expect(edgeBendsIn(editor)).toEqual({});
   });
 });
 

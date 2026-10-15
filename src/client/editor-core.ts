@@ -39,7 +39,7 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import { DEFAULT_NODE_SIZE } from '../shared/auto-layout.js';
-import { arrangeGraphScope } from '../shared/document-layout.js';
+import { arrangeGraphScope, type DocumentEdge, type PlannedBend } from '../shared/document-layout.js';
 import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, MembershipChange, ModelContext, ModelEdge } from './flow-doc.js';
 import type { Point } from './geometry.js';
@@ -1816,9 +1816,25 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     const flow = openFlow;
     if (!flow) return;
     const items = FlowDoc.scopeItems(flow.doc, flow.scope);
+    const owner = { doc: flow.doc, path: flow.path };
     session.runAction(() => {
-      applyToDoc({ doc: flow.doc, path: flow.path }, () => arrangeGraphScope(items, chosen), { commit: 'now' });
+      let planned: PlannedBend[] = [];
+      applyToDoc(owner, () => {
+        planned = arrangeGraphScope(items, chosen).bends;
+      }, { commit: 'now' });
+      const bends = planned.flatMap((plan) => {
+        const edge = modelEdgeOf(plan);
+        return edge ? [{ edge, bend: plan.bend }] : [];
+      });
+      applyLayerEdit(owner, () => layerSync.setEdgeBends(owner, bends));
     });
+  }
+
+  // The edge on screen a document edge is drawn as. Read after the model has been rebuilt from the
+  // arranged document, which keeps every spec object and so every flow edge's identity.
+  function modelEdgeOf({ node, spec }: DocumentEdge): ModelEdge | undefined {
+    return openFlow?.model.edges.find((edge) =>
+      edge.from === node && (spec ? edge.spec === spec : edge.kind === 'error'));
   }
 
   function isInGraphOnScreen(node: FlowNode): boolean {

@@ -13,7 +13,7 @@
 
 import type { Rect } from './flow-format.js';
 import { NODE_GAP } from './layered-coordinates.js';
-import { layOutLayered, RANK_GAP, type LayeredGraph, type LayoutDirection } from './layered-layout.js';
+import { layOutLayered, rankGapFor, type LayeredEdge, type LayeredGraph, type LayoutDirection } from './layered-layout.js';
 import { CANVAS_SNAP, padRect, rectCenter, regionRectFrom, snapToCanvasGrid } from './rect-math.js';
 
 export interface PinnedGraph extends LayeredGraph {
@@ -68,7 +68,7 @@ export function placeAroundPinned(graph: PinnedGraph): Rect[] {
     }
     const block = layOutLayered(subgraphOf(graph, component), direction, { x: 0, y: 0 });
     const blockIndexOf = new Map(component.map((node, index) => [node, index]));
-    const ideal = idealOffset(anchoringEdges, blockIndexOf, block, graph.pins, AXES[direction]);
+    const ideal = idealOffset(anchoringEdges, blockIndexOf, block, graph.pins, direction);
     const offset = nearestFreeOffset(graph, placed, component, block, ideal, direction);
     component.forEach((node, index) => {
       placed[node] = translated(block[index], offset);
@@ -146,7 +146,7 @@ function subgraphOf(graph: LayeredGraph, nodes: number[]): LayeredGraph {
     nodes: nodes.map((node) => graph.nodes[node]),
     edges: graph.edges
       .filter((edge) => indexOf.has(edge.from) && indexOf.has(edge.to))
-      .map((edge) => ({ from: indexOf.get(edge.from)!, to: indexOf.get(edge.to)!, kind: edge.kind })),
+      .map((edge) => ({ from: indexOf.get(edge.from)!, to: indexOf.get(edge.to)!, kind: edge.kind, label: edge.label })),
     regions: graph.regions.map((members) => members.flatMap((member) => indexOf.get(member) ?? [])),
   };
 }
@@ -157,12 +157,14 @@ function subgraphOf(graph: LayeredGraph, nodes: number[]): LayeredGraph {
 // that very column — the column grid is what a reader follows, and there is no room between two
 // neighbouring columns. Across the flow every edge has its say, and the block takes the median.
 function idealOffset(
-  anchoringEdges: { from: number; to: number }[],
+  anchoringEdges: LayeredEdge[],
   blockIndexOf: Map<number, number>,
   block: Rect[],
   pins: (Rect | null)[],
-  axes: Axes,
+  direction: LayoutDirection,
 ): Offset {
+  const axes = AXES[direction];
+  const gapFor = (edge: LayeredEdge): number => rankGapFor([edge.label], direction);
   const afterPredecessors: number[] = [];
   const beforeSuccessors: number[] = [];
   const acrossWishes: number[] = [];
@@ -171,9 +173,9 @@ function idealOffset(
     const member = block[blockIndexOf.get(followsAnchor ? edge.to : edge.from)!];
     const anchor = pins[followsAnchor ? edge.from : edge.to]!;
     if (followsAnchor) {
-      afterPredecessors.push(axes.alongStart(anchor) + axes.alongSize(anchor) + RANK_GAP - axes.alongStart(member));
+      afterPredecessors.push(axes.alongStart(anchor) + axes.alongSize(anchor) + gapFor(edge) - axes.alongStart(member));
     } else {
-      beforeSuccessors.push(axes.alongStart(anchor) - RANK_GAP - axes.alongSize(member) - axes.alongStart(member));
+      beforeSuccessors.push(axes.alongStart(anchor) - gapFor(edge) - axes.alongSize(member) - axes.alongStart(member));
     }
     acrossWishes.push(axes.acrossCentre(anchor) - axes.acrossCentre(member));
   }

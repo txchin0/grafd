@@ -34,6 +34,8 @@ export interface ProperLayering {
   items: LayerItem[];
   segments: LayerSegment[];
   rankCount: number;
+  // For each edge laid out, the items where it passes the ranks between its ends, in rank order.
+  passages: number[][];
 }
 
 export interface Neighbour {
@@ -49,18 +51,21 @@ const SWEEPS_WITHOUT_IMPROVEMENT_BEFORE_STOPPING = 6;
 export function properLayering(ranks: number[], edges: LayeringEdge[], bands: number[]): ProperLayering {
   const items: LayerItem[] = ranks.map((rank, node) => ({ rank, band: bands[node], node, passing: null }));
   const segments: LayerSegment[] = [];
-  for (const edge of edges) {
+  const passages = edges.map((edge) => {
+    const passage: number[] = [];
     let upper = edge.from;
     for (let rank = ranks[edge.from] + 1; rank < ranks[edge.to]; rank++) {
       items.push({ rank, band: bands[edge.from], node: null, passing: { from: edge.from, to: edge.to } });
       const passing = items.length - 1;
       segments.push({ upper, lower: passing, weight: edge.weight, straight: edge.straight });
+      passage.push(passing);
       upper = passing;
     }
     segments.push({ upper, lower: edge.to, weight: edge.weight, straight: edge.straight });
-  }
+    return passage;
+  });
   const rankCount = ranks.length > 0 ? Math.max(...ranks) + 1 : 0;
-  return { items, segments, rankCount };
+  return { items, segments, rankCount, passages };
 }
 
 // Each rank's items, first to last. Deterministic: ties always fall back to the items' indices,

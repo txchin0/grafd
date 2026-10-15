@@ -8,7 +8,7 @@
 // as `unknown` and stays quiet about them; the workspace pass answers them for real.
 
 import { error, warning, type Diagnostic } from './flow-diagnostics.js';
-import { isLegalNodeName, parseEdgeExpression, parseExpandLink, parseListValue, parsePos, unquote, type Rect } from './flow-format.js';
+import { isLegalNodeName, parseEdgeExpression, parseExpandLink, parseListValue, parsePos, unquote, type EdgeSpec, type Rect } from './flow-format.js';
 import { parseReferenceLineRange } from './reference-target.js';
 import { placeNodes, type LayoutScope } from './auto-layout.js';
 import { countCrossingPairs, type CrossingSegment } from './edge-crossings.js';
@@ -411,16 +411,16 @@ export function layoutScopeOfScanned(scope: ScannedScope): LayoutScope {
       entrypoint: findProperty(node, 'entrypoint')?.value === 'true',
     })),
     edges: scope.nodes.flatMap((node, index) => [
-      ...node.edges.map((edge) => ({ from: index, target: edge.spec.target, kind: 'flow' as const })),
-      ...errorEdgeTargetsOf(node).map((target) => ({ from: index, target, kind: 'error' as const })),
+      ...node.edges.map((edge) => ({ from: index, target: edge.spec.target, kind: 'flow' as const, label: edge.spec.label })),
+      ...errorEdgesOf(node).map((edge) => ({ from: index, target: edge.target, kind: 'error' as const, label: edge.label })),
     ]),
     regions: scope.contexts.map((block) => ({ members: block.members.map((member) => member.name), pos: posOf(block) })),
   };
 }
 
-function errorEdgeTargetsOf(node: ScannedNode): string[] {
+function errorEdgesOf(node: ScannedNode): EdgeSpec[] {
   const onError = findProperty(node, 'on_error');
-  return onError && onError.value.startsWith('->') ? [parseEdgeExpression(onError.value).target] : [];
+  return onError && onError.value.startsWith('->') ? [parseEdgeExpression(onError.value)] : [];
 }
 
 function posOf(holder: { properties: ScannedProperty[] }): Rect | null {

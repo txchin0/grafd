@@ -1,7 +1,8 @@
-// How a node's text is set at the medium text size, and how it wraps. The painter measures with
-// the canvas (client/canvas/node-metrics.ts) while the layout, which runs where there is no
-// canvas, can only estimate (node-size-estimate.ts); both wrap through here, so a layout sized
-// for some number of lines is sized for the lines the painter will actually draw.
+// How a node's text is set at the medium text size, and how it wraps — and how big the pill an
+// edge's label is drawn in. The painter measures with the canvas (client/canvas/node-metrics.ts)
+// while the layout, which runs where there is no canvas, can only estimate (node-size-estimate.ts);
+// both wrap through here, so a layout sized for some number of lines is sized for the lines the
+// painter will actually draw.
 
 export const NODE_TEXT_SIDE_PADDING = 13;
 export const TITLE_FONT_PX = 15;
@@ -11,6 +12,10 @@ export const DESCRIPTION_LINE_HEIGHT = 16;
 export const TITLE_DESCRIPTION_GAP = 6;
 export const TITLE_MAX_LINES = 2;
 export const DESCRIPTION_MAX_LINES = 4;
+
+export const EDGE_LABEL_FONT_PX = 12;
+export const EDGE_LABEL_PADDING_X = 7;
+export const EDGE_LABEL_HEIGHT = 21;
 
 // Greedy word wrap. A word wider than the line still gets a line of its own, and text that runs
 // past `maxLines` ends its last line in an ellipsis.

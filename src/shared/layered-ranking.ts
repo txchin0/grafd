@@ -15,6 +15,8 @@ export interface RankedGraph {
   // Every edge running down the ranks: those closing a cycle turned around, and edges that end up
   // joining the same two nodes the same way merged into one carrying both weights.
   edges: WeightedEdge[];
+  // For each edge given, the index of the ranked edge it became.
+  rankedEdgeOf: number[];
 }
 
 const UNVISITED = 0;
@@ -24,10 +26,10 @@ const FINISHED = 2;
 // `visitOrder` says where cycles are entered from, so which edge of a cycle turns around is
 // decided by the file (its entry points, then its order) rather than by chance.
 export function rankNodes(nodeCount: number, edges: WeightedEdge[], visitOrder: number[]): RankedGraph {
-  const forwardEdges = mergeParallelEdges(orientAcyclically(nodeCount, edges, visitOrder));
-  const ranks = longestPathRanks(nodeCount, forwardEdges);
-  tightenRanks(ranks, forwardEdges);
-  return { ranks: startingAtZero(ranks), edges: forwardEdges };
+  const merged = mergeParallelEdges(orientAcyclically(nodeCount, edges, visitOrder));
+  const ranks = longestPathRanks(nodeCount, merged.edges);
+  tightenRanks(ranks, merged.edges);
+  return { ranks: startingAtZero(ranks), edges: merged.edges, rankedEdgeOf: merged.mergedInto };
 }
 
 function orientAcyclically(nodeCount: number, edges: WeightedEdge[], visitOrder: number[]): WeightedEdge[] {
@@ -60,15 +62,21 @@ function orientAcyclically(nodeCount: number, edges: WeightedEdge[], visitOrder:
   return edges.map((edge, index) => (closesCycle[index] ? { from: edge.to, to: edge.from, weight: edge.weight } : edge));
 }
 
-function mergeParallelEdges(edges: WeightedEdge[]): WeightedEdge[] {
-  const merged = new Map<string, WeightedEdge>();
-  for (const edge of edges) {
+function mergeParallelEdges(edges: WeightedEdge[]): { edges: WeightedEdge[]; mergedInto: number[] } {
+  const merged: WeightedEdge[] = [];
+  const indexByEnds = new Map<string, number>();
+  const mergedInto = edges.map((edge) => {
     const key = `${edge.from}>${edge.to}`;
-    const existing = merged.get(key);
-    if (existing) existing.weight += edge.weight;
-    else merged.set(key, { ...edge });
-  }
-  return [...merged.values()];
+    const existing = indexByEnds.get(key);
+    if (existing !== undefined) {
+      merged[existing].weight += edge.weight;
+      return existing;
+    }
+    indexByEnds.set(key, merged.length);
+    merged.push({ ...edge });
+    return merged.length - 1;
+  });
+  return { edges: merged, mergedInto };
 }
 
 function longestPathRanks(nodeCount: number, edges: WeightedEdge[]): number[] {

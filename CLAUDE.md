@@ -154,6 +154,12 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   afresh (`arrangeScope`: flowing the way it already does, from its old top-left corner, releasing
   the areas its regions reserved) or only some of its nodes around the rest (`arrangeSelected`).
   Arranging an arranged scope changes nothing. `src/tools/flow-layout.ts` is `grafd layout`.
+  The gap between two ranks widens to fit the labels on the edges joining them (`rankGapFor`,
+  measured from the same pill metrics the painter draws with). Arranging also settles bends: an
+  edge spanning several ranks bends through the middle of the lane the layout kept clear for it,
+  unless it runs between two bands, and an edge of a node arranged on its own runs straight. The
+  editor writes those bends to the layer in the same undo step as the moves; `grafd layout`
+  writes no layer, so it leaves bends as they are.
 - `scripts/build-site.mjs` — assembles the static `site/` build (`npm run build:site`).
 - `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building

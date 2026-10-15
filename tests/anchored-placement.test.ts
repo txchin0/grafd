@@ -4,7 +4,7 @@ import { buildModel } from '../src/client/flow-doc.js';
 import { placeAroundPinned } from '../src/shared/anchored-placement.js';
 import { parseFlow, type Rect } from '../src/shared/flow-format.js';
 import { NODE_GAP } from '../src/shared/layered-coordinates.js';
-import { layOutLayered, RANK_GAP } from '../src/shared/layered-layout.js';
+import { layOutLayered, RANK_GAP, rankGapFor } from '../src/shared/layered-layout.js';
 import { CANVAS_SNAP, padRect, rectCenter, regionRectFrom } from '../src/shared/rect-math.js';
 import { arbitraryGraph, overlaps, rectsByName } from './layout-fixtures.js';
 
@@ -16,6 +16,12 @@ describe('a new node beside placed ones', () => {
     const b = rects.get('B')!;
     expect(b.x).toBe(400 + 200 + RANK_GAP);
     expect(middleOf(b)).toBe(400 + 44);
+  });
+
+  it('leaves room for the label of the edge it follows', () => {
+    const label = 'the user fills the form and taps the login button';
+    const rects = rectsByName(`A\n  pos: 400, 400, 200, 88\n  -> B : "${label}"\n\nB\n`);
+    expect(rects.get('B')!.x).toBe(400 + 200 + rankGapFor([label], 'LR'));
   });
 
   it('comes a rank before the node it leads to', () => {

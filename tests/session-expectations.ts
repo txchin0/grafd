@@ -427,7 +427,7 @@ function arrangeThatLeftItUntidy(step: SessionStep, was: GraphState, now: GraphS
   const wholeGraph = chosen.length === 0 || chosen.length === was.topNodes.size;
   if (wholeGraph) {
     const doc = parseFlow(step.after.get(step.flowPath) ?? '');
-    if (arrangeGraphScope(doc.items)) return violation('arrange tidies the graph', 'arranging the arranged graph again moved something');
+    if (arrangeGraphScope(doc.items).moved) return violation('arrange tidies the graph', 'arranging the arranged graph again moved something');
     return [];
   }
   const crowded = chosen.flatMap((id) => {

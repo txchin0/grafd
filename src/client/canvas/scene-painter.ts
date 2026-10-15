@@ -22,7 +22,8 @@ import type { Point } from '../geometry.js';
 import { unionRect } from '../../shared/rect-math.js';
 import { canvasPalette, resolveLayerColor } from '../theme.js';
 import type { HiddenCanvasTitles } from './canvas-view.js';
-import type { Arrowhead, EdgeStyle, LineStyle } from '../../shared/canvas-edge-style.js';
+import { shownEdgeLabel, type Arrowhead, type EdgeStyle, type LineStyle } from '../../shared/canvas-edge-style.js';
+import { EDGE_LABEL_FONT_PX, EDGE_LABEL_HEIGHT, EDGE_LABEL_PADDING_X } from '../../shared/node-text-metrics.js';
 import { regionFillColorOf, type RegionFillPattern, type RegionStyle } from '../../shared/canvas-region-style.js';
 import { edgeStyleIn, nodeTextSizeIn, regionStyleIn } from '../model-visuals.js';
 import { arrowheadIsFilled, arrowheadOutline, type ArrowheadOutline } from './arrowheads.js';
@@ -418,7 +419,7 @@ export class ScenePainter {
   private drawEdgeLabel(edge: ModelEdge): void {
     const geometry = this.edgeGeometry.get(edge);
     if (!geometry) return;
-    const labelText = edge.spec.label ?? (edge.kind === 'error' ? 'on error' : null);
+    const labelText = shownEdgeLabel(edge.spec.label, edge.kind);
     const anchor = geometry.grip;
     const fields = edge.spec.data ?? [];
 
@@ -437,13 +438,12 @@ export class ScenePainter {
 
   private drawEdgeLabelPill(text: string, anchor: Point, isError: boolean): Rect {
     const { ctx } = this;
-    ctx.font = handFontAt(12);
-    const paddingX = 7;
+    ctx.font = handFontAt(EDGE_LABEL_FONT_PX);
     const rect = {
-      x: anchor.x - ctx.measureText(text).width / 2 - paddingX,
+      x: anchor.x - ctx.measureText(text).width / 2 - EDGE_LABEL_PADDING_X,
       y: anchor.y - 11,
-      w: ctx.measureText(text).width + paddingX * 2,
-      h: 21,
+      w: ctx.measureText(text).width + EDGE_LABEL_PADDING_X * 2,
+      h: EDGE_LABEL_HEIGHT,
     };
     ctx.fillStyle = canvasPalette.edgeLabelBg;
     this.roundedRect(rect, 7);

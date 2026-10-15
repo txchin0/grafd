@@ -7,6 +7,7 @@
 // edge's kind, which is why both reads and writes are told it.
 
 import { isLayerColor, setEntryField, type CanvasLayer } from './canvas-layer.js';
+import type { Point } from './rect-math.js';
 
 export type EdgeKind = 'flow' | 'error';
 
@@ -62,8 +63,44 @@ export function isArrowhead(value: unknown): value is Arrowhead {
   return (ARROWHEADS as readonly unknown[]).includes(value);
 }
 
+// What an edge's label pill shows: its own label, or for an error edge without one, what it is.
+export function shownEdgeLabel(label: string | null, kind: EdgeKind): string | null {
+  return label ?? (kind === 'error' ? 'on error' : null);
+}
+
 export function clampBendAlong(along: number): number {
   return Math.min(MAX_BEND_ALONG, Math.max(MIN_BEND_ALONG, along));
+}
+
+// The two directions of the arithmetic a stored bend means — where a bend puts the edge's middle,
+// and which bend passes through a point — kept together so nothing else has to know the chord
+// convention above. Null for a chord of no length (two nodes stacked on one centre), which has
+// nothing to measure against. `along` is trusted as given in the one, and clamped in the other, so
+// past either end of the chord a bend tracks the end rather than folding the edge back on itself.
+export function bendPointOn(bend: EdgeBend, fromCenter: Point, toCenter: Point): Point | null {
+  const chord = chordBetween(fromCenter, toCenter);
+  if (!chord) return null;
+  return {
+    x: fromCenter.x + bend.along * chord.vector.x + bend.across * chord.across.x,
+    y: fromCenter.y + bend.along * chord.vector.y + bend.across * chord.across.y,
+  };
+}
+
+export function bendThroughPoint(point: Point, fromCenter: Point, toCenter: Point): EdgeBend | null {
+  const chord = chordBetween(fromCenter, toCenter);
+  if (!chord) return null;
+  const offset = { x: point.x - fromCenter.x, y: point.y - fromCenter.y };
+  return {
+    along: clampBendAlong((offset.x * chord.vector.x + offset.y * chord.vector.y) / chord.squaredLength),
+    across: (offset.x * chord.across.x + offset.y * chord.across.y) / chord.squaredLength,
+  };
+}
+
+function chordBetween(fromCenter: Point, toCenter: Point): { vector: Point; across: Point; squaredLength: number } | null {
+  const vector = { x: toCenter.x - fromCenter.x, y: toCenter.y - fromCenter.y };
+  const squaredLength = vector.x * vector.x + vector.y * vector.y;
+  if (squaredLength === 0) return null;
+  return { vector, across: { x: -vector.y, y: vector.x }, squaredLength };
 }
 
 // A bend is written as `[along, across]`; anything else reads as no bend.

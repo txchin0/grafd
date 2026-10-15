@@ -4,12 +4,29 @@ import { buildModel } from '../src/client/flow-doc.js';
 import { countCrossingPairs } from '../src/shared/edge-crossings.js';
 import { parseFlow, type Rect } from '../src/shared/flow-format.js';
 import { closestOrderedPlacement } from '../src/shared/layered-coordinates.js';
-import { layOutLayered, type LayeredGraph } from '../src/shared/layered-layout.js';
-import { estimateNodeSize, NODE_WIDTH_STEPS } from '../src/shared/node-size-estimate.js';
-import { CANVAS_SNAP, rectCenter, rectContainsRect, regionRectFrom } from '../src/shared/rect-math.js';
+import { layOutLayered, layOutLayeredDrawing, RANK_GAP, rankGapFor, type LayeredGraph } from '../src/shared/layered-layout.js';
+import { estimateEdgeLabelWidth, estimateNodeSize, NODE_WIDTH_STEPS } from '../src/shared/node-size-estimate.js';
+import { CANVAS_SNAP, rectCenter, rectContainsRect, regionRectFrom, type Point } from '../src/shared/rect-math.js';
 import { arbitraryGraph, overlaps, rectsByName } from './layout-fixtures.js';
 
 const ORIGIN = { x: 80, y: 80 };
+
+// Close enough to the curve the canvas draws through an edge's two ends and its bend to tell
+// whether it clears a node: a quadratic passing through the bend halfway along.
+function curveThrough(from: Point, bend: Point, to: Point): Point[] {
+  const control = { x: 2 * bend.x - (from.x + to.x) / 2, y: 2 * bend.y - (from.y + to.y) / 2 };
+  return Array.from({ length: 99 }, (_, step) => {
+    const t = (step + 1) / 100;
+    return {
+      x: (1 - t) ** 2 * from.x + 2 * (1 - t) * t * control.x + t * t * to.x,
+      y: (1 - t) ** 2 * from.y + 2 * (1 - t) * t * control.y + t * t * to.y,
+    };
+  });
+}
+
+function rectContainsPoint(rect: Rect, point: { x: number; y: number }): boolean {
+  return point.x > rect.x && point.x < rect.x + rect.w && point.y > rect.y && point.y < rect.y + rect.h;
+}
 
 function crossingsOf(graph: LayeredGraph, rects: Rect[]): number {
   return countCrossingPairs(graph.edges.map((edge) => ({
@@ -60,7 +77,7 @@ describe('layOutLayered on any graph', () => {
       ...graph,
       edges: graph.edges
         .filter((edge) => edge.from !== edge.to)
-        .map((edge) => ({ from: Math.min(edge.from, edge.to), to: Math.max(edge.from, edge.to), kind: 'flow' as const })),
+        .map((edge) => ({ from: Math.min(edge.from, edge.to), to: Math.max(edge.from, edge.to), kind: 'flow' as const, label: edge.label })),
     }));
     fc.assert(fc.property(acyclic, (graph) => {
       const rects = layOutLayered(graph, 'LR', ORIGIN);
@@ -74,6 +91,71 @@ describe('layOutLayered on any graph', () => {
       const widthsByColumn = new Map<number, Set<number>>();
       for (const rect of rects) widthsByColumn.set(rect.x, (widthsByColumn.get(rect.x) ?? new Set()).add(rect.w));
       for (const widths of widthsByColumn.values()) expect(widths.size).toBe(1);
+    }));
+  });
+});
+
+describe('the room between ranks', () => {
+  it('is the usual gap where no label needs more', () => {
+    const rects = rectsByName('A\n  -> B\n\nB\n');
+    expect(rects.get('B')!.x - (rects.get('A')!.x + rects.get('A')!.w)).toBe(RANK_GAP);
+  });
+
+  it('widens to fit the label of an edge between them', () => {
+    const label = 'the user fills the form and taps the login button';
+    const rects = rectsByName(`A\n  -> B : "${label}"\n\nB\n`);
+    const gap = rects.get('B')!.x - (rects.get('A')!.x + rects.get('A')!.w);
+    expect(gap).toBeGreaterThanOrEqual(estimateEdgeLabelWidth(label));
+    expect(gap).toBe(rankGapFor([label], 'LR'));
+  });
+
+  it('keeps to the usual gap top to bottom, where a label lies across the flow', () => {
+    expect(rankGapFor(['the user fills the form and taps the login button'], 'TB')).toBe(RANK_GAP);
+  });
+});
+
+describe('where a long edge bends', () => {
+  // A→D spans three ranks, and the straight line between them runs through B and C on the spine.
+  const SKIPPING: LayeredGraph = {
+    nodes: ['A', 'B', 'C', 'D'].map((title) => ({ title, description: null, entrypoint: false })),
+    edges: [
+      { from: 0, to: 1, kind: 'flow', label: null },
+      { from: 1, to: 2, kind: 'flow', label: null },
+      { from: 2, to: 3, kind: 'flow', label: null },
+      { from: 0, to: 3, kind: 'flow', label: null },
+    ],
+    regions: [],
+  };
+
+  it('bends a long edge off the nodes it would cross, and leaves short edges straight', () => {
+    const { rects, bendPoints } = layOutLayeredDrawing(SKIPPING, 'LR', ORIGIN);
+    expect(bendPoints.slice(0, 3)).toEqual([null, null, null]);
+    const bend = bendPoints[3]!;
+    expect(bend).not.toBeNull();
+    expect(bend.y).not.toBe(rectCenter(rects[0]).y);
+    for (const rect of rects) expect(rectContainsPoint(rect, bend)).toBe(false);
+  });
+
+  it('bends it clear of the nodes it skips', () => {
+    const { rects, bendPoints } = layOutLayeredDrawing(SKIPPING, 'LR', ORIGIN);
+    const curve = curveThrough(rectCenter(rects[0]), bendPoints[3]!, rectCenter(rects[3]));
+    for (const skipped of [rects[1], rects[2]]) {
+      expect(curve.some((point) => rectContainsPoint(skipped, point))).toBe(false);
+    }
+  });
+
+  it('runs an edge between two bands straight across the gap between them', () => {
+    const acrossBands: LayeredGraph = { ...SKIPPING, regions: [[3]] };
+    expect(layOutLayeredDrawing(acrossBands, 'LR', ORIGIN).bendPoints[3]).toBeNull();
+  });
+
+  it('never bends through a node, on any graph', () => {
+    fc.assert(fc.property(arbitraryGraph, (graph) => {
+      const { rects, bendPoints } = layOutLayeredDrawing(graph, 'LR', ORIGIN);
+      expect(bendPoints).toHaveLength(graph.edges.length);
+      for (const point of bendPoints) {
+        if (point) for (const rect of rects) expect(rectContainsPoint(rect, point)).toBe(false);
+      }
     }));
   });
 });
@@ -121,7 +203,7 @@ describe('the shape of a layered layout', () => {
   it('orders a rank so edges the file order would cross do not', () => {
     const graph: LayeredGraph = {
       nodes: ['A', 'B', 'C', 'D'].map((title) => ({ title, description: null, entrypoint: false })),
-      edges: [{ from: 0, to: 3, kind: 'flow' }, { from: 1, to: 2, kind: 'flow' }],
+      edges: [{ from: 0, to: 3, kind: 'flow', label: null }, { from: 1, to: 2, kind: 'flow', label: null }],
       regions: [],
     };
     expect(crossingsOf(graph, layOutLayered(graph, 'LR', ORIGIN))).toBe(0);
@@ -146,7 +228,7 @@ describe('the shape of a layered layout', () => {
   it('lays out top to bottom when asked', () => {
     const graph: LayeredGraph = {
       nodes: ['A', 'B'].map((title) => ({ title, description: null, entrypoint: false })),
-      edges: [{ from: 0, to: 1, kind: 'flow' }],
+      edges: [{ from: 0, to: 1, kind: 'flow', label: null }],
       regions: [],
     };
     const [a, b] = layOutLayered(graph, 'TB', ORIGIN);

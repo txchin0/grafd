@@ -7,6 +7,7 @@
 import {
   DESCRIPTION_LINE_HEIGHT,
   DESCRIPTION_MAX_LINES,
+  EDGE_LABEL_PADDING_X,
   NODE_TEXT_SIDE_PADDING,
   TITLE_DESCRIPTION_GAP,
   TITLE_LINE_HEIGHT,
@@ -25,6 +26,7 @@ export interface NodeSize {
 // descriptions, then rounded up: a title the estimate expects on one line must not wrap.
 const TITLE_CHARACTER_WIDTH = 8.5;
 const DESCRIPTION_CHARACTER_WIDTH = 7;
+const EDGE_LABEL_CHARACTER_WIDTH = 7;
 
 export const NODE_WIDTH_STEPS = [160, 200, 240, 280] as const;
 const COMFORTABLE_DESCRIPTION_LINES = 3;
@@ -43,6 +45,11 @@ export function estimateNodeSize(title: string, description: string | null): Nod
     ?? NODE_WIDTH_STEPS.find((step) => fitsAtAll(linesAt(step, title, description)))
     ?? NODE_WIDTH_STEPS[NODE_WIDTH_STEPS.length - 1];
   return { w: width, h: heightFor(linesAt(width, title, description)) };
+}
+
+// The width of the pill an edge's label is drawn in.
+export function estimateEdgeLabelWidth(text: string): number {
+  return text.length * EDGE_LABEL_CHARACTER_WIDTH + 2 * EDGE_LABEL_PADDING_X;
 }
 
 function fitsComfortably(lines: TextLines): boolean {

@@ -41,6 +41,7 @@ export const arbitraryGraph: fc.Arbitrary<LayeredGraph> = fc
         from: fc.integer({ min: 0, max: nodeCount - 1 }),
         to: fc.integer({ min: 0, max: nodeCount - 1 }),
         kind: fc.constantFrom('flow' as const, 'flow' as const, 'error' as const),
+        label: fc.option(fc.array(fc.constantFrom(...WORDS), { minLength: 1, maxLength: 5 }).map((words) => words.join(' '))),
       }),
       { maxLength: nodeCount * 2 },
     ),
