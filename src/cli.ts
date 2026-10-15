@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { DEFAULT_HOST, DEFAULT_PORT, startServer } from './server/server.js';
 import { emptyManifest, MANIFEST_FILE_NAME, serializeManifest } from './shared/manifest.js';
+import { runFlowLayout } from './tools/flow-layout.js';
 import { runFlowLint } from './tools/flow-lint.js';
 
 const require = createRequire(import.meta.url);
@@ -254,6 +255,22 @@ async function runLint(args: string[]): Promise<number> {
   }
 }
 
+async function runLayout(args: string[]): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) return runFlowLayout(['--help']);
+  const hasWorkspace = args.some((argument) => !argument.startsWith('-'));
+  if (!hasWorkspace) {
+    const workspace = await resolveWorkspace(process.cwd(), null, null);
+    if (workspace === null) return 1;
+    args = [workspace, ...args];
+  }
+  try {
+    return await runFlowLayout(args);
+  } catch (error) {
+    console.error(`Layout failed: ${errorMessage(error)}`);
+    return 1;
+  }
+}
+
 function openBrowser(url: string): void {
   const platform = process.platform;
   const command = platform === 'win32' ? 'cmd' : platform === 'darwin' ? 'open' : 'xdg-open';
@@ -285,6 +302,8 @@ export async function runCli(argv: string[]): Promise<number> {
       return runStart(argv.slice(1));
     case 'lint':
       return runLint(argv.slice(1));
+    case 'layout':
+      return runLayout(argv.slice(1));
     default:
       console.error(`Unknown command: ${argv[0]}`);
       printGlobalHelp();
@@ -299,6 +318,7 @@ Commands:
   init       Create ${DEFAULT_WORKSPACE_DIR}/ with main.flow, grafd.manifest.json, and SAVE-GUIDE.md
   start      Run the editor server (default command; defaults to ${DEFAULT_HOST}:${DEFAULT_PORT})
   lint       Lint .flow workspaces
+  layout     Place nodes that have no position, or lay every graph out afresh with --all
 
 Run 'grafd <command> --help' for command options.`);
 }

@@ -19,6 +19,7 @@ export const EDITOR_COMMANDS = [
   'zoom-in',
   'zoom-out',
   'escape',
+  'arrange',
 ] as const;
 export type EditorCommand = (typeof EDITOR_COMMANDS)[number];
 
@@ -58,6 +59,7 @@ const KEY_BINDINGS: readonly KeyBinding[] = [
   { key: '+', ctrl: true, command: 'zoom-in' },
   { key: '-', ctrl: true, command: 'zoom-out' },
   { key: 'escape', command: 'escape' },
+  { key: 'l', ctrl: true, shift: true, command: 'arrange' },
 ];
 
 export interface KeyPress {

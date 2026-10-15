@@ -81,7 +81,7 @@ export function placeAroundPinned(graph: PinnedGraph): Rect[] {
 
 // The direction the placed part of the graph already flows in: whichever way its flow edges run
 // further, measured between the centres of the nodes they join.
-function flowDirectionOf(graph: PinnedGraph): LayoutDirection {
+export function flowDirectionOf(graph: PinnedGraph): LayoutDirection {
   let rightward = 0;
   let downward = 0;
   for (const edge of graph.edges) {

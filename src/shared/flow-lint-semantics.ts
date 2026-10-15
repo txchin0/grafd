@@ -400,7 +400,8 @@ function placedRectsForScope(scope: ScannedScope): Map<ScannedNode, Rect> {
   return new Map(scope.nodes.map((node, index) => [node, placements[index]]));
 }
 
-// Must read the scope exactly as the canvas does (flow-doc.ts layoutScopeOf), field for field.
+// Must read the scope exactly as the canvas does (document-layout.ts layoutScopeOfItems), field
+// for field.
 export function layoutScopeOfScanned(scope: ScannedScope): LayoutScope {
   return {
     nodes: scope.nodes.map((node) => ({

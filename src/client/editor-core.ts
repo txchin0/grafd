@@ -39,6 +39,7 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import { DEFAULT_NODE_SIZE } from '../shared/auto-layout.js';
+import { arrangeGraphScope } from '../shared/document-layout.js';
 import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, MembershipChange, ModelContext, ModelEdge } from './flow-doc.js';
 import type { Point } from './geometry.js';
@@ -1637,6 +1638,7 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     }
     items.push({ label: 'Copy', onSelect: clipboard.copy });
     items.push({ label: 'Cut', onSelect: clipboard.cut });
+    if (isInGraphOnScreen(node)) items.push({ label: arrangeLabelFor(selectionCount), onSelect: arrange });
     if (frameInterior) {
       items.push({ label: 'Paste', disabled: !clipboard.hasContent(), onSelect: () => pasteAt(frameInterior, 'at-point') });
     }
@@ -1794,7 +1796,37 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
       case 'escape':
         escape();
         return true;
+      case 'arrange':
+        return arrange();
     }
+  }
+
+  // Lays the selected nodes of the graph on screen out again around the others, or the whole graph
+  // when nothing is selected — one undo step either way. Nodes selected inside an unfolded frame
+  // belong to another graph, so a selection of only those arranges nothing.
+  function arrange(): boolean {
+    if (!openFlow) return false;
+    const chosen = new Set([...view.selection].filter(isInGraphOnScreen));
+    if (view.selection.size > 0 && chosen.size === 0) return false;
+    arrangeGraphOnScreen(chosen.size > 0 ? chosen : undefined);
+    return true;
+  }
+
+  function arrangeGraphOnScreen(chosen?: Set<FlowNode>): void {
+    const flow = openFlow;
+    if (!flow) return;
+    const items = FlowDoc.scopeItems(flow.doc, flow.scope);
+    session.runAction(() => {
+      applyToDoc({ doc: flow.doc, path: flow.path }, () => arrangeGraphScope(items, chosen), { commit: 'now' });
+    });
+  }
+
+  function isInGraphOnScreen(node: FlowNode): boolean {
+    return openFlow !== null && FlowDoc.nodesIn(FlowDoc.scopeItems(openFlow.doc, openFlow.scope)).includes(node);
+  }
+
+  function arrangeLabelFor(selectionCount: number): string {
+    return selectionCount > 1 ? `Arrange ${selectionCount} nodes` : 'Arrange this node';
   }
 
   // Escape abandons a gesture under way first. Otherwise it closes what is floating over the
@@ -1840,6 +1872,7 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
       },
       { label: 'Paste', disabled: !clipboard.hasContent(), onSelect: () => pasteAt(world, 'at-point') },
       { separator: true },
+      { label: 'Arrange graph', onSelect: () => arrangeGraphOnScreen() },
       { label: 'Fit to content', onSelect: () => view.fitToContent() },
       { label: 'Reset zoom', onSelect: () => view.setZoom(1) },
     ];

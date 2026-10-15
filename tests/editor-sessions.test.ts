@@ -28,7 +28,7 @@ import {
   type SessionAction,
   type TargetPick,
 } from './session-actions.js';
-import { createRepeatedPasteCheck, expectationViolations, graphOnScreen, selectionOf } from './session-expectations.js';
+import { createRepeatedPasteCheck, expectationViolations, graphOnScreen, regionFramesOnScreen, selectionOf } from './session-expectations.js';
 import {
   contentChanged,
   contentOf,
@@ -190,6 +190,21 @@ const SESSION_REGRESSIONS: [SessionAction[]][] = [
     { type: 'grab-affordance', owner: { kind: 'region-border', index: 4, nudge: { x: 0, y: 0 } }, affordance: SOUTH_WEST_HANDLE, by: { x: 0, y: -117 } },
     { type: 'grab-affordance', owner: { kind: 'region-border', index: 1, nudge: { x: 0, y: 0 } }, affordance: SOUTH_SIDE_HANDLE_OF_A_FLAT_REGION, by: { x: 0, y: -25 } },
   ]],
+  // Arranging an arranged graph turned it on its side: the direction guessed from its edges came
+  // out top-to-bottom, because the edges between its stacked region bands all run downward.
+  [[
+    { type: 'menu', target: nodePick(0), choice: 9 },
+    { type: 'command', command: 'arrange' },
+    { type: 'menu', target: nodePick(0), choice: 0 },
+  ]],
+  // With a subgraph unfolded beside it, a region with no reserved area is drawn around its members
+  // where the unfolding pushed them, and a drag carries the drawings inside that frame — not inside
+  // the one its members' file positions would give.
+  [[
+    { type: 'command', command: 'arrange' },
+    { type: 'click', target: { kind: 'badge', index: 3, nudge: { x: 0, y: 0 } }, shift: false },
+    { type: 'drag', from: { kind: 'region-border', index: 0, nudge: { x: 0, y: 0 } }, to: { kind: 'node', index: 0, nudge: { x: 0, y: 0 } }, shift: false },
+  ]],
 ];
 const TOOL_PARITY_REGRESSIONS: [SessionAction[], TargetPick, Tool][] = [
   // The node and region tools drew a new node or region over a stroke instead of dragging it.
@@ -303,6 +318,7 @@ describe('a random session', () => {
             const depthBefore = editor.core.session.undoDepth;
             const selectionBefore = selectionOf(editor, SESSION_FLOW_PATH);
             const graphBefore = graphOnScreen(editor);
+            const regionFramesBefore = regionFramesOnScreen(editor);
             const trace = await performAction(editor, action);
             const after = editor.workspace.snapshot();
             const stepsAdded = editor.core.session.undoDepth - depthBefore;
@@ -317,6 +333,7 @@ describe('a random session', () => {
               selectionBefore,
               selectionAfter: selectionOf(editor, SESSION_FLOW_PATH),
               graphBefore,
+              regionFramesBefore,
               stepsAdded,
             };
             const violations = [

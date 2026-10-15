@@ -13,6 +13,7 @@ import { isDrawableText, textDrawingOf, type TextDrawing } from '../src/shared/c
 import { imageDrawingOf, type ImageDrawing } from '../src/shared/canvas-image.js';
 import { axesOf, isResizeEdge, type ResizeEdge } from '../src/client/canvas/resize-handles.js';
 import { boundsOfRects, rectContainsRect } from '../src/shared/rect-math.js';
+import { arrangeGraphScope } from '../src/shared/document-layout.js';
 import { STROKE_KIND, drawingBounds, strokeBounds, strokePointBounds, strokePointsOf, type Stroke } from '../src/shared/canvas-drawings.js';
 import type { HeadlessEditor } from './editor-harness.js';
 import { isHistoryAction, type ActionTrace, type SessionAction } from './session-actions.js';
@@ -44,6 +45,9 @@ export interface SessionStep {
   // What was selected, as `kind:identity` entries; a group of drawings counts once.
   selectionBefore: ReadonlySet<string>;
   selectionAfter: ReadonlySet<string>;
+  // Each region's frame as the canvas drew it before the step, by name. An unfolded subgraph moves
+  // the nodes around it on screen and so the frames drawn around them, which the file never sees.
+  regionFramesBefore: ReadonlyMap<string, Rect>;
   // Which graph was on screen before the step — a dive or a step back changes it, and a selection
   // never survives into another graph.
   graphBefore: string;
@@ -114,6 +118,14 @@ function drawingIdsOfGroup(group: unknown): string[] {
 
 // The selection as entries a test can compare across steps: every node, region and edge on its own,
 // and a group of drawings as the one thing it is.
+export function regionFramesOnScreen(editor: HeadlessEditor): Map<string, Rect> {
+  const { model } = editor.core.view;
+  return new Map(model.contexts.flatMap((context) => {
+    const frame = regionRectOf(model, context);
+    return frame ? [[context.block.name, frame] as const] : [];
+  }));
+}
+
 export function selectionOf(editor: HeadlessEditor, flowPath: string): Set<string> {
   const { view } = editor.core;
   const groups = parseCanvasLayer(editor.workspace.file(canvasLayerPathOf(flowPath))).groups.map(drawingIdsOfGroup);
@@ -148,6 +160,7 @@ export function expectationViolations(step: SessionStep): Violation[] {
     ...abandonedDragThatWrote(step),
     ...selectAllThatMissedSomething(step),
     ...fitThatLeftSomethingOut(step),
+    ...arrangeThatLeftItUntidy(step, was, now),
     ...newNodesInTheWrongRegions(step, was, now),
     ...newTextNotAsTyped(step, was, now),
     ...editedTextNotAsTyped(step),
@@ -207,7 +220,8 @@ function draggedThingsOffThePointer(step: SessionStep, was: GraphState, now: Gra
     .flatMap(({ what, delta }) => violation('a dragged thing follows the pointer', `${what} moved ${Math.round(delta.x)},${Math.round(delta.y)} for a pointer move of ${Math.round(pointer.x)},${Math.round(pointer.y)}`));
 }
 
-// R28b: a dragged region takes along the drawings lying wholly inside its frame, a group only whole.
+// R28b: a dragged region takes along the drawings lying wholly inside its frame — the frame the user
+// saw when the drag began — a group only whole.
 function regionDragThatLeftDrawings(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
   const isDrag = step.action.type === 'drag' || step.action.type === 'nudge';
   if (!isDrag || createdAnything(was, now) || reshapedAnything(was, now)) return [];
@@ -216,7 +230,7 @@ function regionDragThatLeftDrawings(step: SessionStep, was: GraphState, now: Gra
     if (!entry.startsWith('region:')) continue;
     const name = entry.slice('region:'.length);
     const delta = regionTravel(name, was, now);
-    const frame = was.regions.get(name)?.frame;
+    const frame = step.regionFramesBefore.get(name);
     if (!delta || !frame || (delta.x === 0 && delta.y === 0)) continue;
     for (const id of [...was.strokes.keys(), ...was.boxes.keys()]) {
       if (!drawingAndGroupInside(id, frame, was)) continue;
@@ -397,6 +411,38 @@ function selectAllThatMissedSomething(step: SessionStep): Violation[] {
       .map((laidOut) => `drawing ${laidOut.id}`),
   ];
   return missing.length === 0 ? [] : violation('select all selects everything', `left out ${missing.join(', ')}`);
+}
+
+// Arrange tidies the graph on screen: arranging it whole leaves nothing for a second arrange to do,
+// and the nodes it was given to arrange land clear of every other node.
+function arrangeThatLeftItUntidy(step: SessionStep, was: GraphState, now: GraphState): Violation[] {
+  if (step.action.type !== 'command' || step.action.command !== 'arrange') return [];
+  if (step.graphBefore !== `${step.flowPath} `) return [];
+  const chosen = [...step.selectionBefore]
+    .filter((entry) => entry.startsWith('node:'))
+    .map((entry) => entry.slice('node:'.length))
+    .filter((id) => was.topNodes.has(id));
+  if (step.selectionBefore.size > 0 && chosen.length === 0) return [];
+
+  const wholeGraph = chosen.length === 0 || chosen.length === was.topNodes.size;
+  if (wholeGraph) {
+    const doc = parseFlow(step.after.get(step.flowPath) ?? '');
+    if (arrangeGraphScope(doc.items)) return violation('arrange tidies the graph', 'arranging the arranged graph again moved something');
+    return [];
+  }
+  const crowded = chosen.flatMap((id) => {
+    const placed = now.topNodes.get(id)?.pos;
+    if (!placed) return [];
+    return [...now.topNodes]
+      .filter(([otherId, other]) => otherId !== id && other.pos && rectsOverlap(placed, other.pos))
+      .map(([, other]) => `${now.topNodes.get(id)!.name} overlaps ${other.name}`);
+  });
+  return crowded.length === 0 ? [] : violation('arrange tidies the graph', crowded.join('; '));
+}
+
+function rectsOverlap(first: Rect, second: Rect): boolean {
+  return first.x < second.x + second.w && second.x < first.x + first.w
+    && first.y < second.y + second.h && second.y < first.y + first.h;
 }
 
 function fitThatLeftSomethingOut(step: SessionStep): Violation[] {

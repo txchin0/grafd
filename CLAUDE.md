@@ -148,7 +148,12 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   them, in the direction the placed graph already flows; a block whose spot is taken slides across
   the flow to the nearest one clear of nodes that keeps non-members out of regions and regions out
   of each other, giving up looks before honesty. Region members are placed first; new nodes joined
-  to nothing placed go below everything.
+  to nothing placed go below everything. `document-layout.ts` applies all of this to a parsed
+  document — reading a graph scope as a `LayoutScope` (`layoutScopeOfItems`, the one reader the
+  canvas, Arrange and `grafd layout` share), filling missing positions, and arranging a scope
+  afresh (`arrangeScope`: flowing the way it already does, from its old top-left corner, releasing
+  the areas its regions reserved) or only some of its nodes around the rest (`arrangeSelected`).
+  Arranging an arranged scope changes nothing. `src/tools/flow-layout.ts` is `grafd layout`.
 - `scripts/build-site.mjs` — assembles the static `site/` build (`npm run build:site`).
 - `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building

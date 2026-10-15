@@ -175,6 +175,19 @@ describe('runCli', () => {
     expect(await runCli(['lint'])).toBe(1);
   });
 
+  it('runs layout in the current directory when it contains a manifest', async () => {
+    const directory = await makeTempDirectory();
+    await writeFile(
+      path.join(directory, MANIFEST_FILE_NAME),
+      serializeManifest({ ...emptyManifest(), entrypoint: 'main.flow' }),
+    );
+    await writeFile(path.join(directory, 'main.flow'), '---\nname: Fresh\n---\n\nStart\n  -> Finish\n\nFinish\n');
+    process.chdir(directory);
+    expect(await runCli(['layout'])).toBe(0);
+    expect(await readFile(path.join(directory, 'main.flow'), 'utf8')).toContain('pos: ');
+    expect(await runCli(['layout', '--sideways'])).toBe(2);
+  });
+
   it('exits 1 when start has no workspace to serve', async () => {
     const empty = await makeTempDirectory();
     process.chdir(empty);
