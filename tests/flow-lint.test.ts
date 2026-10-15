@@ -385,18 +385,17 @@ B
 
   // The canvas auto-lays out a node with no `pos` before painting, so the linter places it the
   // same way instead of skipping it.
-  it('places a node without pos on the auto-layout grid before judging it', () => {
+  it('places a node without pos where the canvas would before judging it', () => {
     const text = `---
 name: T
 ---
 
 context: Cart
-  pos: 0, 0, 400, 400
+  pos: 0, 0, 1200, 1200
   nodes:
     - A
 
 A
-  pos: 40, 40, 200, 88
 
 B
 `;

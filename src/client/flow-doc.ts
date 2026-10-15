@@ -641,7 +641,7 @@ export function layoutScopeOf(nodes: FlowNode[], edges: ModelEdge[], contexts: M
       entrypoint: getProp(node, 'entrypoint') === 'true',
     })),
     edges: edges.map((edge) => ({ from: indexOf.get(edge.from)!, target: edge.spec.target, kind: edge.kind })),
-    regions: contexts.map((context) => ({ members: context.block.members })),
+    regions: contexts.map((context) => ({ members: context.block.members, pos: context.block.pos })),
   };
 }
 

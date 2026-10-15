@@ -143,7 +143,12 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   it is not a member of. Node sizes come from `node-size-estimate.ts`, which estimates text width
   per character (the linter has no canvas to measure with) and wraps through
   `node-text-metrics.ts`, the same wrap the painter uses. Nodes added to an already laid-out scope
-  still go on the old grid below it.
+  are placed by `anchored-placement.ts` and nothing placed ever moves: new nodes joined to one
+  another come as one layered block, in the column after the placed nodes they follow, level with
+  them, in the direction the placed graph already flows; a block whose spot is taken slides across
+  the flow to the nearest one clear of nodes that keeps non-members out of regions and regions out
+  of each other, giving up looks before honesty. Region members are placed first; new nodes joined
+  to nothing placed go below everything.
 - `scripts/build-site.mjs` — assembles the static `site/` build (`npm run build:site`).
 - `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building

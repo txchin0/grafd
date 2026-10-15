@@ -1,32 +1,15 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { buildModel } from '../src/client/flow-doc.js';
-import { placeNodes, type LayoutScope } from '../src/shared/auto-layout.js';
 import { countCrossingPairs } from '../src/shared/edge-crossings.js';
 import { parseFlow, type Rect } from '../src/shared/flow-format.js';
 import { closestOrderedPlacement } from '../src/shared/layered-coordinates.js';
 import { layOutLayered, type LayeredGraph } from '../src/shared/layered-layout.js';
-import { layoutScopeOfScanned } from '../src/shared/flow-lint-semantics.js';
-import { rootScope, scanFlow } from '../src/shared/flow-scan.js';
 import { estimateNodeSize, NODE_WIDTH_STEPS } from '../src/shared/node-size-estimate.js';
 import { CANVAS_SNAP, rectCenter, rectContainsRect, regionRectFrom } from '../src/shared/rect-math.js';
+import { arbitraryGraph, overlaps, rectsByName } from './layout-fixtures.js';
 
 const ORIGIN = { x: 80, y: 80 };
-
-function scopeFrom(text: string): LayoutScope {
-  return layoutScopeOfScanned(rootScope(scanFlow(text))!);
-}
-
-function rectsByName(text: string): Map<string, Rect> {
-  const scope = scopeFrom(text);
-  const rects = placeNodes(scope);
-  return new Map(scope.nodes.map((node, index) => [node.name, rects[index]]));
-}
-
-function overlaps(first: Rect, second: Rect): boolean {
-  return first.x < second.x + second.w && second.x < first.x + first.w
-    && first.y < second.y + second.h && second.y < first.y + first.h;
-}
 
 function crossingsOf(graph: LayeredGraph, rects: Rect[]): number {
   return countCrossingPairs(graph.edges.map((edge) => ({
@@ -34,36 +17,6 @@ function crossingsOf(graph: LayeredGraph, rects: Rect[]): number {
     to: rectCenter(rects[edge.to]),
   })));
 }
-
-const WORDS = ['load', 'the', 'session', 'validate', 'payment', 'retry', 'user', 'checkout', 'token', 'refresh'];
-
-const arbitraryGraph: fc.Arbitrary<LayeredGraph> = fc
-  .integer({ min: 1, max: 14 })
-  .chain((nodeCount) => fc.record({
-    nodes: fc.array(
-      fc.record({
-        title: fc.array(fc.constantFrom(...WORDS), { minLength: 1, maxLength: 6 }).map((words) => words.join(' ')),
-        description: fc.option(fc.array(fc.constantFrom(...WORDS), { minLength: 1, maxLength: 30 }).map((words) => words.join(' '))),
-        entrypoint: fc.boolean(),
-      }),
-      { minLength: nodeCount, maxLength: nodeCount },
-    ),
-    edges: fc.array(
-      fc.record({
-        from: fc.integer({ min: 0, max: nodeCount - 1 }),
-        to: fc.integer({ min: 0, max: nodeCount - 1 }),
-        kind: fc.constantFrom('flow' as const, 'flow' as const, 'error' as const),
-      }),
-      { maxLength: nodeCount * 2 },
-    ),
-    // Each node in at most one of three regions, or none.
-    membership: fc.array(fc.integer({ min: -1, max: 2 }), { minLength: nodeCount, maxLength: nodeCount }),
-  }))
-  .map(({ nodes, edges, membership }) => ({
-    nodes,
-    edges,
-    regions: [0, 1, 2].map((region) => [...membership.keys()].filter((node) => membership[node] === region)),
-  }));
 
 describe('layOutLayered on any graph', () => {
   it('places every node without overlap, on the snap lattice, the same way every time', () => {
@@ -211,7 +164,6 @@ describe('placeNodes', () => {
   it('keeps every authored position', () => {
     const rects = rectsByName('A\n  pos: 400, 400, 200, 88\n  -> B\n\nB\n');
     expect(rects.get('A')).toEqual({ x: 400, y: 400, w: 200, h: 88 });
-    expect(rects.get('B')!.y).toBeGreaterThan(400 + 88);
   });
 
   it('places nodes where the canvas does, read from the file the way the linter reads it', () => {

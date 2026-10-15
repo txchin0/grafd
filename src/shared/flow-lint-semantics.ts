@@ -413,7 +413,7 @@ export function layoutScopeOfScanned(scope: ScannedScope): LayoutScope {
       ...node.edges.map((edge) => ({ from: index, target: edge.spec.target, kind: 'flow' as const })),
       ...errorEdgeTargetsOf(node).map((target) => ({ from: index, target, kind: 'error' as const })),
     ]),
-    regions: scope.contexts.map((block) => ({ members: block.members.map((member) => member.name) })),
+    regions: scope.contexts.map((block) => ({ members: block.members.map((member) => member.name), pos: posOf(block) })),
   };
 }
 
@@ -422,8 +422,8 @@ function errorEdgeTargetsOf(node: ScannedNode): string[] {
   return onError && onError.value.startsWith('->') ? [parseEdgeExpression(onError.value).target] : [];
 }
 
-function posOf(node: ScannedNode): Rect | null {
-  const property = findProperty(node, 'pos');
+function posOf(holder: { properties: ScannedProperty[] }): Rect | null {
+  const property = findProperty(holder, 'pos');
   return property ? parsePos(property.value) : null;
 }
 

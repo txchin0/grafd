@@ -132,7 +132,7 @@ C
     expect(c.pos).toEqual({ x: 80 + 2 * (160 + RANK_GAP), y: 80, w: 160, h: 88 });
   });
 
-  it('places new nodes below existing placed content', () => {
+  it('places new nodes joined to nothing placed below existing placed content, on the snap lattice', () => {
     const doc = docFrom(`A
   ${PLACED(0, 0)}
 
@@ -140,7 +140,8 @@ B
 `);
     buildModel(doc, null);
     const b = allNodes(doc)[1];
-    expect(b.pos!.y).toBe(88 + 90);
+    expect(b.pos!.y).toBeGreaterThan(88);
+    expect(b.pos!.y % 8).toBe(0);
   });
 });
 
