@@ -128,6 +128,36 @@ export function resolveCanvasPalette(style: CSSStyleDeclaration): CanvasPalette 
   return resolved;
 }
 
+// The custom properties one theme sets, read from themes.css text the way the browser would apply
+// them: every block the bare `:root` selects first, then the theme's own block over it. For a
+// renderer with no page to compute styles on.
+export function themeTokensFromCss(cssText: string, themeId: ThemeId): Map<string, string> {
+  const tokens = new Map<string, string>();
+  const blocks = [...cssText.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .map(([, selectors, body]) => ({ selectors: selectors.split(',').map((selector) => selector.trim()), body }));
+  const themeSelector = `:root[data-theme="${themeId}"]`;
+  for (const selector of [':root', themeSelector]) {
+    for (const block of blocks.filter((candidate) => candidate.selectors.includes(selector))) {
+      for (const declaration of block.body.split(';')) {
+        const separator = declaration.indexOf(':');
+        if (separator < 0) continue;
+        const name = declaration.slice(0, separator).trim();
+        if (name.startsWith('--')) tokens.set(name, declaration.slice(separator + 1).trim());
+      }
+    }
+  }
+  return tokens;
+}
+
+export function canvasPaletteFromTokens(tokens: ReadonlyMap<string, string>): CanvasPalette {
+  return resolveCanvasPalette({ getPropertyValue: (name: string) => tokens.get(name) ?? '' } as CSSStyleDeclaration);
+}
+
+// Makes the canvas draw in this palette, as applyTheme does from the page's own styles.
+export function useCanvasPalette(palette: CanvasPalette): void {
+  Object.assign(canvasPalette, palette);
+}
+
 function readColorToken(style: CSSStyleDeclaration, token: string, fallback: string): string {
   return style.getPropertyValue(token).trim() || fallback;
 }
@@ -138,7 +168,7 @@ export const canvasPalette: CanvasPalette = { ...DEFAULT_CANVAS_PALETTE };
 
 export function applyTheme(id: ThemeId): void {
   document.documentElement.dataset.theme = id;
-  Object.assign(canvasPalette, resolveCanvasPalette(rootStyle()));
+  useCanvasPalette(resolveCanvasPalette(rootStyle()));
 }
 
 // What a canvas-layer colour draws as in the current theme: a slot through the palette, a hex

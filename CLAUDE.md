@@ -267,6 +267,14 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
     calculation: the world point under the fingers' midpoint when they landed is held under
     their current midpoint. Scale limits are passed in, so the view stays the only place that
     decides how far it may zoom.
+  - `scene-snapshot.ts` — a whole model drawn onto a canvas of its own, framed to its content as
+    Export image frames it, through the same scene painter: what `grafd render`
+    (`src/tools/flow-render.ts`) draws, with no view, camera or page. The render tool reads the
+    theme's colours from themes.css text (`themeTokensFromCss`), the workspace's font and
+    roughness from the manifest, registers the bundled Playpen Sans (standing in for the system
+    hand fonts where a server has none) and draws through `@napi-rs/canvas`. The canvas font
+    stacks name symbol fonts after the hand fonts, since a server-side canvas, unlike a browser,
+    only falls back through the families it is given.
 - `src/client/canvas/edge-path.ts` — the shape of a drawn edge. `EdgeGeometry` carries the points the
   spline passes through plus that spline flattened to a polyline, and every consumer (hit
   testing, label anchor, edit-popup anchor, arrowhead tangent) measures against the polyline
@@ -395,7 +403,9 @@ the fix closes one bug, the rule closes its whole class.
 
 The browser runs the compiled output as native ES modules — client code imports shared code
 relatively (`../shared/flow-format.js`), which resolves identically inside `dist/` and as
-URLs. No frameworks and no graph libraries — rough.js is the only rendering dependency.
+URLs. No frameworks and no graph libraries — rough.js is the only rendering dependency. The one
+exception is `grafd render`, which draws through `@napi-rs/canvas` in place of a browser's canvas;
+it is an optional dependency, so a platform it cannot install on loses only that command.
 
 ## Code style — self-documenting code (required)
 

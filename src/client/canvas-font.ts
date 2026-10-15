@@ -13,9 +13,14 @@ import {
 const TITLE_LOAD_PX = 15;
 const DESCRIPTION_LOAD_PX = 12.5;
 
+// The canvas draws a few symbols the hand fonts lack (the badges' ⤢ ⊞ ⊟, ▶, ⚠, ↺). A browser finds
+// them in some system font of its own accord; a server-side canvas (`grafd render`) only looks
+// through the families it is given, so these name a symbol font on each platform.
+const SYMBOL_FALLBACKS = '"Segoe UI Symbol", "Apple Symbols", "Noto Sans Symbols 2", "DejaVu Sans"';
+
 const FAMILY_STACKS = {
-  system: '"Segoe Print", "Comic Sans MS", cursive',
-  playpen: '"Playpen Sans", cursive',
+  system: `"Segoe Print", "Comic Sans MS", ${SYMBOL_FALLBACKS}, cursive`,
+  playpen: `"Playpen Sans", ${SYMBOL_FALLBACKS}, cursive`,
 } as const satisfies Record<CanvasFontId, string>;
 
 const WEB_FONT_IDS = new Set<CanvasFontId>(['playpen']);
@@ -38,6 +43,14 @@ export function handFontFamily(): string {
   return activeFamilyStack;
 }
 
+// Draws the canvas in a family without loading it, for a renderer that has registered its fonts
+// itself (`grafd render`). Returns the family chosen: an unknown id falls back to the default.
+export function selectCanvasFont(id: CanvasFontId): CanvasFontId {
+  const fontId = isCanvasFontId(id) ? id : DEFAULT_CANVAS_FONT;
+  activeFamilyStack = FAMILY_STACKS[fontId];
+  return fontId;
+}
+
 async function ensureWebFontLoaded(family: string): Promise<void> {
   await Promise.all([
     document.fonts.load(`600 ${TITLE_LOAD_PX}px ${family}`),
@@ -46,8 +59,7 @@ async function ensureWebFontLoaded(family: string): Promise<void> {
 }
 
 export async function applyCanvasFont(id: CanvasFontId): Promise<void> {
-  const fontId = isCanvasFontId(id) ? id : DEFAULT_CANVAS_FONT;
-  activeFamilyStack = FAMILY_STACKS[fontId];
+  const fontId = selectCanvasFont(id);
   if (!WEB_FONT_IDS.has(fontId)) return;
   try {
     await ensureWebFontLoaded(activeFamilyStack);

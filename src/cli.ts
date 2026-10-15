@@ -6,6 +6,7 @@ import { DEFAULT_HOST, DEFAULT_PORT, startServer } from './server/server.js';
 import { emptyManifest, MANIFEST_FILE_NAME, serializeManifest } from './shared/manifest.js';
 import { runFlowLayout } from './tools/flow-layout.js';
 import { runFlowLint } from './tools/flow-lint.js';
+import { runFlowRender } from './tools/flow-render.js';
 import { runFlowScore } from './tools/flow-score.js';
 
 const require = createRequire(import.meta.url);
@@ -316,6 +317,8 @@ export async function runCli(argv: string[]): Promise<number> {
       return runLayout(argv.slice(1));
     case 'score':
       return runScore(argv.slice(1));
+    case 'render':
+      return runFlowRender(argv.slice(1));
     default:
       console.error(`Unknown command: ${argv[0]}`);
       printGlobalHelp();
@@ -332,6 +335,7 @@ Commands:
   lint       Lint .flow workspaces
   layout     Place nodes that have no position, or lay every graph out afresh with --all
   score      Score how readable each graph is, with the fix for everything that costs it points
+  render     Draw a graph to a PNG as the editor shows it
 
 Run 'grafd <command> --help' for command options.`);
 }
