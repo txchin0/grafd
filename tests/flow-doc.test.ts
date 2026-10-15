@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { REGION_MEMBER_PADDING } from '../src/shared/rect-math.js';
 import { DEFAULT_NODE_SIZE } from '../src/shared/auto-layout.js';
+import { RANK_GAP } from '../src/shared/layered-layout.js';
 import {
   emptyNode,
   getPreambleField,
@@ -115,7 +116,7 @@ H
 });
 
 describe('autoLayout (via buildModel)', () => {
-  it('lays out unplaced nodes in flow-depth columns', () => {
+  it('lays out a graph with no positions in flow-depth columns', () => {
     const doc = docFrom(`A
   -> B
 
@@ -126,9 +127,9 @@ C
 `);
     const model = buildModel(doc, null);
     const [a, b, c] = model.nodes;
-    expect(a.pos).toEqual({ x: 80, y: 80, w: 200, h: 88 });
-    expect(b.pos).toEqual({ x: 360, y: 80, w: 200, h: 88 });
-    expect(c.pos).toEqual({ x: 640, y: 80, w: 200, h: 88 });
+    expect(a.pos).toEqual({ x: 80, y: 80, w: 160, h: 88 });
+    expect(b.pos).toEqual({ x: 80 + 160 + RANK_GAP, y: 80, w: 160, h: 88 });
+    expect(c.pos).toEqual({ x: 80 + 2 * (160 + RANK_GAP), y: 80, w: 160, h: 88 });
   });
 
   it('places new nodes below existing placed content', () => {

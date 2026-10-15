@@ -7,15 +7,20 @@
 
 import type { NodeTextSize } from '../../shared/canvas-layer.js';
 import type { FlowNode, Rect } from '../../shared/flow-format.js';
+import {
+  DESCRIPTION_FONT_PX,
+  DESCRIPTION_LINE_HEIGHT,
+  DESCRIPTION_MAX_LINES,
+  NODE_TEXT_SIDE_PADDING,
+  TITLE_DESCRIPTION_GAP,
+  TITLE_FONT_PX,
+  TITLE_LINE_HEIGHT,
+  TITLE_MAX_LINES,
+  wrapTextLines,
+} from '../../shared/node-text-metrics.js';
 import { handFontFamily } from '../canvas-font.js';
 
-export const NODE_TEXT_SIDE_PADDING = 13;
-// The medium text size; every other size scales all of these together.
-export const TITLE_FONT_PX = 15;
-export const TITLE_LINE_HEIGHT = 20;
-const DESCRIPTION_FONT_PX = 12.5;
-const DESCRIPTION_LINE_HEIGHT = 16;
-const TITLE_DESCRIPTION_GAP = 6;
+// The medium text size (node-text-metrics.ts) is scaled as a whole for every other size.
 // Both text runs are drawn on a middle baseline, so the first description line sits a little
 // tighter under the title than the block-height gap suggests.
 const DESCRIPTION_FIRST_LINE_NUDGE = 4;
@@ -35,8 +40,6 @@ export const FRAME_TITLE_MIDDLE_Y = 16;
 export const FRAME_TITLE_RIGHT_INSET = 64;
 export const REGION_LABEL_RIGHT_INSET = 16;
 
-const TITLE_MAX_LINES = 2;
-const DESCRIPTION_MAX_LINES = 4;
 const FRAME_TITLE_HIT_PADDING = 6;
 
 // A node's text metrics at one text size.
@@ -88,25 +91,7 @@ export interface NodeTextLayout {
 
 // Measures against `ctx`'s current font, so callers set the font for the run being wrapped.
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number): string[] {
-  if (maxLines <= 0) return [];
-  const words = text.split(' ');
-  const lines: string[] = [];
-  let current = '';
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
-    if (ctx.measureText(candidate).width <= maxWidth || !current) {
-      current = candidate;
-    } else {
-      lines.push(current);
-      current = word;
-      if (lines.length === maxLines) break;
-    }
-  }
-  if (lines.length < maxLines && current) lines.push(current);
-  if (lines.length === maxLines && words.join(' ') !== lines.join(' ')) {
-    lines[maxLines - 1] = lines[maxLines - 1].replace(/\s*\S*$/, '…');
-  }
-  return lines;
+  return wrapTextLines(text, maxWidth, maxLines, (run) => ctx.measureText(run).width);
 }
 
 // Leaves ctx.font set to the description font.

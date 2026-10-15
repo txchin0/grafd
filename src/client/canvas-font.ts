@@ -9,7 +9,7 @@ import {
   type CanvasFontId,
 } from '../shared/manifest.js';
 
-// Match TITLE_FONT_PX / DESCRIPTION_FONT_PX in node-metrics.ts — preload faces used for layout.
+// Match TITLE_FONT_PX / DESCRIPTION_FONT_PX in shared/node-text-metrics.ts — preload faces used for layout.
 const TITLE_LOAD_PX = 15;
 const DESCRIPTION_LOAD_PX = 12.5;
 

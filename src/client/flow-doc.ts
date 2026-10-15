@@ -20,6 +20,7 @@ import {
   sanitizeDataKey,
   sanitizeName,
   uniqueName,
+  unquote,
   writeDescriptionForNode,
   writeReferencesForNode,
   type EdgeDataField,
@@ -39,7 +40,7 @@ import type { RegionStyle } from '../shared/canvas-region-style.js';
 import { drawingBounds, type CanvasDrawing } from '../shared/canvas-drawings.js';
 import type { DisplayGeometry } from './canvas/expansion.js';
 import type { Point } from './geometry.js';
-import { DEFAULT_NODE_SIZE, autoLayout } from '../shared/auto-layout.js';
+import { DEFAULT_NODE_SIZE, placeNodes, type LayoutScope } from '../shared/auto-layout.js';
 import { rectContainsRect, regionRectFrom } from '../shared/rect-math.js';
 
 export interface GhostNode {
@@ -606,10 +607,13 @@ export function buildModel(doc: FlowDocument, scopeName: string | null): FlowMod
     }
   }
 
-  autoLayout(nodes, edges);
+  const contexts = modelContextsOf(scopeItems(doc, scopeName), nodesByName);
+  const placements = placeNodes(layoutScopeOf(nodes, edges, contexts));
+  nodes.forEach((node, index) => {
+    node.pos ??= placements[index];
+  });
 
   const ghosts = resolveEdgeTargets(edges, nodesByName);
-  const contexts = modelContextsOf(scopeItems(doc, scopeName), nodesByName);
   const traits = inferTraits(doc, nodes, edges, contexts);
   return {
     nodes,
@@ -621,6 +625,23 @@ export function buildModel(doc: FlowDocument, scopeName: string | null): FlowMod
     sourceDoc: doc,
     sourcePath: null,
     sourceScope: scopeName,
+  };
+}
+
+// The linter builds the same scope from its own scan of the file (flow-lint-semantics.ts
+// layoutScopeOfScanned), and the two must read every field identically or the linter judges a
+// layout the canvas never draws.
+export function layoutScopeOf(nodes: FlowNode[], edges: ModelEdge[], contexts: ModelContext[]): LayoutScope {
+  const indexOf = new Map(nodes.map((node, index) => [node, index]));
+  return {
+    nodes: nodes.map((node) => ({
+      name: node.name,
+      pos: node.pos,
+      description: unquote(getProp(node, 'description')) || null,
+      entrypoint: getProp(node, 'entrypoint') === 'true',
+    })),
+    edges: edges.map((edge) => ({ from: indexOf.get(edge.from)!, target: edge.spec.target, kind: edge.kind })),
+    regions: contexts.map((context) => ({ members: context.block.members })),
   };
 }
 

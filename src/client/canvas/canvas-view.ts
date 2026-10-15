@@ -61,7 +61,7 @@ import {
   rectsIntersect,
   type Point,
 } from '../geometry.js';
-import { boundsOfRects, padRect, rectContainsRect } from '../../shared/rect-math.js';
+import { boundsOfRects, padRect, rectContainsRect, snapToCanvasGrid } from '../../shared/rect-math.js';
 import { distanceToEdgePath, type EdgeGeometry } from './edge-path.js';
 import { drawnShapeOf, edgePathBounds, type EdgeBendOverrides, type EdgeGeometryMap } from './edge-layout.js';
 import {
@@ -532,7 +532,6 @@ const DRAG_THRESHOLD_PX = 4;
 // Below this the drawn rectangle reads as a stray click rather than a deliberate node.
 const CREATE_MIN_SCREEN_WIDTH = 14;
 const CREATE_MIN_SCREEN_HEIGHT = 10;
-const SNAP = 8;
 const PORT_RADIUS = 5;
 const PORT_HIT_RADIUS = 14;
 // Wider than the drawn stroke because rough.js jitters the ink a few pixels off the ideal curve.
@@ -596,11 +595,6 @@ function centerBoundsAt(bounds: Rect, viewport: ViewportSize, scale: number): Vi
 function fitScaleFor(bounds: Rect, viewport: ViewportSize): number {
   return Math.min(viewport.width / bounds.w, viewport.height / bounds.h);
 }
-
-function snap(value: number): number {
-  return Math.round(value / SNAP) * SNAP;
-}
-
 
 export class CanvasView {
   private readonly canvas: HTMLCanvasElement;
@@ -1689,7 +1683,7 @@ export class CanvasView {
       this.actions.viewChanged?.();
     } else if (gesture.type === 'move') {
       if (!hasBecomeDrag(gesture, screen)) return;
-      this.moveCarriedDrawings(gesture, applyCombinedMove(gesture, world, snap, moveReferenceOf(gesture.pressed)));
+      this.moveCarriedDrawings(gesture, applyCombinedMove(gesture, world, snapToCanvasGrid, moveReferenceOf(gesture.pressed)));
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'resize') {
@@ -1699,7 +1693,7 @@ export class CanvasView {
       this.actions.viewChanged?.();
     } else if (gesture.type === 'region-resize') {
       if (!hasBecomeDrag(gesture, screen)) return;
-      applyRegionResize(gesture, world, snap);
+      applyRegionResize(gesture, world, snapToCanvasGrid);
       this.requestRender();
       this.actions.viewChanged?.();
     } else if (gesture.type === 'edge') {
@@ -1740,15 +1734,15 @@ export class CanvasView {
     const rect = gesture.node.pos!;
     const axes = axesOf(gesture.handle);
 
-    if (axes.x === 1) rect.w = Math.max(MIN_NODE_WIDTH, snap(start.w + dx));
-    if (axes.y === 1) rect.h = Math.max(MIN_NODE_HEIGHT, snap(start.h + dy));
+    if (axes.x === 1) rect.w = Math.max(MIN_NODE_WIDTH, snapToCanvasGrid(start.w + dx));
+    if (axes.y === 1) rect.h = Math.max(MIN_NODE_HEIGHT, snapToCanvasGrid(start.h + dy));
     if (axes.x === -1) {
-      const width = Math.max(MIN_NODE_WIDTH, snap(start.w - dx));
+      const width = Math.max(MIN_NODE_WIDTH, snapToCanvasGrid(start.w - dx));
       rect.x = start.x + start.w - width;
       rect.w = width;
     }
     if (axes.y === -1) {
-      const height = Math.max(MIN_NODE_HEIGHT, snap(start.h - dy));
+      const height = Math.max(MIN_NODE_HEIGHT, snapToCanvasGrid(start.h - dy));
       rect.y = start.y + start.h - height;
       rect.h = height;
     }
@@ -1997,10 +1991,10 @@ export class CanvasView {
 
   private snapCreateRect(rect: Rect): Rect {
     return {
-      x: snap(rect.x),
-      y: snap(rect.y),
-      w: Math.max(MIN_NODE_WIDTH, snap(rect.w)),
-      h: Math.max(MIN_NODE_HEIGHT, snap(rect.h)),
+      x: snapToCanvasGrid(rect.x),
+      y: snapToCanvasGrid(rect.y),
+      w: Math.max(MIN_NODE_WIDTH, snapToCanvasGrid(rect.w)),
+      h: Math.max(MIN_NODE_HEIGHT, snapToCanvasGrid(rect.h)),
     };
   }
 

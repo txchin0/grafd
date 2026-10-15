@@ -130,6 +130,20 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   `flow-lint-semantics.ts` (name resolution, behind an `ExpansionLookup` seam),
   `flow-lint.ts` (single file) and `flow-lint-workspace.ts` (cross-file: expand links,
   cycles, reachability) build on it; `src/tools/flow-lint.ts` is the CLI.
+- `src/shared/auto-layout.ts` — where a node with no `pos` stands: `placeNodes` takes a
+  `LayoutScope` that the canvas (`flow-doc.ts` `layoutScopeOf`) and the linter
+  (`layoutScopeOfScanned`) each build from their own reading of the file, and the two must read
+  it identically — a test holds them to placing every node alike. A scope with no positions at
+  all is laid out whole by `layered-layout.ts`: ranks with cycles broken in file order and spans
+  kept short (`layered-ranking.ts`), crossings reduced rank by rank with a virtual item wherever a
+  long edge passes (`layered-ordering.ts`), then positions across the ranks (`layered-coordinates.ts`):
+  the edges on every longest path run straight, a fork with matching branches stays symmetric,
+  and a long edge's lane lies on the straight line the canvas draws it along. Each region's
+  members form a band laid out on its own, bands stacked apart, so no node lands inside a region
+  it is not a member of. Node sizes come from `node-size-estimate.ts`, which estimates text width
+  per character (the linter has no canvas to measure with) and wraps through
+  `node-text-metrics.ts`, the same wrap the painter uses. Nodes added to an already laid-out scope
+  still go on the old grid below it.
 - `scripts/build-site.mjs` — assembles the static `site/` build (`npm run build:site`).
 - `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building

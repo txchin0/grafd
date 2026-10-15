@@ -8,9 +8,9 @@
 // as `unknown` and stays quiet about them; the workspace pass answers them for real.
 
 import { error, warning, type Diagnostic } from './flow-diagnostics.js';
-import { isLegalNodeName, parseEdgeExpression, parseExpandLink, parseListValue, parsePos, type Rect } from './flow-format.js';
+import { isLegalNodeName, parseEdgeExpression, parseExpandLink, parseListValue, parsePos, unquote, type Rect } from './flow-format.js';
 import { parseReferenceLineRange } from './reference-target.js';
-import { autoLayout, type LayoutEdge, type LayoutNode } from './auto-layout.js';
+import { placeNodes, type LayoutScope } from './auto-layout.js';
 import { countCrossingPairs, type CrossingSegment } from './edge-crossings.js';
 import { rectCenter, rectContainsRect, regionRectFrom } from './rect-math.js';
 import type {
@@ -393,19 +393,33 @@ function reportUnassignedRegionMembers(
 }
 
 // The canvas places every node in a scope before painting (flow-doc.ts buildModel): an authored
-// `pos` where the file has one, the auto-layout grid where it does not. Recomputing that here
-// keeps the region check honest for files the editor has not touched yet.
+// `pos` where the file has one, the auto-layout where it does not. Recomputing that here keeps the
+// region check honest for files the editor has not touched yet.
 function placedRectsForScope(scope: ScannedScope): Map<ScannedNode, Rect> {
-  const nodes: LayoutNode[] = scope.nodes.map((node) => ({
-    name: node.name,
-    pos: posOf(node),
-  }));
-  const nodesByName = new Map(nodes.map((node) => [node.name, node]));
-  const edges: LayoutEdge[] = scope.nodes.flatMap((node) =>
-    node.edges.map((edge) => ({ from: nodesByName.get(node.name)!, spec: edge.spec, kind: 'flow' })),
-  );
-  autoLayout(nodes, edges);
-  return new Map(scope.nodes.map((node, index) => [node, nodes[index].pos!]));
+  const placements = placeNodes(layoutScopeOfScanned(scope));
+  return new Map(scope.nodes.map((node, index) => [node, placements[index]]));
+}
+
+// Must read the scope exactly as the canvas does (flow-doc.ts layoutScopeOf), field for field.
+export function layoutScopeOfScanned(scope: ScannedScope): LayoutScope {
+  return {
+    nodes: scope.nodes.map((node) => ({
+      name: node.name,
+      pos: posOf(node),
+      description: unquote(findProperty(node, 'description')?.value) || null,
+      entrypoint: findProperty(node, 'entrypoint')?.value === 'true',
+    })),
+    edges: scope.nodes.flatMap((node, index) => [
+      ...node.edges.map((edge) => ({ from: index, target: edge.spec.target, kind: 'flow' as const })),
+      ...errorEdgeTargetsOf(node).map((target) => ({ from: index, target, kind: 'error' as const })),
+    ]),
+    regions: scope.contexts.map((block) => ({ members: block.members.map((member) => member.name) })),
+  };
+}
+
+function errorEdgeTargetsOf(node: ScannedNode): string[] {
+  const onError = findProperty(node, 'on_error');
+  return onError && onError.value.startsWith('->') ? [parseEdgeExpression(onError.value).target] : [];
 }
 
 function posOf(node: ScannedNode): Rect | null {
