@@ -93,7 +93,7 @@ references defaults to the launch directory (`--project-root=<path>` to override
 
 ## npm CLI
 
-The `grafd-ai` package ships one command with four subcommands. Use `npx grafd-ai` to run
+The `grafd-ai` package ships one command with five subcommands. Use `npx grafd-ai` to run
 it without installing; once the package is installed, use `npx grafd` (or `grafd` when
 `node_modules/.bin` is on your path):
 
@@ -103,11 +103,16 @@ npx grafd-ai init
 npx grafd-ai start [workspace] [--port <n>] [--host <host>] [--open] [--project-root=<path>]
 npx grafd-ai lint [workspace...] [--strict] [--format=json]
 npx grafd-ai layout [workspace...] [--all]
+npx grafd-ai score [workspace...] [--min=<n>] [--format=json]
 ```
 
 Running the command with no subcommand is shorthand for `start`. `layout` gives every node
 without a position the place the editor would give it (with `--all`, it lays every graph out
-afresh, as the editor's Arrange command does). `start`, `lint` and `layout` use `.grafd/`
+afresh, as the editor's Arrange command does). `score` rates how readable each graph is out of
+100 — crossings, edges through nodes, overlaps, crowding, label collisions, regions holding
+nodes that are not theirs, cut-off text, near-misses in alignment — and gives the move or resize
+that fixes each finding, plus what arranging would score instead. `start`, `lint`, `layout` and
+`score` use `.grafd/`
 when it exists, otherwise the current directory when it contains `.flow` files, otherwise they
 exit with a hint to run `init`. `init` never overwrites an
 existing `.grafd/` workspace.

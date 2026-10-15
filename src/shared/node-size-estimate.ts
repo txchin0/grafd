@@ -47,6 +47,17 @@ export function estimateNodeSize(title: string, description: string | null): Nod
   return { w: width, h: heightFor(linesAt(width, title, description)) };
 }
 
+// Whether a node of this size cuts its text short: a title past the lines a node shows, or more of
+// its description than it has room for, by the painter's own budget (node-metrics.ts
+// layOutNodeText). A description too long for any node is cut regardless, so only what a bigger
+// node would show counts.
+export function textCutOff(title: string, description: string | null, size: NodeSize): boolean {
+  const lines = linesAt(size.w, title, description);
+  if (lines.title > TITLE_MAX_LINES) return true;
+  const descriptionBudget = Math.floor((size.h - (lines.title + 1) * TITLE_LINE_HEIGHT) / DESCRIPTION_LINE_HEIGHT);
+  return Math.min(lines.description, DESCRIPTION_MAX_LINES) > descriptionBudget;
+}
+
 // The width of the pill an edge's label is drawn in.
 export function estimateEdgeLabelWidth(text: string): number {
   return text.length * EDGE_LABEL_CHARACTER_WIDTH + 2 * EDGE_LABEL_PADDING_X;

@@ -6,6 +6,7 @@ import { DEFAULT_HOST, DEFAULT_PORT, startServer } from './server/server.js';
 import { emptyManifest, MANIFEST_FILE_NAME, serializeManifest } from './shared/manifest.js';
 import { runFlowLayout } from './tools/flow-layout.js';
 import { runFlowLint } from './tools/flow-lint.js';
+import { runFlowScore } from './tools/flow-score.js';
 
 const require = createRequire(import.meta.url);
 const GUIDE_SOURCE_URL = new URL('../SAVE-GUIDE.md', import.meta.url);
@@ -256,7 +257,16 @@ async function runLint(args: string[]): Promise<number> {
 }
 
 async function runLayout(args: string[]): Promise<number> {
-  if (args.includes('--help') || args.includes('-h')) return runFlowLayout(['--help']);
+  return runWorkspaceTool(args, runFlowLayout, 'Layout');
+}
+
+async function runScore(args: string[]): Promise<number> {
+  return runWorkspaceTool(args, runFlowScore, 'Scoring');
+}
+
+// A tool over workspace directories, run in the resolved default workspace when none is named.
+async function runWorkspaceTool(args: string[], tool: (argv: string[]) => Promise<number>, name: string): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) return tool(['--help']);
   const hasWorkspace = args.some((argument) => !argument.startsWith('-'));
   if (!hasWorkspace) {
     const workspace = await resolveWorkspace(process.cwd(), null, null);
@@ -264,9 +274,9 @@ async function runLayout(args: string[]): Promise<number> {
     args = [workspace, ...args];
   }
   try {
-    return await runFlowLayout(args);
+    return await tool(args);
   } catch (error) {
-    console.error(`Layout failed: ${errorMessage(error)}`);
+    console.error(`${name} failed: ${errorMessage(error)}`);
     return 1;
   }
 }
@@ -304,6 +314,8 @@ export async function runCli(argv: string[]): Promise<number> {
       return runLint(argv.slice(1));
     case 'layout':
       return runLayout(argv.slice(1));
+    case 'score':
+      return runScore(argv.slice(1));
     default:
       console.error(`Unknown command: ${argv[0]}`);
       printGlobalHelp();
@@ -319,6 +331,7 @@ Commands:
   start      Run the editor server (default command; defaults to ${DEFAULT_HOST}:${DEFAULT_PORT})
   lint       Lint .flow workspaces
   layout     Place nodes that have no position, or lay every graph out afresh with --all
+  score      Score how readable each graph is, with the fix for everything that costs it points
 
 Run 'grafd <command> --help' for command options.`);
 }

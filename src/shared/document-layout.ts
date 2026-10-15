@@ -46,7 +46,7 @@ export function layoutScopeOfItems(items: FlowItem[]): LayoutScope {
 }
 
 // `edges` names, for each of the scope's edges, the document edge it was read from.
-function layoutScopeWithEdgesOf(items: FlowItem[]): { scope: LayoutScope; edges: DocumentEdge[] } {
+export function layoutScopeWithEdgesOf(items: FlowItem[]): { scope: LayoutScope; edges: DocumentEdge[] } {
   const nodes = nodesOf(items);
   const edges = nodes.flatMap((node) => [
     ...node.edges.map((spec) => ({ node, spec, kind: 'flow' as const, read: spec })),

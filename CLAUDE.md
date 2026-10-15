@@ -160,6 +160,15 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   unless it runs between two bands, and an edge of a node arranged on its own runs straight. The
   editor writes those bends to the layer in the same undo step as the moves; `grafd layout`
   writes no layer, so it leaves bends as they are.
+- `src/shared/layout-score.ts` — how readable a laid-out graph is, out of 100: overlaps, edges
+  through nodes, non-members inside regions, overlapping regions, crossings, label collisions,
+  crowding, cut-off text and near-misses in alignment, each costing a fixed penalty and carrying
+  the fix — the move (in snap steps) or resize that removes it. Edges are judged as drawn
+  (`edge-sketch.ts`: a curve through the bend, cut off at both nodes, and where its label sits).
+  `document-score.ts` scores every graph scope of a file as the canvas shows it (missing
+  positions placed, bends read from the layer) next to what arranging it would score;
+  `src/tools/flow-score.ts` is `grafd score` (`--min=<n>` fails below a score, `--format=json`).
+  A test holds the layered layout to scoring none of the findings it promises to avoid.
 - `scripts/build-site.mjs` — assembles the static `site/` build (`npm run build:site`).
 - `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building
