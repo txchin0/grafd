@@ -31,9 +31,11 @@ export const REGION_MEMBER_PADDING = 26;
 // Where a region draws (spec §8.3): the union of the area the user drew, if any, with its
 // members' bounds — which is what makes every member contained by construction. Null when there
 // is neither, since the editor never invents geometry for a region and never writes one back.
+// Always a fresh rect, never the block's own `pos`: a frame kept as where a region stood (when a
+// drag began, say) must not travel with the block as a gesture moves it.
 export function regionRectFrom(blockPos: Rect | null, memberPositions: Rect[]): Rect | null {
   const memberBounds = boundsOfRects(memberPositions);
-  if (!memberBounds) return blockPos;
+  if (!memberBounds) return blockPos ? { ...blockPos } : null;
   const padded = padRect(memberBounds, REGION_MEMBER_PADDING);
   return blockPos ? unionRect(blockPos, padded) : padded;
 }

@@ -205,6 +205,13 @@ const SESSION_REGRESSIONS: [SessionAction[]][] = [
     { type: 'click', target: { kind: 'badge', index: 3, nudge: { x: 0, y: 0 } }, shift: false },
     { type: 'drag', from: { kind: 'region-border', index: 0, nudge: { x: 0, y: 0 } }, to: { kind: 'node', index: 0, nudge: { x: 0, y: 0 } }, shift: false },
   ]],
+  // A region left with no members is framed by its own `pos` alone, and its frame was that very
+  // object: the frame recorded when the drag began moved with the drag, and so reached over a
+  // drawing below it that the region never enclosed.
+  [[
+    { type: 'menu', target: nodePick(1), choice: 3 },
+    { type: 'nudge', from: { kind: 'region-border', index: 4, nudge: { x: 0, y: 0 } }, by: { x: 0, y: 68 }, shift: false },
+  ]],
 ];
 const TOOL_PARITY_REGRESSIONS: [SessionAction[], TargetPick, Tool][] = [
   // The node and region tools drew a new node or region over a stroke instead of dragging it.
