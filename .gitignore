@@ -11,7 +11,8 @@ grafd.manifest.json
 Thumbs.db
 .idea/
 .vscode/
-.claude/
+.claude/*
+!.claude/skills/
 *.swp
 *.swo
 *~
