@@ -41,6 +41,7 @@ import type { DisplayGeometry } from './canvas/expansion.js';
 import type { Point } from './geometry.js';
 import { DEFAULT_NODE_SIZE, placeNodes } from '../shared/auto-layout.js';
 import { layoutScopeOfItems } from '../shared/document-layout.js';
+import { branchesOnLabels, isEntryNode } from '../shared/node-roles.js';
 import { rectContainsRect, regionRectFrom } from '../shared/rect-math.js';
 
 export interface GhostNode {
@@ -683,10 +684,9 @@ function inferTraits(
   const inheritsContexts = parseListValue(getPreambleField(doc, 'inherits')).length > 0;
   const traits = new Map<FlowNode, NodeTraits>();
   for (const node of nodes) {
-    const labeledOutgoing = node.edges.filter((edge) => edge.label).length;
     traits.set(node, {
-      entry: getProp(node, 'entrypoint') === 'true' || !namesWithIncoming.has(node.name),
-      decision: labeledOutgoing >= 2,
+      entry: isEntryNode(node, namesWithIncoming),
+      decision: branchesOnLabels(node),
       expand: getProp(node, 'expand'),
       updates: parseListValue(getProp(node, 'updates')),
       hasErrorHandler: getProp(node, 'on_error') != null,

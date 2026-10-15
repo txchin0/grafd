@@ -14,6 +14,8 @@ import {
   TITLE_MAX_LINES,
   wrapTextLines,
 } from './node-text-metrics.js';
+import { DEFAULT_NODE_SHAPE, type NodeShape } from './canvas-layer.js';
+import { shapeTextBox } from './shape-text-box.js';
 
 export const DEFAULT_NODE_SIZE = { w: 200, h: 88 };
 
@@ -29,6 +31,8 @@ const DESCRIPTION_CHARACTER_WIDTH = 7;
 const EDGE_LABEL_CHARACTER_WIDTH = 7;
 
 export const NODE_WIDTH_STEPS = [160, 200, 240, 280] as const;
+const SHAPED_WIDTH_STEPS = [160, 200, 240, 280, 320, 360, 400] as const;
+const MAX_NODE_HEIGHT = 320;
 const COMFORTABLE_DESCRIPTION_LINES = 3;
 // The painter keeps a title line's height of the node clear of text (node-metrics.ts
 // layOutNodeText); this is the air added on top of that so text never touches the outline.
@@ -40,22 +44,53 @@ interface TextLines {
   description: number;
 }
 
-export function estimateNodeSize(title: string, description: string | null): NodeSize {
-  const width = NODE_WIDTH_STEPS.find((step) => fitsComfortably(linesAt(step, title, description)))
-    ?? NODE_WIDTH_STEPS.find((step) => fitsAtAll(linesAt(step, title, description)))
-    ?? NODE_WIDTH_STEPS[NODE_WIDTH_STEPS.length - 1];
-  return { w: width, h: heightFor(linesAt(width, title, description)) };
+// The smallest width step, and the smallest height on the snap lattice at it, whose text box — the
+// part of the rectangle the shape leaves for text — holds the text comfortably; failing that, at
+// all; failing that, the widest. A node is never shorter than the default.
+export function estimateNodeSize(title: string, description: string | null, shape: NodeShape = DEFAULT_NODE_SHAPE): NodeSize {
+  const widths = widthStepsFor(shape);
+  for (const fits of [fitsComfortably, fitsAtAll]) {
+    for (const width of widths) {
+      const height = smallestHeightFitting(width, title, description, shape, fits);
+      if (height !== null) return { w: width, h: height };
+    }
+  }
+  const widest = widths[widths.length - 1];
+  return { w: widest, h: smallestHeightFitting(widest, title, description, shape, () => true) ?? MAX_NODE_HEIGHT };
 }
 
-// Whether a node of this size cuts its text short: a title past the lines a node shows, or more of
-// its description than it has room for, by the painter's own budget (node-metrics.ts
-// layOutNodeText). A description too long for any node is cut regardless, so only what a bigger
-// node would show counts.
-export function textCutOff(title: string, description: string | null, size: NodeSize): boolean {
-  const lines = linesAt(size.w, title, description);
+// Whether a node of this size and shape cuts its text short: a title past the lines a node shows,
+// or more of its description than it has room for, by the painter's own budget (node-metrics.ts
+// layOutNodeText) in the shape's text box. A description too long for any node is cut regardless,
+// so only what a bigger node would show counts.
+export function textCutOff(title: string, description: string | null, size: NodeSize, shape: NodeShape = DEFAULT_NODE_SHAPE): boolean {
+  const box = shapeTextBox(shape, { x: 0, y: 0, w: size.w, h: size.h });
+  const lines = linesAt(box.w, title, description);
   if (lines.title > TITLE_MAX_LINES) return true;
-  const descriptionBudget = Math.floor((size.h - (lines.title + 1) * TITLE_LINE_HEIGHT) / DESCRIPTION_LINE_HEIGHT);
+  const descriptionBudget = Math.floor((box.h - (lines.title + 1) * TITLE_LINE_HEIGHT) / DESCRIPTION_LINE_HEIGHT);
   return Math.min(lines.description, DESCRIPTION_MAX_LINES) > descriptionBudget;
+}
+
+// A shape that gives text its whole width keeps to the usual steps; one that narrows it — a
+// diamond keeps barely more than half — can grow wider before its text has to wrap.
+function widthStepsFor(shape: NodeShape): readonly number[] {
+  const textBoxWidth = shapeTextBox(shape, { x: 0, y: 0, w: NODE_WIDTH_STEPS[0], h: DEFAULT_NODE_SIZE.h }).w;
+  return textBoxWidth === NODE_WIDTH_STEPS[0] ? NODE_WIDTH_STEPS : SHAPED_WIDTH_STEPS;
+}
+
+function smallestHeightFitting(
+  width: number,
+  title: string,
+  description: string | null,
+  shape: NodeShape,
+  fits: (lines: TextLines) => boolean,
+): number | null {
+  for (let height = DEFAULT_NODE_SIZE.h; height <= MAX_NODE_HEIGHT; height += HEIGHT_STEP) {
+    const box = shapeTextBox(shape, { x: 0, y: 0, w: width, h: height });
+    const lines = linesAt(box.w, title, description);
+    if (fits(lines) && box.h >= textBlockHeight(lines)) return height;
+  }
+  return null;
 }
 
 // The width of the pill an edge's label is drawn in.
@@ -83,12 +118,12 @@ function wrappedLineCount(text: string, textWidth: number, characterWidth: numbe
   return wrapTextLines(text, textWidth, Infinity, (run) => run.length * characterWidth).length;
 }
 
-function heightFor(lines: TextLines): number {
+// The height a text box needs for these lines, with room to breathe.
+function textBlockHeight(lines: TextLines): number {
   const titleLines = Math.min(lines.title, TITLE_MAX_LINES);
   const descriptionLines = Math.min(lines.description, DESCRIPTION_MAX_LINES);
   const descriptionBlock = descriptionLines > 0
     ? TITLE_DESCRIPTION_GAP + descriptionLines * DESCRIPTION_LINE_HEIGHT
     : 0;
-  const textBlock = (titleLines + 1) * TITLE_LINE_HEIGHT + descriptionBlock + VERTICAL_BREATHING_ROOM;
-  return Math.max(DEFAULT_NODE_SIZE.h, Math.ceil(textBlock / HEIGHT_STEP) * HEIGHT_STEP);
+  return (titleLines + 1) * TITLE_LINE_HEIGHT + descriptionBlock + VERTICAL_BREATHING_ROOM;
 }

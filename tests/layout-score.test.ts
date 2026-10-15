@@ -17,7 +17,7 @@ import { runFlowScore } from '../src/tools/flow-score.js';
 import { arbitraryGraph } from './layout-fixtures.js';
 
 function node(name: string, x: number, y: number, w = 200, h = 88): ScoredGraph['nodes'][number] {
-  return { name, rect: { x, y, w, h }, description: null };
+  return { name, rect: { x, y, w, h }, description: null, shape: 'rectangle' };
 }
 
 function edge(from: number, to: number, label: string | null = null): ScoredGraph['edges'][number] {
@@ -118,7 +118,7 @@ describe('each finding, and the fix it gives', () => {
 
   it('catches text a node is too small to show and gives the size that shows it', () => {
     const graph: ScoredGraph = {
-      nodes: [{ name: 'Reconcile the ledger against every bank statement', rect: { x: 0, y: 0, w: 120, h: 64 }, description: null }],
+      nodes: [{ name: 'Reconcile the ledger against every bank statement', rect: { x: 0, y: 0, w: 120, h: 64 }, description: null, shape: 'rectangle' }],
       edges: [],
       regions: [],
     };
@@ -149,7 +149,7 @@ describe('a graph the layered layout drew', () => {
     fc.assert(fc.property(arbitraryGraph, (graph) => {
       const { rects, bendPoints } = layOutLayeredDrawing(graph, 'LR', { x: 0, y: 0 });
       const scored: ScoredGraph = {
-        nodes: graph.nodes.map((laidOut, index) => ({ name: `n${index}`, rect: rects[index], description: laidOut.description })),
+        nodes: graph.nodes.map((laidOut, index) => ({ name: `n${index}`, rect: rects[index], description: laidOut.description, shape: laidOut.shape ?? ('rectangle' as const) })),
         edges: graph.edges.map((laidOut, index) => {
           const point = bendPoints[index];
           const bend = point ? bendThroughPoint(point, rectCenter(rects[laidOut.from]), rectCenter(rects[laidOut.to])) : null;

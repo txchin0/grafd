@@ -8,7 +8,7 @@ import type { Tool } from '../src/client/canvas/canvas-view.js';
 import type { Point } from '../src/client/geometry.js';
 import { allNodes, buildModel, containingGraphBlockName, graphBlockNames, regionRectOf, type FlowModel } from '../src/client/flow-doc.js';
 import { parseFlow, type FlowDocument, type Rect } from '../src/shared/flow-format.js';
-import { canvasLayerPathOf, isCanvasLayerPath, parseCanvasLayer } from '../src/shared/canvas-layer.js';
+import { canvasLayerPathOf, isCanvasLayerPath, nodeShapeOf, parseCanvasLayer } from '../src/shared/canvas-layer.js';
 import { isDrawableText, textDrawingOf, type TextDrawing } from '../src/shared/canvas-text.js';
 import { imageDrawingOf, type ImageDrawing } from '../src/shared/canvas-image.js';
 import { axesOf, isResizeEdge, type ResizeEdge } from '../src/client/canvas/resize-handles.js';
@@ -427,7 +427,10 @@ function arrangeThatLeftItUntidy(step: SessionStep, was: GraphState, now: GraphS
   const wholeGraph = chosen.length === 0 || chosen.length === was.topNodes.size;
   if (wholeGraph) {
     const doc = parseFlow(step.after.get(step.flowPath) ?? '');
-    if (arrangeGraphScope(doc.items).moved) return violation('arrange tidies the graph', 'arranging the arranged graph again moved something');
+    // Arranged as the editor arranges it: each node sized for the shape the layer draws it in.
+    const layer = parseCanvasLayer(step.after.get(canvasLayerPathOf(step.flowPath)) ?? null);
+    const rearranged = arrangeGraphScope(doc.items, undefined, (node) => nodeShapeOf(layer, node.id));
+    if (rearranged.moved) return violation('arrange tidies the graph', 'arranging the arranged graph again moved something');
     return [];
   }
   const crowded = chosen.flatMap((id) => {

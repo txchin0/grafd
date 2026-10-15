@@ -1,24 +1,17 @@
-// The geometry of a node's shape inside its rectangle: the outline the painter draws, where a
+// The geometry of a node's shape inside its rectangle: the outline the painter draws, and where a
 // ray from inside leaves that outline (so edges and ports sit on the shape rather than on its
-// bounding box), and the box its text has to fit in. Pure — the rectangle stays the node's
-// layout and hit area; the shape only changes how it is drawn and where edges meet it.
+// bounding box). The box its text has to fit in, and the proportions the outlines share with it,
+// are in shared/shape-text-box.ts. Pure — the rectangle stays the node's layout and hit area; the
+// shape only changes how it is drawn and where edges meet it.
 
 import type { NodeShape } from '../../shared/canvas-layer.js';
 import type { Rect } from '../../shared/flow-format.js';
+import { cylinderCapHeight, hexagonPointDepth, parallelogramSlant } from '../../shared/shape-text-box.js';
 import { offsetAlong, rectBorderPointFrom, rectCenter, unitVectorBetween, type Point } from '../geometry.js';
 
+export { shapeTextBox } from '../../shared/shape-text-box.js';
+
 const ROUNDED_CORNER_RADIUS = 16;
-// How far a hexagon's points and a parallelogram's slant reach in, as a fraction of the width,
-// capped by the height so a wide, short node keeps a recognisable shape.
-const HEXAGON_POINT_FRACTION = 0.18;
-const PARALLELOGRAM_SLANT_FRACTION = 0.16;
-// The height of a cylinder's elliptical top, as a fraction of the node height.
-const CYLINDER_CAP_FRACTION = 0.22;
-const CYLINDER_MAX_CAP = 18;
-// The largest centred box that stays inside each curved or pointed outline.
-const ELLIPSE_TEXT_FRACTION = Math.SQRT1_2;
-const DIAMOND_TEXT_WIDTH_FRACTION = 0.6;
-const DIAMOND_TEXT_HEIGHT_FRACTION = 0.4;
 
 export type ShapeOutline =
   | { kind: 'rect'; rect: Rect; radius: number }
@@ -66,17 +59,6 @@ function polygonPoints(shape: 'diamond' | 'hexagon' | 'parallelogram', rect: Rec
   return [{ x: x + slant, y }, { x: right, y }, { x: right - slant, y: bottom }, { x, y: bottom }];
 }
 
-function hexagonPointDepth(rect: Rect): number {
-  return Math.min(rect.w * HEXAGON_POINT_FRACTION, rect.h / 2);
-}
-
-function parallelogramSlant(rect: Rect): number {
-  return Math.min(rect.w * PARALLELOGRAM_SLANT_FRACTION, rect.h / 2);
-}
-
-function cylinderCapHeight(rect: Rect): number {
-  return Math.min(rect.h * CYLINDER_CAP_FRACTION, CYLINDER_MAX_CAP);
-}
 
 // Where a ray cast from `origin` (inside the shape) along `direction` leaves the outline. The
 // rounded rectangle and the cylinder are close enough to their rectangle that edges meeting the
@@ -142,31 +124,6 @@ function rayHitsSegment(origin: Point, direction: Point, start: Point, end: Poin
   return alongRay;
 }
 
-// The centred box a node's title, description and trait marks are laid out in, so none of
-// them spill past a pointed or curved outline.
-export function shapeTextBox(shape: NodeShape, rect: Rect): Rect {
-  switch (shape) {
-    case 'ellipse':
-      return centredBox(rect, rect.w * ELLIPSE_TEXT_FRACTION, rect.h * ELLIPSE_TEXT_FRACTION);
-    case 'diamond':
-      return centredBox(rect, rect.w * DIAMOND_TEXT_WIDTH_FRACTION, rect.h * DIAMOND_TEXT_HEIGHT_FRACTION);
-    case 'hexagon':
-      return centredBox(rect, rect.w - 2 * hexagonPointDepth(rect), rect.h);
-    case 'parallelogram':
-      return centredBox(rect, rect.w - 2 * parallelogramSlant(rect), rect.h);
-    case 'cylinder': {
-      const cap = cylinderCapHeight(rect);
-      return { x: rect.x, y: rect.y + cap, w: rect.w, h: rect.h - cap };
-    }
-    case 'rounded':
-    case 'rectangle':
-      return rect;
-  }
-}
-
-function centredBox(rect: Rect, width: number, height: number): Rect {
-  return { x: rect.x + (rect.w - width) / 2, y: rect.y + (rect.h - height) / 2, w: width, h: height };
-}
 
 // The outline as SVG path data, one entry per stroke, back to front. The painter hands the
 // curved outlines to rough.js this way, and the shape picker draws its icons from the same data,

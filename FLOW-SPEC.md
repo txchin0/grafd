@@ -826,7 +826,7 @@ A canvas layer is entirely editor-owned. Its content is not part of this format 
 
 **Rules for agents:**
 
-- **Never** read a canvas layer to interpret a graph, and never write one.
+- **Never** read a canvas layer to interpret a graph, and never write one by hand. An agent styles a graph only through a tool that writes the layer with the editor's own code — `grafd style`, which takes the role of each node and draws it in that role's shape.
 - **Never** put styling into a `.flow`. The format has nowhere to put it.
 - **Rename or move** a canvas layer together with its `.flow`, keeping the `.canvas.json` suffix on the new name. **Delete** it together with its `.flow`.
 - When creating a `.flow` at a path where a canvas layer already sits with no `.flow` beside it, **delete** that leftover first — it belongs to a graph that no longer exists.

@@ -5,6 +5,7 @@
 // the command line each lay a file out for themselves and must agree on where every node stands.
 
 import { shownEdgeLabel, type EdgeKind } from './canvas-edge-style.js';
+import type { NodeShape } from './canvas-layer.js';
 import type { Rect } from './flow-format.js';
 import { assignCrossCoordinates } from './layered-coordinates.js';
 import { orderLayers, properLayering, type LayeringEdge } from './layered-ordering.js';
@@ -19,6 +20,8 @@ export interface LayeredNode {
   title: string;
   description: string | null;
   entrypoint: boolean;
+  // The shape it is drawn in, which decides how much of its rectangle its text gets.
+  shape?: NodeShape;
 }
 
 export interface LayeredEdge {
@@ -89,7 +92,7 @@ export function layOutLayered(graph: LayeredGraph, direction: LayoutDirection, o
 export function layOutLayeredDrawing(graph: LayeredGraph, direction: LayoutDirection, origin: Point): LayeredDrawing {
   if (graph.nodes.length === 0) return { rects: [], bendPoints: graph.edges.map(() => null) };
   const axes = AXES[direction];
-  const sizes = graph.nodes.map((node) => estimateNodeSize(node.title, node.description));
+  const sizes = graph.nodes.map((node) => estimateNodeSize(node.title, node.description, node.shape));
 
   const { weighted, graphEdgeOf } = weightedEdgesOf(graph);
   const ranked = rankNodes(graph.nodes.length, weighted, visitOrderOf(graph));

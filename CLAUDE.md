@@ -168,7 +168,20 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   `document-score.ts` scores every graph scope of a file as the canvas shows it (missing
   positions placed, bends read from the layer) next to what arranging it would score;
   `src/tools/flow-score.ts` is `grafd score` (`--min=<n>` fails below a score, `--format=json`).
-  A test holds the layered layout to scoring none of the findings it promises to avoid.
+  A test holds the layered layout to scoring none of the findings it promises to avoid. Edges are
+  judged against the outline each node is drawn with (`shapeContainsPoint`), not its rectangle.
+- `src/shared/node-roles.ts` — what a node is to its flow (start, end, process, decision,
+  datastore, io, external, event, error) and the shape each role draws it in; `inferRoles` reads
+  the structural ones off a graph by the same entry and decision rules the canvas marks nodes
+  with. `styleByRoles` writes the shapes into the canvas layer, marks edges into an error red and
+  dashed, and grows a node whose text no longer fits its new shape. `src/tools/flow-style.ts` is
+  `grafd style`, the one way SAVE-GUIDE.md lets an agent style a graph; its role table is held to
+  `ROLE_SHAPES` by a test. Node colour stays the trait colours — roles set shapes only.
+- `src/shared/shape-text-box.ts` — the box a shape leaves its text and the proportions its outline
+  shares with it, used wherever a node is sized: the painter, `estimateNodeSize` (which takes a
+  shape), arranging (which reads the layer for each node's shape) and the score. Placing a node
+  the canvas has never drawn sizes it as a rectangle, since the canvas and linter must agree and
+  only one of them reads the layer.
 - `scripts/build-site.mjs` — assembles the static `site/` build (`npm run build:site`).
 - `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building

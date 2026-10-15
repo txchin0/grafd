@@ -3,6 +3,7 @@
 
 import fc from 'fast-check';
 import { placeNodes, type LayoutScope } from '../src/shared/auto-layout.js';
+import { NODE_SHAPES } from '../src/shared/canvas-layer.js';
 import type { Rect } from '../src/shared/flow-format.js';
 import { layoutScopeOfScanned } from '../src/shared/flow-lint-semantics.js';
 import { rootScope, scanFlow } from '../src/shared/flow-scan.js';
@@ -33,6 +34,7 @@ export const arbitraryGraph: fc.Arbitrary<LayeredGraph> = fc
         title: fc.array(fc.constantFrom(...WORDS), { minLength: 1, maxLength: 6 }).map((words) => words.join(' ')),
         description: fc.option(fc.array(fc.constantFrom(...WORDS), { minLength: 1, maxLength: 30 }).map((words) => words.join(' '))),
         entrypoint: fc.boolean(),
+        shape: fc.constantFrom(...NODE_SHAPES),
       }),
       { minLength: nodeCount, maxLength: nodeCount },
     ),

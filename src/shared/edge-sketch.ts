@@ -5,8 +5,10 @@
 // from it by a few pixels at most — far less than anything the score is looking for.
 
 import { bendPointOn, type EdgeBend } from './canvas-edge-style.js';
+import { DEFAULT_NODE_SHAPE, type NodeShape } from './canvas-layer.js';
 import type { Rect } from './flow-format.js';
 import { rectCenter, type Point } from './rect-math.js';
+import { shapeContainsPoint } from './shape-text-box.js';
 
 const SKETCH_STEPS = 64;
 
@@ -18,12 +20,20 @@ export interface EdgeSketch {
   grip: Point;
 }
 
-export function sketchEdge(fromRect: Rect, toRect: Rect, bend: EdgeBend | null): EdgeSketch {
+// `fromShape` and `toShape` cut the curve where the canvas does: at the outline each node is
+// drawn with, so an edge leaving a diamond's tip is not cut short at its bounding box.
+export function sketchEdge(
+  fromRect: Rect,
+  toRect: Rect,
+  bend: EdgeBend | null,
+  fromShape: NodeShape = DEFAULT_NODE_SHAPE,
+  toShape: NodeShape = DEFAULT_NODE_SHAPE,
+): EdgeSketch {
   const from = rectCenter(fromRect);
   const to = rectCenter(toRect);
   const through = bend ? bendPointOn(bend, from, to) : null;
   const curve = through ? quadraticThrough(from, through, to) : straightLine(from, to);
-  const points = curve.filter((point) => !strictlyInside(point, fromRect) && !strictlyInside(point, toRect));
+  const points = curve.filter((point) => !shapeContainsPoint(fromShape, fromRect, point) && !shapeContainsPoint(toShape, toRect, point));
   const grip = through ?? midpointOf(points, from, to);
   return { points, grip };
 }
@@ -54,6 +64,3 @@ function midpointOf(points: Point[], from: Point, to: Point): Point {
   return { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
 }
 
-export function strictlyInside(point: Point, rect: Rect): boolean {
-  return point.x > rect.x && point.x < rect.x + rect.w && point.y > rect.y && point.y < rect.y + rect.h;
-}

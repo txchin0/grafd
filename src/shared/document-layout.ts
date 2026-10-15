@@ -6,6 +6,7 @@
 
 import { arrangeScope, arrangeSelected, placeNodes, type Arrangement, type LayoutScope } from './auto-layout.js';
 import { bendThroughPoint, type EdgeBend } from './canvas-edge-style.js';
+import type { NodeShape } from './canvas-layer.js';
 import {
   getProp,
   parseEdgeExpression,
@@ -46,7 +47,10 @@ export function layoutScopeOfItems(items: FlowItem[]): LayoutScope {
 }
 
 // `edges` names, for each of the scope's edges, the document edge it was read from.
-export function layoutScopeWithEdgesOf(items: FlowItem[]): { scope: LayoutScope; edges: DocumentEdge[] } {
+export function layoutScopeWithEdgesOf(
+  items: FlowItem[],
+  shapeOf?: (node: FlowNode) => NodeShape,
+): { scope: LayoutScope; edges: DocumentEdge[] } {
   const nodes = nodesOf(items);
   const edges = nodes.flatMap((node) => [
     ...node.edges.map((spec) => ({ node, spec, kind: 'flow' as const, read: spec })),
@@ -60,6 +64,7 @@ export function layoutScopeWithEdgesOf(items: FlowItem[]): { scope: LayoutScope;
         pos: node.pos,
         description: unquote(getProp(node, 'description')) || null,
         entrypoint: getProp(node, 'entrypoint') === 'true',
+        shape: shapeOf?.(node),
       })),
       edges: edges.map((edge) => ({ from: indexOf.get(edge.node)!, target: edge.read.target, kind: edge.kind, label: edge.read.label })),
       regions: contextItemsOf(items).map(({ block }) => ({ members: block.members, pos: block.pos })),
@@ -94,9 +99,11 @@ export function placeMissingPositions(doc: FlowDocument): boolean {
 // reserved beyond its members: drawn around the old layout, it would now cover nodes that are not
 // its members. The bends are not written here: they belong to the canvas layer, which only the
 // editor writes.
-export function arrangeGraphScope(items: FlowItem[], chosen?: Set<FlowNode>): ArrangeOutcome {
+// `shapeOf` tells it how each node is drawn, so a diamond or an ellipse is sized for the text it has
+// room for; without it every node is sized as a rectangle.
+export function arrangeGraphScope(items: FlowItem[], chosen?: Set<FlowNode>, shapeOf?: (node: FlowNode) => NodeShape): ArrangeOutcome {
   const nodes = nodesOf(items);
-  const { scope, edges } = layoutScopeWithEdgesOf(items);
+  const { scope, edges } = layoutScopeWithEdgesOf(items, shapeOf);
   const chosenIndices = chosen && new Set([...nodes.keys()].filter((index) => chosen.has(nodes[index])));
   const wholeScope = !chosenIndices || chosenIndices.size === nodes.length;
   const arrangement = wholeScope ? arrangeScope(scope) : arrangeSelected(scope, chosenIndices);
@@ -130,8 +137,8 @@ function worthwhileBend(bend: EdgeBend | null, from: { x: number; y: number }, t
 }
 
 // Bends are left as they are: `grafd layout` never writes a canvas layer.
-export function arrangeDocument(doc: FlowDocument): boolean {
-  return graphScopesOf(doc).map((items) => arrangeGraphScope(items).moved).some((moved) => moved);
+export function arrangeDocument(doc: FlowDocument, shapeOf?: (node: FlowNode) => NodeShape): boolean {
+  return graphScopesOf(doc).map((items) => arrangeGraphScope(items, undefined, shapeOf).moved).some((moved) => moved);
 }
 
 function releaseReservedAreas(items: FlowItem[], nodes: FlowNode[]): boolean {

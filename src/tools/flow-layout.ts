@@ -1,11 +1,12 @@
 // Command line layout for .flow workspaces: `grafd layout [workspace…]`. Gives every node without a
 // `pos` the place the editor would give it on opening the file, or with `--all` lays every graph
 // out afresh as the editor's Arrange command does — so a workspace an agent wrote reads well
-// before anyone opens it. Canvas layers are never touched: styling is the editor's alone.
+// before anyone opens it. Canvas layers are read for the shapes nodes are sized for, never written.
 
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { listFlowFiles } from '../server/flow-files.js';
+import { canvasLayerIsUnreadable, canvasLayerPathOf, nodeShapeOf, parseCanvasLayer, type CanvasLayer } from '../shared/canvas-layer.js';
 import { arrangeDocument, placeMissingPositions } from '../shared/document-layout.js';
 import { parseFlow, serializeFlow } from '../shared/flow-format.js';
 
@@ -46,6 +47,13 @@ export async function runFlowLayout(argv: string[]): Promise<number> {
   return 0;
 }
 
+// The layer beside a file, read only for the shapes its nodes are drawn in; an unreadable one is
+// as good as none, since this never writes it.
+async function readableLayerAt(file: string): Promise<CanvasLayer | null> {
+  const text = await readFile(file, 'utf8').catch(() => null);
+  return text === null || canvasLayerIsUnreadable(text) ? null : parseCanvasLayer(text);
+}
+
 function parseOptions(argv: string[]): Options | 'help' | 'invalid' {
   const options: Options = { roots: [], all: false };
   for (const argument of argv) {
@@ -66,7 +74,8 @@ export async function layOutWorkspace(absoluteRoot: string, all: boolean): Promi
     const absolutePath = path.join(absoluteRoot, file);
     const text = await readFile(absolutePath, 'utf8');
     const doc = parseFlow(text);
-    const laidOut = all ? arrangeDocument(doc) : placeMissingPositions(doc);
+    const layer = await readableLayerAt(canvasLayerPathOf(absolutePath));
+    const laidOut = all ? arrangeDocument(doc, (node) => nodeShapeOf(layer, node.id)) : placeMissingPositions(doc);
     if (!laidOut) continue;
     await writeFile(absolutePath, serializeFlow(doc));
     written.push(file);

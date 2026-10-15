@@ -3,10 +3,10 @@
 // graph would score, so the report can say when arranging is the better fix.
 
 import { placeNodes } from './auto-layout.js';
-import { documentIdentities, type CanvasLayer } from './canvas-layer.js';
+import { documentIdentities, nodeShapeOf, type CanvasLayer, type NodeShape } from './canvas-layer.js';
 import { edgeStyleOf, type EdgeBend } from './canvas-edge-style.js';
 import { arrangeGraphScope, graphScopesOf, layoutScopeWithEdgesOf, type DocumentEdge } from './document-layout.js';
-import { parseFlow, type ContextItem, type FlowDocument, type FlowItem, type GraphItem, type Rect } from './flow-format.js';
+import { parseFlow, type ContextItem, type FlowDocument, type FlowItem, type FlowNode, type GraphItem, type Rect } from './flow-format.js';
 import { scoreGraph, type GraphScore, type ScoredGraph } from './layout-score.js';
 
 export interface ScopeScore {
@@ -25,17 +25,18 @@ export function scoreDocumentText(text: string, layer: CanvasLayer | null): Scop
   const names = scopeNamesOf(doc);
   return scopes.flatMap((items, index) => {
     if (!items.some((item) => item.kind === 'node')) return [];
-    const current = scoreGraph(scoredGraphOf(items, placeNodes(layoutScopeWithEdgesOf(items).scope), layerBends(doc, layer)));
-    return [{ scope: names[index], current, arranged: arrangedScoreOf(copies[index]) }];
+    const shapeOf = (node: FlowNode): NodeShape => nodeShapeOf(layer, node.id);
+    const current = scoreGraph(scoredGraphOf(items, placeNodes(layoutScopeWithEdgesOf(items).scope), layerBends(doc, layer), shapeOf));
+    return [{ scope: names[index], current, arranged: arrangedScoreOf(copies[index], shapeOf) }];
   });
 }
 
-function arrangedScoreOf(items: FlowItem[]): number {
-  const { bends } = arrangeGraphScope(items);
+function arrangedScoreOf(items: FlowItem[], shapeOf: (node: FlowNode) => NodeShape): number {
+  const { bends } = arrangeGraphScope(items, undefined, shapeOf);
   const bendOf = ({ node, spec }: DocumentEdge): EdgeBend | null =>
     bends.find((plan) => plan.node === node && plan.spec === spec)?.bend ?? null;
   const rects = layoutScopeWithEdgesOf(items).scope.nodes.map((node) => node.pos!);
-  return scoreGraph(scoredGraphOf(items, rects, bendOf)).score;
+  return scoreGraph(scoredGraphOf(items, rects, bendOf, shapeOf)).score;
 }
 
 function layerBends(doc: FlowDocument, layer: CanvasLayer | null): (edge: DocumentEdge, kind: 'flow' | 'error') => EdgeBend | null {
@@ -50,12 +51,14 @@ function scoredGraphOf(
   items: FlowItem[],
   rects: Rect[],
   bendOf: (edge: DocumentEdge, kind: 'flow' | 'error') => EdgeBend | null,
+  shapeOf: (node: FlowNode) => NodeShape,
 ): ScoredGraph {
   const { scope, edges } = layoutScopeWithEdgesOf(items);
+  const nodes = items.flatMap((item) => (item.kind === 'node' ? [item.node] : []));
   const indexOf = new Map(scope.nodes.map((node, index) => [node.name, index]));
   const regionNames = items.filter((item): item is ContextItem => item.kind === 'context').map((item) => item.block.name);
   return {
-    nodes: scope.nodes.map((node, index) => ({ name: node.name, rect: rects[index], description: node.description })),
+    nodes: scope.nodes.map((node, index) => ({ name: node.name, rect: rects[index], description: node.description, shape: shapeOf(nodes[index]) })),
     edges: scope.edges.flatMap((edge, index) => {
       const to = indexOf.get(edge.target);
       if (to === undefined) return [];

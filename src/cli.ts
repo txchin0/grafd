@@ -8,6 +8,7 @@ import { runFlowLayout } from './tools/flow-layout.js';
 import { runFlowLint } from './tools/flow-lint.js';
 import { runFlowRender } from './tools/flow-render.js';
 import { runFlowScore } from './tools/flow-score.js';
+import { runFlowStyle } from './tools/flow-style.js';
 
 const require = createRequire(import.meta.url);
 const GUIDE_SOURCE_URL = new URL('../SAVE-GUIDE.md', import.meta.url);
@@ -319,6 +320,8 @@ export async function runCli(argv: string[]): Promise<number> {
       return runScore(argv.slice(1));
     case 'render':
       return runFlowRender(argv.slice(1));
+    case 'style':
+      return runFlowStyle(argv.slice(1));
     default:
       console.error(`Unknown command: ${argv[0]}`);
       printGlobalHelp();
@@ -336,6 +339,7 @@ Commands:
   layout     Place nodes that have no position, or lay every graph out afresh with --all
   score      Score how readable each graph is, with the fix for everything that costs it points
   render     Draw a graph to a PNG as the editor shows it
+  style      Style a graph's nodes by their roles (start, decision, datastore…) in its canvas layer
 
 Run 'grafd <command> --help' for command options.`);
 }

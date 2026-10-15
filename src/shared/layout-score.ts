@@ -7,7 +7,9 @@
 // is given in snap steps, so applying it keeps a node on the lattice.
 
 import { shownEdgeLabel, type EdgeBend, type EdgeKind } from './canvas-edge-style.js';
-import { sketchEdge, strictlyInside, type EdgeSketch } from './edge-sketch.js';
+import { sketchEdge, type EdgeSketch } from './edge-sketch.js';
+import { shapeContainsPoint } from './shape-text-box.js';
+import type { NodeShape } from './canvas-layer.js';
 import type { Rect } from './flow-format.js';
 import { estimateEdgeLabelWidth, estimateNodeSize, textCutOff } from './node-size-estimate.js';
 import { EDGE_LABEL_HEIGHT } from './node-text-metrics.js';
@@ -17,6 +19,7 @@ export interface ScoredNode {
   name: string;
   rect: Rect;
   description: string | null;
+  shape: NodeShape;
 }
 
 export interface ScoredEdge {
@@ -105,7 +108,9 @@ export interface GraphScore {
 
 export function scoreGraph(graph: ScoredGraph): GraphScore {
   const sketches = graph.edges.map((edge) =>
-    (edge.from === edge.to ? null : sketchEdge(graph.nodes[edge.from].rect, graph.nodes[edge.to].rect, edge.bend)));
+    (edge.from === edge.to ? null : sketchEdge(
+      graph.nodes[edge.from].rect, graph.nodes[edge.to].rect, edge.bend, graph.nodes[edge.from].shape, graph.nodes[edge.to].shape,
+    )));
   const findings = [
     ...overlaps(graph),
     ...edgesThroughNodes(graph, sketches),
@@ -147,7 +152,7 @@ function edgesThroughNodes(graph: ScoredGraph, sketches: (EdgeSketch | null)[]):
     if (!sketch) return [];
     return graph.nodes.flatMap((node, nodeIndex) => {
       if (nodeIndex === edge.from || nodeIndex === edge.to) return [];
-      if (!sketch.points.some((point) => strictlyInside(point, node.rect))) return [];
+      if (!sketch.points.some((point) => shapeContainsPoint(node.shape, node.rect, point))) return [];
       const [move, otherWay] = movesClearing(node, sketch.points, runsLevel(graph, edge));
       return [{
         kind: 'edge-through-node' as const,
@@ -213,14 +218,14 @@ function labelCollisions(graph: ScoredGraph, sketches: (EdgeSketch | null)[]): F
     if (!pill) return [];
     const label = `The label of ${edgeName(graph, edge)}`;
     const ends = [edge.from, edge.to];
-    const squeezed = ends.some((end) => rectsOverlap(pill, graph.nodes[end].rect));
+    const squeezed = ends.some((end) => pillCovers(pill, graph.nodes[end]));
     const squeezedFinding = squeezed ? [{
       kind: 'label-collision' as const,
       message: `${label} does not fit between its nodes.`,
       ...withMove(roomForLabel(graph, edge, pill)),
     }] : [];
     const coveredFindings = graph.nodes.flatMap((node, nodeIndex) => {
-      if (ends.includes(nodeIndex) || !rectsOverlap(pill, node.rect)) return [];
+      if (ends.includes(nodeIndex) || !pillCovers(pill, node)) return [];
       return [{ kind: 'label-collision' as const, message: `${label} lies on "${node.name}".`, ...withMove(exitMove(node, pill)) }];
     });
     return [...squeezedFinding, ...coveredFindings];
@@ -239,8 +244,8 @@ function labelCollisions(graph: ScoredGraph, sketches: (EdgeSketch | null)[]): F
 
 function cutOffText({ nodes }: ScoredGraph): Finding[] {
   return nodes.flatMap((node) => {
-    if (!textCutOff(node.name, node.description, node.rect)) return [];
-    const needed = estimateNodeSize(node.name, node.description);
+    if (!textCutOff(node.name, node.description, node.rect, node.shape)) return [];
+    const needed = estimateNodeSize(node.name, node.description, node.shape);
     const resize = { node: node.name, w: Math.max(node.rect.w, needed.w), h: Math.max(node.rect.h, needed.h) };
     return [{
       kind: 'text-cut-off' as const,
@@ -331,6 +336,20 @@ function roomForLabel(graph: ScoredGraph, edge: ScoredEdge, pill: Rect): NodeMov
   const needed = (level ? pill.w : pill.h) + 2 * LABEL_ROOM - gap;
   const distance = (forward ? 1 : -1) * snapUp(needed);
   return { node: graph.nodes[edge.to].name, dx: level ? distance : 0, dy: level ? 0 : distance };
+}
+
+// Whether a label's pill lies on any of a node as drawn — judged by points around the pill and
+// across it, so a pill beside a diamond's empty corner is not counted as lying on it.
+function pillCovers(pill: Rect, node: ScoredNode): boolean {
+  const columns = [pill.x, pill.x + pill.w / 2, pill.x + pill.w];
+  const rows = [pill.y, pill.y + pill.h / 2, pill.y + pill.h];
+  const pillPoints = columns.flatMap((x) => rows.map((y) => ({ x, y })));
+  return pillPoints.some((point) => shapeContainsPoint(node.shape, node.rect, point))
+    || rectContains(pill, rectCenter(node.rect));
+}
+
+function rectContains(rect: Rect, point: Point): boolean {
+  return point.x > rect.x && point.x < rect.x + rect.w && point.y > rect.y && point.y < rect.y + rect.h;
 }
 
 function pillAt(grip: Point, text: string): Rect {

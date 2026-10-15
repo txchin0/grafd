@@ -10,7 +10,7 @@ You are reading a `.flow` workspace. This guide defines how to parse, interpret,
 4. Everything is a node. A graph is a node that has been expanded.
 5. `grafd.manifest.json` is the editor's workspace state file. Read its `entrypoint` field to find the root graph and its `flowVersion` field to confirm which format version applies (this guide is that version). Ignore everything else in it and do not edit it.
 6. Nodes may carry the editor-owned properties `id` and `pos`. They are identity/layout metadata, not semantics — see [Editor-Owned Properties](#editor-owned-properties).
-7. **All styling goes into another file.** How a graph looks — node shapes, edge colours, any decoration — lives in its canvas layer, `<file>.flow.canvas.json`, never in the `.flow`. Never read or write a canvas layer; move and delete it together with its `.flow` — see [Canvas Layer Files](#canvas-layer-files).
+7. **All styling goes into another file.** How a graph looks — node shapes, edge colours, any decoration — lives in its canvas layer, `<file>.flow.canvas.json`, never in the `.flow`. Never read or write a canvas layer by hand — to style a graph, give its nodes roles with `grafd style`, which writes the layer for you; move and delete it together with its `.flow` — see [Canvas Layer Files](#canvas-layer-files).
 
 ## Workspace Layout
 
@@ -19,7 +19,7 @@ workspace/
   grafd.manifest.json    # editor state: entrypoint + flowVersion + display and UI state (read entrypoint and flowVersion only)
   SAVE-GUIDE.md          # this guide
   main.flow              # root graph (whatever the manifest's entrypoint names)
-  main.flow.canvas.json  # main.flow's styling — editor-owned, never read or edit it
+  main.flow.canvas.json  # main.flow's styling — written by the editor and `grafd style`, never by hand
   auth/
     login.flow           # referenced graphs, organized freely in subfolders
 ```
@@ -91,7 +91,22 @@ auth/login.flow.canvas.json   # its styling — exists only while the graph has 
 
 The canvas layer means nothing to you and its content is not part of the format. When working in a workspace:
 
-- **Never** read a `.canvas.json` to interpret a graph, and **never** write or edit one.
+- **Never** read a `.canvas.json` to interpret a graph, and **never** write or edit one by hand.
+- **To style** a graph, when the `grafd` command is available, name what its nodes are and let `grafd style <file.flow>` write the layer: `--role=<node>=<role>` for each node you know (repeatable), `--roles=<file.json>` for many at once (a JSON object of node names to roles), and `--infer` to read start, end, decision and error off the graph's structure for the rest. Each role draws its node in a shape, and edges into an `error` node are drawn red and dashed:
+
+  | Role | Shape | For |
+  |---|---|---|
+  | `start` | rounded | where the flow begins |
+  | `end` | rounded | where it finishes |
+  | `process` | rectangle | a step that does something |
+  | `decision` | diamond | a step that branches on a condition |
+  | `datastore` | cylinder | a database, cache, queue or file |
+  | `io` | parallelogram | input from or output to a user or device |
+  | `external` | hexagon | a system or actor outside this one |
+  | `event` | ellipse | something that happens and sets things off |
+  | `error` | rectangle | where things go when they fail |
+
+  It may also add `id` and `pos` lines to the `.flow` — node ids key the layer, and a node whose new shape leaves its text too little room grows to fit. Without `grafd`, leave styling to the editor.
 - **Never** put styling into a `.flow`. There is no style property — a `shape:` or `color:` line in a `.flow` is not a style, just an unknown property the linter warns about.
 - **Rename or move** `X.flow` → also rename `X.flow.canvas.json` → `Y.flow.canvas.json` when it exists.
 - **Delete** `X.flow` → also delete `X.flow.canvas.json`.

@@ -11,6 +11,7 @@
 
 import { flowDirectionOf, placeAroundPinned, type PinnedGraph } from './anchored-placement.js';
 import type { EdgeKind } from './canvas-edge-style.js';
+import type { NodeShape } from './canvas-layer.js';
 import type { Rect } from './flow-format.js';
 import { layOutLayered, layOutLayeredDrawing, type LayeredGraph, type LayoutDirection } from './layered-layout.js';
 import { DEFAULT_NODE_SIZE } from './node-size-estimate.js';
@@ -25,6 +26,9 @@ export interface LayoutNode {
   pos: Rect | null;
   description: string | null;
   entrypoint: boolean;
+  // Given only when arranging: placing a node the canvas has never drawn sizes it as a rectangle,
+  // since the canvas and the linter must place it alike and only one of them reads the layer.
+  shape?: NodeShape;
 }
 
 // An edge leaves the node at index `from` for whichever node is named `target`; a name that
@@ -128,7 +132,7 @@ function layeredGraphWithEdgesOf(scope: LayoutScope): { graph: LayeredGraph; sco
   const scopeEdgeOf = [...scope.edges.keys()].filter((index) => indexOf.has(scope.edges[index].target));
   return {
     graph: {
-      nodes: scope.nodes.map((node) => ({ title: node.name, description: node.description, entrypoint: node.entrypoint })),
+      nodes: scope.nodes.map((node) => ({ title: node.name, description: node.description, entrypoint: node.entrypoint, shape: node.shape })),
       edges: scopeEdgeOf.map((index) => {
         const edge = scope.edges[index];
         return { from: edge.from, to: indexOf.get(edge.target)!, kind: edge.kind, label: edge.label };

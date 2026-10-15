@@ -1820,7 +1820,7 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     session.runAction(() => {
       let planned: PlannedBend[] = [];
       applyToDoc(owner, () => {
-        planned = arrangeGraphScope(items, chosen).bends;
+        planned = arrangeGraphScope(items, chosen, (node) => layerSync.shapeOf(owner, node)).bends;
       }, { commit: 'now' });
       const bends = planned.flatMap((plan) => {
         const edge = modelEdgeOf(plan);
