@@ -6,17 +6,16 @@
 
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { listFlowFiles } from '../server/flow-files.js';
+import { listFlowFiles, readFileIfPresent, UNREADABLE_FILE } from '../server/flow-files.js';
 import {
   canvasLayerIsUnreadable,
   canvasLayerPathOf,
   emptyCanvasLayer,
-  nodeShapeOf,
   parseCanvasLayer,
   serializeCanvasLayer,
   type CanvasLayer,
 } from '../shared/canvas-layer.js';
-import { arrangeDocument, assignMissingNodeIds, graphScopesOf, placeMissingPositions, setPlannedBends } from '../shared/document-layout.js';
+import { arrangeDocument, assignMissingNodeIds, graphScopesOf, layerReadingOf, placeMissingPositions, setPlannedBends } from '../shared/document-layout.js';
 import { parseFlow, serializeFlow, type FlowDocument } from '../shared/flow-format.js';
 import type { LayoutDirection } from '../shared/layered-layout.js';
 
@@ -65,9 +64,10 @@ export async function runFlowLayout(argv: string[]): Promise<number> {
 }
 
 // The layer beside a file: its text as it is on disk (null when there is none), and what it reads
-// as — null when it cannot be read, which is then drawn in defaults and never written.
+// as — null when it cannot be read or parsed, which is then drawn in defaults and never written.
 async function layerAt(file: string): Promise<{ text: string | null; layer: CanvasLayer | null }> {
-  const text = await readFile(file, 'utf8').catch(() => null);
+  const text = await readFileIfPresent(file);
+  if (text === UNREADABLE_FILE) return { text: null, layer: null };
   if (text === null) return { text, layer: emptyCanvasLayer() };
   return { text, layer: canvasLayerIsUnreadable(text) ? null : parseCanvasLayer(text) };
 }
@@ -111,7 +111,7 @@ async function arrangeFile(flowPath: string, doc: FlowDocument, direction?: Layo
   const layerPath = canvasLayerPathOf(flowPath);
   const { text: layerText, layer } = await layerAt(layerPath);
   const idsAssigned = layer !== null && graphScopesOf(doc).map(assignMissingNodeIds).some((assigned) => assigned);
-  const { moved, bends } = arrangeDocument(doc, (node) => nodeShapeOf(layer, node.id), direction);
+  const { moved, bends } = arrangeDocument(doc, layerReadingOf(doc, layer), direction);
   if (layer === null) return moved;
   setPlannedBends(layer, doc, bends);
   const layerOut = serializeCanvasLayer(layer);

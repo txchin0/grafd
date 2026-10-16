@@ -6,8 +6,8 @@
 // never to produce. Pure and deterministic, so arranging an arranged scope still changes nothing,
 // and the canvas and the linter, placing the same scope, still place it alike.
 
-import type { Arrangement, LayoutScope } from './auto-layout.js';
-import { bendThroughPoint } from './canvas-edge-style.js';
+import type { Arrangement, LayoutEdge, LayoutScope } from './auto-layout.js';
+import { bendThroughPoint, type EdgeBend } from './canvas-edge-style.js';
 import { DEFAULT_NODE_SHAPE } from './canvas-layer.js';
 import type { Rect } from './flow-format.js';
 import { scoreGraph, type FindingKind, type GraphScore, type NodeMove, type ScoredGraph } from './layout-score.js';
@@ -78,7 +78,7 @@ function stepsAside(groups: number[][], rects: Rect[]): RectsMove[] {
 // A finding's own move is for one node, and often walks into something else; any node the finding
 // is about — an edge's ends, what it runs through — may also step aside.
 function involvedStepsAside(polishing: Polishing, score: GraphScore, rects: Rect[]): RectsMove[] {
-  const indexOf = new Map(polishing.scope.nodes.map((node, index) => [node.name, index]));
+  const indexOf = nodeIndicesByName(polishing.scope);
   const blocking = score.findings.filter((finding) => STEPPED_ASIDE_FROM.includes(finding.kind));
   const involved = new Set(blocking.flatMap((finding) => finding.nodes ?? []).flatMap((name) => indexOf.get(name) ?? []));
   const free = [...involved].filter((node) => polishing.mayMove(node) && polishing.mayStepAside(node, rects));
@@ -89,7 +89,7 @@ function involvedStepsAside(polishing: Polishing, score: GraphScore, rects: Rect
 // the spine, a column of a fork — and stepping it aside to clear something else would bend that
 // line, which the score does not count against it.
 function isLinedUpWithANeighbour(scope: LayoutScope, node: number, rects: Rect[]): boolean {
-  const indexOf = new Map(scope.nodes.map((scoped, index) => [scoped.name, index]));
+  const indexOf = nodeIndicesByName(scope);
   const neighbours = scope.edges.flatMap((edge) => {
     const target = indexOf.get(edge.target);
     if (target === undefined || edge.from === target) return [];
@@ -161,14 +161,27 @@ function addsPromisedAbsent(before: GraphScore, after: GraphScore): boolean {
   return PROMISED_ABSENT.some((kind) => after.counts[kind] > before.counts[kind]);
 }
 
+// An edge the layout did not lay keeps the bend it has, unless an end of it is being placed: that
+// bend was shaped for where the end stood, and placing it straightens the edge.
+function keptBend(polishing: Polishing, edge: LayoutEdge, to: number): EdgeBend | null {
+  if (polishing.mayMove(edge.from) || polishing.mayMove(to)) return null;
+  return edge.bend ?? null;
+}
+
+// A name declared twice resolves to its last declaration, as everywhere else in layout.
+function nodeIndicesByName(scope: LayoutScope): Map<string, number> {
+  return new Map(scope.nodes.map((node, index) => [node.name, index]));
+}
+
 function rectsAfter({ scope, mayMove }: Polishing, rects: Rect[], move: NodeMove): Rect[] | null {
-  const index = scope.nodes.findIndex((node) => node.name === move.node);
-  if (index < 0 || !mayMove(index)) return null;
+  const index = nodeIndicesByName(scope).get(move.node);
+  if (index === undefined || !mayMove(index)) return null;
   return rects.map((rect, other) => (other === index ? { ...rect, x: rect.x + move.dx, y: rect.y + move.dy } : rect));
 }
 
-function scoredGraphOf({ scope, bendPoints, keepsReservedAreas }: Polishing, rects: Rect[]): ScoredGraph {
-  const indexOf = new Map(scope.nodes.map((node, index) => [node.name, index]));
+function scoredGraphOf(polishing: Polishing, rects: Rect[]): ScoredGraph {
+  const { scope, bendPoints, keepsReservedAreas } = polishing;
+  const indexOf = nodeIndicesByName(scope);
   return {
     nodes: scope.nodes.map((node, index) => ({
       name: node.name,
@@ -179,8 +192,10 @@ function scoredGraphOf({ scope, bendPoints, keepsReservedAreas }: Polishing, rec
     edges: scope.edges.flatMap((edge, index) => {
       const to = indexOf.get(edge.target);
       if (to === undefined) return [];
-      const point = bendPoints.get(index) ?? null;
-      const bend = point && bendThroughPoint(point, rectCenter(rects[edge.from]), rectCenter(rects[to]));
+      const point = bendPoints.get(index);
+      const bend = point === undefined
+        ? keptBend(polishing, edge, to)
+        : point && bendThroughPoint(point, rectCenter(rects[edge.from]), rectCenter(rects[to]));
       return [{ from: edge.from, to, kind: edge.kind, label: edge.label, bend }];
     }),
     regions: scope.regions.map((region, index) => ({

@@ -5,8 +5,9 @@
 
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { canvasLayerIsUnreadable, canvasLayerPathOf, emptyCanvasLayer, nodeShapeOf, parseCanvasLayer, serializeCanvasLayer } from '../shared/canvas-layer.js';
-import { placeMissingPositions, settleNewlyPlacedNodes } from '../shared/document-layout.js';
+import { readFileIfPresent, UNREADABLE_FILE } from '../server/flow-files.js';
+import { canvasLayerIsUnreadable, canvasLayerPathOf, emptyCanvasLayer, parseCanvasLayer, serializeCanvasLayer } from '../shared/canvas-layer.js';
+import { layerReadingOf, placeMissingPositions, settleNewlyPlacedNodes } from '../shared/document-layout.js';
 import { parseFlow, serializeFlow, type FlowItem, type FlowNode, type GraphItem } from '../shared/flow-format.js';
 import { isNodeRole, NODE_ROLES, ROLE_MEANINGS, ROLE_SHAPES, rolesToApply, styleByRoles, type NodeRole } from '../shared/node-roles.js';
 
@@ -84,8 +85,8 @@ export async function styleFlowFile(options: Options): Promise<string[] | string
   if (!items) return `${options.file} has no \`graph: ${options.graph}\` block.`;
 
   const layerFile = canvasLayerPathOf(flowFile);
-  const layerText = await readFile(layerFile, 'utf8').catch(() => null);
-  if (layerText !== null && canvasLayerIsUnreadable(layerText)) {
+  const layerText = await readFileIfPresent(layerFile);
+  if (layerText === UNREADABLE_FILE || canvasLayerIsUnreadable(layerText)) {
     return `${path.basename(layerFile)} cannot be read, so it is left as it is: fix or delete it, then style again.`;
   }
   const layer = layerText === null ? emptyCanvasLayer() : parseCanvasLayer(layerText);
@@ -95,10 +96,10 @@ export async function styleFlowFile(options: Options): Promise<string[] | string
   // As the editor does on opening the file, so every node has a place to be sized about.
   const unplaced = new Set(nodesIn(items).filter((node) => !node.pos));
   const placed = placeMissingPositions(doc);
-  const roles = rolesToApply(items, layer, named, options.infer);
+  const roles = rolesToApply(doc, items, layer, named, options.infer);
   const styling = styleByRoles(doc, items, layer, roles);
   const grownNew = new Set(styling.resized.map(({ node }) => node).filter((node) => unplaced.has(node)));
-  const settled = settleNewlyPlacedNodes(items, grownNew.size > 0 ? unplaced : new Set(), (node) => nodeShapeOf(layer, node.id));
+  const settled = settleNewlyPlacedNodes(items, grownNew.size > 0 ? unplaced : new Set(), layerReadingOf(doc, layer));
 
   if (placed || styling.flowChanged || settled) await writeFile(flowFile, serializeFlow(doc));
   const layerOut = serializeCanvasLayer(layer);

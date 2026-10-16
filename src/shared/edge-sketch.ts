@@ -16,6 +16,12 @@ export interface EdgeSketch {
   // The part of the edge outside both of its nodes, as a polyline; empty when the nodes overlap
   // so much that nothing of it shows.
   points: Point[];
+  // The same line with no more points than its shape needs — a straight edge's two ends — for
+  // testing it segment by segment against other edges, which is most of what scoring costs.
+  polyline: Point[];
+  // The box around `points`, null when there are none: what the score tests first, since most pairs
+  // of edges and most nodes are nowhere near each other.
+  bounds: Rect | null;
   // Where its label is drawn.
   grip: Point;
 }
@@ -35,7 +41,22 @@ export function sketchEdge(
   const curve = through ? quadraticThrough(from, through, to) : straightLine(from, to);
   const points = curve.filter((point) => !shapeContainsPoint(fromShape, fromRect, point) && !shapeContainsPoint(toShape, toRect, point));
   const grip = through ?? midpointOf(points, from, to);
-  return { points, grip };
+  return { points, polyline: through ? points : endsOf(points), bounds: boundsOfPoints(points), grip };
+}
+
+// A straight edge's part outside both nodes is one unbroken run (every outline is convex), so its
+// two ends draw it whole.
+function endsOf(points: Point[]): Point[] {
+  return points.length < 2 ? points : [points[0], points[points.length - 1]];
+}
+
+function boundsOfPoints(points: Point[]): Rect | null {
+  if (points.length === 0) return null;
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  return { x: left, y: top, w: Math.max(...xs) - left, h: Math.max(...ys) - top };
 }
 
 function straightLine(from: Point, to: Point): Point[] {

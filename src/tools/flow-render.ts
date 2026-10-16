@@ -9,6 +9,7 @@
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveWorkspacePath } from '../server/flow-files.js';
 import { selectCanvasFont } from '../client/canvas-font.js';
 import { ExpansionLayer } from '../client/canvas/expansion.js';
 import { paintSceneSnapshot, snapshotFrameOf, type SnapshotCanvas } from '../client/canvas/scene-snapshot.js';
@@ -171,11 +172,15 @@ function fontToDrawIn(canvasLibrary: CanvasLibrary, chosen: CanvasFontId): Canva
 }
 
 // The expansion layer the painter asks for what a node's subgraph says about itself, with every
-// file the graph's nodes expand into already read.
+// file the graph's nodes expand into already read. Like the server, it reads only .flow files
+// inside the workspace, whatever an expand link spells.
 async function expansionsFor(model: FlowModel, root: string, flowPath: string): Promise<ExpansionLayer> {
   const expansions = new ExpansionLayer({
     onNeedsRender: () => {},
-    readExternalFile: (file) => readFile(path.join(root, file), 'utf8').catch(() => null),
+    readExternalFile: async (file) => {
+      const absolute = resolveWorkspacePath(root, file);
+      return absolute === null ? null : readFile(absolute, 'utf8').catch(() => null);
+    },
   });
   const expandedFiles = model.nodes.flatMap((node) => resolvedExpandPath(getProp(node, 'expand'), flowPath) ?? []);
   await Promise.all(expandedFiles.map((file) => expansions.ensureDocument(file)));

@@ -275,6 +275,11 @@ async function runWorkspaceTool(args: string[], tool: (argv: string[]) => Promis
     if (workspace === null) return 1;
     args = [workspace, ...args];
   }
+  return runReportingFailure(args, tool, name);
+}
+
+// A tool's failure reported as one line and an exit code, never as an unhandled rejection.
+async function runReportingFailure(args: string[], tool: (argv: string[]) => Promise<number>, name: string): Promise<number> {
   try {
     return await tool(args);
   } catch (error) {
@@ -319,9 +324,9 @@ export async function runCli(argv: string[]): Promise<number> {
     case 'score':
       return runScore(argv.slice(1));
     case 'render':
-      return runFlowRender(argv.slice(1));
+      return runReportingFailure(argv.slice(1), runFlowRender, 'Rendering');
     case 'style':
-      return runFlowStyle(argv.slice(1));
+      return runReportingFailure(argv.slice(1), runFlowStyle, 'Styling');
     default:
       console.error(`Unknown command: ${argv[0]}`);
       printGlobalHelp();

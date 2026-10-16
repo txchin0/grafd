@@ -1,7 +1,7 @@
 // Styling by role: the roles a graph's structure gives its nodes, the shapes and edge marks each
 // role writes into the canvas layer, the nodes grown to fit the shapes they get, and `grafd style`.
 
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -48,7 +48,7 @@ function nodeNamed(doc: FlowDocument, name: string): FlowNode {
 }
 
 function rolesByName(doc: FlowDocument): Record<string, NodeRole> {
-  return Object.fromEntries([...inferRoles(doc.items)].map(([node, role]) => [node.name, role]));
+  return Object.fromEntries([...inferRoles(doc, doc.items)].map(([node, role]) => [node.name, role]));
 }
 
 afterEach(() => {
@@ -82,12 +82,28 @@ Receipt
     expect(rolesByName(doc)).toEqual({ Cart: 'start', Pay: 'process', Refund: 'error', Receipt: 'end' });
   });
 
+  it('handles errors at the node a graph\'s own on_error fails into', () => {
+    const doc = parseFlow(`---
+name: Checkout
+on_error: -> Show Error
+---
+
+Cart
+  -> Receipt
+
+Receipt
+
+Show Error
+`);
+    expect(rolesByName(doc)).toEqual({ Cart: 'start', Receipt: 'end', 'Show Error': 'error' });
+  });
+
   it('never replaces a shape someone chose with a guess, but applies a role named outright', () => {
     const doc = parseFlow(CHECKOUT);
     const layer = emptyCanvasLayer();
     setNodeShape(layer, 'receipt', 'parallelogram');
     const named = new Map([[nodeNamed(doc, 'Cart'), 'datastore' as const]]);
-    const roles = rolesToApply(doc.items, layer, named, true);
+    const roles = rolesToApply(doc, doc.items, layer, named, true);
     expect(roles.get(nodeNamed(doc, 'Receipt'))).toBeUndefined();
     expect(roles.get(nodeNamed(doc, 'Cart'))).toBe('datastore');
     expect(roles.get(nodeNamed(doc, 'Pay'))).toBe('decision');
@@ -98,7 +114,7 @@ describe('styling by role', () => {
   it('writes each role\'s shape into the layer', () => {
     const doc = parseFlow(CHECKOUT);
     const layer = emptyCanvasLayer();
-    styleByRoles(doc, doc.items, layer, inferRoles(doc.items));
+    styleByRoles(doc, doc.items, layer, inferRoles(doc, doc.items));
     expect(nodeShapeOf(layer, 'pay')).toBe(ROLE_SHAPES.decision);
     expect(nodeShapeOf(layer, 'cart')).toBe(ROLE_SHAPES.start);
   });
@@ -191,6 +207,15 @@ describe('grafd style', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(await runFlowStyle([path.join(root, 'main.flow'), '--infer'])).toBe(1);
     expect(await readFile(layerFile, 'utf8')).toBe('not json');
+  });
+
+  it('refuses a layer that is there but cannot be opened, rather than writing a new one over it', async () => {
+    const root = await workspaceWith(CHECKOUT);
+    const layerFile = canvasLayerPathOf(path.join(root, 'main.flow'));
+    await mkdir(layerFile);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await runFlowStyle([path.join(root, 'main.flow'), '--infer'])).toBe(1);
+    expect((await stat(layerFile)).isDirectory()).toBe(true);
   });
 
   it('needs something to apply', async () => {

@@ -41,7 +41,7 @@ import type { DisplayGeometry } from './canvas/expansion.js';
 import type { Point } from './geometry.js';
 import { DEFAULT_NODE_SIZE, placeNodes } from '../shared/auto-layout.js';
 import { layoutScopeOfItems } from '../shared/document-layout.js';
-import { branchesOnLabels, isEntryNode } from '../shared/node-roles.js';
+import { branchesOnLabels, graphErrorTargets, isEntryNode } from '../shared/node-roles.js';
 import { rectContainsRect, regionRectFrom } from '../shared/rect-math.js';
 
 export interface GhostNode {
@@ -616,7 +616,7 @@ export function buildModel(doc: FlowDocument, scopeName: string | null): FlowMod
   const contexts = modelContextsOf(scopeItems(doc, scopeName), nodesByName);
 
   const ghosts = resolveEdgeTargets(edges, nodesByName);
-  const traits = inferTraits(doc, nodes, edges, contexts);
+  const traits = inferTraits(doc, scopeItems(doc, scopeName), edges, contexts);
   return {
     nodes,
     edges,
@@ -673,15 +673,15 @@ function makeGhost(edge: ModelEdge, ghostIndex: number): GhostNode {
 
 function inferTraits(
   doc: FlowDocument,
-  nodes: FlowNode[],
+  items: FlowItem[],
   edges: ModelEdge[],
   contexts: ModelContext[],
 ): Map<FlowNode, NodeTraits> {
-  const namesLedInto = new Set(edges.map((edge) => edge.spec.target));
+  const namesLedInto = new Set([...edges.map((edge) => edge.spec.target), ...graphErrorTargets(doc, items)]);
   const contextNamesByMember = contextNamesByNode(contexts);
   const inheritsContexts = parseListValue(getPreambleField(doc, 'inherits')).length > 0;
   const traits = new Map<FlowNode, NodeTraits>();
-  for (const node of nodes) {
+  for (const node of nodesIn(items)) {
     traits.set(node, {
       entry: isEntryNode(node, namesLedInto),
       decision: branchesOnLabels(node),

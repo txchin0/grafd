@@ -158,7 +158,7 @@ function edgesThroughNodes(graph: ScoredGraph, sketches: (EdgeSketch | null)[]):
     if (!sketch) return [];
     return graph.nodes.flatMap((node, nodeIndex) => {
       if (nodeIndex === edge.from || nodeIndex === edge.to) return [];
-      if (!sketch.points.some((point) => shapeContainsPoint(node.shape, node.rect, point))) return [];
+      if (!sketchEntersNode(sketch, node)) return [];
       const [move, otherWay] = movesClearing(node, sketch.points, runsLevel(graph, edge));
       return [{
         kind: 'edge-through-node' as const,
@@ -192,9 +192,7 @@ function outsidersInRegions(graph: ScoredGraph): Finding[] {
 function overlappingRegions(graph: ScoredGraph): Finding[] {
   return pairsOf(graph.regions.length).flatMap(([first, second]) => {
     const [a, b] = [graph.regions[first], graph.regions[second]];
-    const [frameA, frameB] = [frameOf(graph, a), frameOf(graph, b)];
-    const sharesMembers = a.members.some((member) => b.members.includes(member));
-    if (!frameA || !frameB || sharesMembers || !rectsOverlap(frameA, frameB)) return [];
+    if (!regionsOverlapWithoutSharing(graph, a, b)) return [];
     return [{
       kind: 'regions-overlap' as const,
       message: `Regions "${a.name}" and "${b.name}" overlap, though no node belongs to both.`,
@@ -203,10 +201,18 @@ function overlappingRegions(graph: ScoredGraph): Finding[] {
   });
 }
 
+// Two regions with a member in common overlap by construction; only two that share none are drawn
+// as overlapping by mistake.
+function regionsOverlapWithoutSharing(graph: ScoredGraph, a: ScoredRegion, b: ScoredRegion): boolean {
+  if (a.members.some((member) => b.members.includes(member))) return false;
+  const [frameA, frameB] = [frameOf(graph, a), frameOf(graph, b)];
+  if (!frameA || !frameB) return false;
+  return rectsOverlap(frameA, frameB);
+}
+
 function crossings(graph: ScoredGraph, sketches: (EdgeSketch | null)[]): Finding[] {
   return pairsOf(graph.edges.length).flatMap(([first, second]) => {
-    const [a, b] = [sketches[first], sketches[second]];
-    if (!a || !b || joinSameNodes(graph.edges[first], graph.edges[second]) || !polylinesCross(a.points, b.points)) return [];
+    if (!edgesCross(graph, sketches, first, second)) return [];
     return [{
       kind: 'crossing' as const,
       message: `${edgeName(graph, graph.edges[first])} crosses ${edgeName(graph, graph.edges[second])}.`,
@@ -247,7 +253,8 @@ function labelCollisions(graph: ScoredGraph, sketches: (EdgeSketch | null)[]): F
   });
   const onLabels = pairsOf(pills.length).flatMap(([first, second]) => {
     const [a, b] = [pills[first], pills[second]];
-    if (!a || !b || joinSameNodes(graph.edges[first], graph.edges[second]) || !rectsOverlap(a, b)) return [];
+    if (!a || !b) return [];
+    if (joinSameNodes(graph.edges[first], graph.edges[second]) || !rectsOverlap(a, b)) return [];
     const move = labelsApart(graph, graph.edges[second], a, b);
     return [{
       kind: 'label-collision' as const,
@@ -282,7 +289,7 @@ function nearMisses(graph: ScoredGraph): Finding[] {
     const [from, to] = [graph.nodes[edge.from], graph.nodes[edge.to]];
     const level = runsLevel(graph, edge);
     const offset = level ? rectCenter(to.rect).y - rectCenter(from.rect).y : rectCenter(to.rect).x - rectCenter(from.rect).x;
-    if (reported.has(pair) || Math.abs(offset) <= CANVAS_SNAP / 2 || Math.abs(offset) > NEAR_MISS) return [];
+    if (reported.has(pair) || !isNearMiss(offset)) return [];
     reported.add(pair);
     const move = { node: to.name, dx: level ? 0 : -offset, dy: level ? -offset : 0 };
     return [{
@@ -292,6 +299,12 @@ function nearMisses(graph: ScoredGraph): Finding[] {
       move,
     }];
   });
+}
+
+// Out of line by more than the lattice accounts for, but close enough to look like a miss.
+function isNearMiss(offset: number): boolean {
+  const distance = Math.abs(offset);
+  return distance > CANVAS_SNAP / 2 && distance <= NEAR_MISS;
 }
 
 // Whether an edge runs more across the page than down it, which decides which way a node in its
@@ -391,13 +404,39 @@ function frameOf(graph: ScoredGraph, region: ScoredRegion): Rect | null {
   return regionRectFrom(region.area, region.members.map((member) => graph.nodes[member].rect));
 }
 
-function polylinesCross(first: Point[], second: Point[]): boolean {
+function sketchEntersNode(sketch: EdgeSketch, node: ScoredNode): boolean {
+  if (!sketch.bounds || !rectsTouch(sketch.bounds, node.rect)) return false;
+  return sketch.points.some((point) => shapeContainsPoint(node.shape, node.rect, point));
+}
+
+function edgesCross(graph: ScoredGraph, sketches: (EdgeSketch | null)[], first: number, second: number): boolean {
+  const [a, b] = [sketches[first], sketches[second]];
+  if (!a?.bounds || !b?.bounds) return false;
+  if (joinSameNodes(graph.edges[first], graph.edges[second])) return false;
+  return rectsTouch(a.bounds, b.bounds) && polylinesCross(a.polyline, b.polyline, b.bounds);
+}
+
+// Inclusive, unlike `rectsOverlap`: two polylines meeting at a point on both boxes' edge still cross.
+function rectsTouch(first: Rect, second: Rect): boolean {
+  return first.x <= second.x + second.w && second.x <= first.x + first.w
+    && first.y <= second.y + second.h && second.y <= first.y + first.h;
+}
+
+// A segment that meets the other polyline lies at least partly within its box, so one that does not
+// is passed over without testing it against every segment there.
+function polylinesCross(first: Point[], second: Point[], secondBounds: Rect): boolean {
   for (let i = 0; i + 1 < first.length; i++) {
+    if (!segmentTouchesBox(first[i], first[i + 1], secondBounds)) continue;
     for (let j = 0; j + 1 < second.length; j++) {
       if (segmentsMeet(first[i], first[i + 1], second[j], second[j + 1])) return true;
     }
   }
   return false;
+}
+
+function segmentTouchesBox(a: Point, b: Point, box: Rect): boolean {
+  return Math.max(a.x, b.x) >= box.x && Math.min(a.x, b.x) <= box.x + box.w
+    && Math.max(a.y, b.y) >= box.y && Math.min(a.y, b.y) <= box.y + box.h;
 }
 
 // Whether two segments of sampled curves meet. Meeting at a sample point counts: two symmetric

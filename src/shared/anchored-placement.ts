@@ -205,7 +205,9 @@ function nearestFreeOffset(
   };
   const clearOfNodes = (offset: Offset): boolean =>
     block.every((rect) => others.every((other) => !rectsOverlap(spaced(translated(rect, offset)), spaced(other.rect))));
-  const regionsAfter = (offset: Offset): RegionChange => regionChange(graph, placed, component, block.map((rect) => translated(rect, offset)));
+  const regionsBefore = regionRectsOf(graph, placed);
+  const regionsAfter = (offset: Offset): RegionChange =>
+    regionChange(graph, placed, regionsBefore, component, block.map((rect) => translated(rect, offset)));
   const strictly = (offset: Offset): boolean => {
     const change = regionsAfter(offset);
     return keepsOutsidersOut(change) && keepsRegionsApart(change);
@@ -239,29 +241,44 @@ interface RegionChange {
   after: (Rect | null)[];
 }
 
-function regionChange(graph: PinnedGraph, placed: (Rect | null)[], component: number[], blockRects: Rect[]): RegionChange {
+// `before` is the same for every spot a block tries, so it is worked out once per block.
+function regionChange(
+  graph: PinnedGraph,
+  placed: (Rect | null)[],
+  before: (Rect | null)[],
+  component: number[],
+  blockRects: Rect[],
+): RegionChange {
   const withBlock = [...placed];
   component.forEach((node, index) => {
     withBlock[node] = blockRects[index];
   });
-  const regionRects = (rects: (Rect | null)[]): (Rect | null)[] =>
-    graph.regions.map((members, region) => regionRectFrom(graph.regionAreas[region], rectsOf(members, rects)));
-  return { graph, placed, withBlock, before: regionRects(placed), after: regionRects(withBlock) };
+  return { graph, placed, withBlock, before, after: regionRectsOf(graph, withBlock) };
+}
+
+function regionRectsOf(graph: PinnedGraph, rects: (Rect | null)[]): (Rect | null)[] {
+  return graph.regions.map((members, region) => regionRectFrom(graph.regionAreas[region], rectsOf(members, rects)));
 }
 
 // No new node in a region it is not a member of, and no region grown over a node outside it that
 // it did not already reach.
-function keepsOutsidersOut({ graph, placed, withBlock, before, after }: RegionChange): boolean {
-  return graph.regions.every((members, region) => {
-    const regionAfter = after[region];
+function keepsOutsidersOut(change: RegionChange): boolean {
+  return change.graph.regions.every((members, region) => {
+    const regionAfter = change.after[region];
     if (!regionAfter) return true;
     const memberSet = new Set(members);
-    return withBlock.every((rect, node) => {
-      if (!rect || memberSet.has(node) || !rectsOverlap(regionAfter, rect)) return true;
-      const regionBefore = before[region];
-      return placed[node] !== null && regionBefore !== null && rectsOverlap(regionBefore, rect);
+    return change.withBlock.every((rect, node) => {
+      if (!rect || memberSet.has(node)) return true;
+      return !rectsOverlap(regionAfter, rect) || regionAlreadyReached(change, region, node, rect);
     });
   });
+}
+
+// Whether a placed node's spot was already inside the region's frame before the block came.
+function regionAlreadyReached(change: RegionChange, region: number, node: number, rect: Rect): boolean {
+  const regionBefore = change.before[region];
+  if (change.placed[node] === null || regionBefore === null) return false;
+  return rectsOverlap(regionBefore, rect);
 }
 
 // No region grown into another region it did not already reach, which would cross their frames.
@@ -269,12 +286,15 @@ function keepsRegionsApart({ before, after }: RegionChange): boolean {
   return after.every((regionAfter, region) => {
     if (!regionAfter) return true;
     return after.every((otherAfter, other) => {
-      if (other === region || !otherAfter || !rectsOverlap(regionAfter, otherAfter)) return true;
-      const regionBefore = before[region];
-      const otherBefore = before[other];
-      return regionBefore !== null && otherBefore !== null && rectsOverlap(regionBefore, otherBefore);
+      if (other === region || !otherAfter) return true;
+      return !rectsOverlap(regionAfter, otherAfter) || framesOverlap(before[region], before[other]);
     });
   });
+}
+
+function framesOverlap(first: Rect | null, second: Rect | null): boolean {
+  if (first === null || second === null) return false;
+  return rectsOverlap(first, second);
 }
 
 function rectsOf(nodes: number[], rects: (Rect | null)[]): Rect[] {

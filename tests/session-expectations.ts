@@ -8,12 +8,12 @@ import type { Tool } from '../src/client/canvas/canvas-view.js';
 import type { Point } from '../src/client/geometry.js';
 import { allNodes, buildModel, containingGraphBlockName, graphBlockNames, regionRectOf, type FlowModel } from '../src/client/flow-doc.js';
 import { parseFlow, type FlowDocument, type Rect } from '../src/shared/flow-format.js';
-import { canvasLayerPathOf, isCanvasLayerPath, nodeShapeOf, parseCanvasLayer } from '../src/shared/canvas-layer.js';
+import { canvasLayerPathOf, isCanvasLayerPath, parseCanvasLayer } from '../src/shared/canvas-layer.js';
 import { isDrawableText, textDrawingOf, type TextDrawing } from '../src/shared/canvas-text.js';
 import { imageDrawingOf, type ImageDrawing } from '../src/shared/canvas-image.js';
 import { axesOf, isResizeEdge, type ResizeEdge } from '../src/client/canvas/resize-handles.js';
 import { boundsOfRects, rectContainsRect } from '../src/shared/rect-math.js';
-import { arrangeGraphScope } from '../src/shared/document-layout.js';
+import { arrangeGraphScope, layerReadingOf } from '../src/shared/document-layout.js';
 import { STROKE_KIND, drawingBounds, strokeBounds, strokePointBounds, strokePointsOf, type Stroke } from '../src/shared/canvas-drawings.js';
 import type { HeadlessEditor } from './editor-harness.js';
 import { isHistoryAction, type ActionTrace, type SessionAction } from './session-actions.js';
@@ -429,7 +429,7 @@ function arrangeThatLeftItUntidy(step: SessionStep, was: GraphState, now: GraphS
     const doc = parseFlow(step.after.get(step.flowPath) ?? '');
     // Arranged as the editor arranges it: each node sized for the shape the layer draws it in.
     const layer = parseCanvasLayer(step.after.get(canvasLayerPathOf(step.flowPath)) ?? null);
-    const rearranged = arrangeGraphScope(doc.items, undefined, (node) => nodeShapeOf(layer, node.id));
+    const rearranged = arrangeGraphScope(doc.items, undefined, layerReadingOf(doc, layer));
     if (rearranged.moved) return violation('arrange tidies the graph', 'arranging the arranged graph again moved something');
     return [];
   }

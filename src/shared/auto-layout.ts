@@ -10,7 +10,7 @@
 // file that has not is judged by the layout it will get on first open.
 
 import { flowDirectionOf, placeAroundPinned, type PinnedGraph } from './anchored-placement.js';
-import type { EdgeKind } from './canvas-edge-style.js';
+import type { EdgeBend, EdgeKind } from './canvas-edge-style.js';
 import type { NodeShape } from './canvas-layer.js';
 import type { Rect } from './flow-format.js';
 import { layOutLayered, layOutLayeredDrawing, type LayeredGraph, type LayoutDirection } from './layered-layout.js';
@@ -39,6 +39,9 @@ export interface LayoutEdge {
   target: string;
   kind: EdgeKind;
   label: string | null;
+  // Given only when arranging, like a node's `shape`: the bend the edge has, so new nodes are
+  // placed clear of where an edge left alone really runs.
+  bend?: EdgeBend | null;
 }
 
 export interface LayoutRegion {

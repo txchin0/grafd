@@ -122,7 +122,8 @@ export function layOutLayeredDrawing(graph: LayeredGraph, direction: LayoutDirec
     // only the first takes the lane, and the rest keep to the bundle the canvas fans out. An edge
     // between two bands has its lane in the band it leaves, so bending through it would drag the
     // curve along that band before it dives across: it runs straight across the gap instead.
-    if (passage.length === 0 || laneTaken.has(rankedIndex) || bands[from] !== bands[to]) return;
+    const hasALaneToBendAlong = passage.length > 0 && bands[from] === bands[to];
+    if (!hasALaneToBendAlong || laneTaken.has(rankedIndex)) return;
     laneTaken.add(rankedIndex);
     lanePoints[graphEdge] = middleOf(passage.map(pointAt));
   });

@@ -39,7 +39,7 @@ import {
   type Reference,
 } from '../shared/flow-format.js';
 import { DEFAULT_NODE_SIZE } from '../shared/auto-layout.js';
-import { arrangeGraphScope, type DocumentEdge, type PlannedBend } from '../shared/document-layout.js';
+import { arrangeGraphScope, type DocumentEdge, type LayerReading, type PlannedBend } from '../shared/document-layout.js';
 import * as FlowDoc from './flow-doc.js';
 import type { FlowModel, MembershipChange, ModelContext, ModelEdge } from './flow-doc.js';
 import type { Point } from './geometry.js';
@@ -1638,7 +1638,7 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     }
     items.push({ label: 'Copy', onSelect: clipboard.copy });
     items.push({ label: 'Cut', onSelect: clipboard.cut });
-    if (isInGraphOnScreen(node)) items.push({ label: arrangeLabelFor(selectionCount), onSelect: arrange });
+    if (isInGraphOnScreen(node)) items.push({ label: arrangeLabelFor(selectedNodesToArrange().size), onSelect: arrange });
     if (frameInterior) {
       items.push({ label: 'Paste', disabled: !clipboard.hasContent(), onSelect: () => pasteAt(frameInterior, 'at-point') });
     }
@@ -1806,10 +1806,14 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
   // belong to another graph, so a selection of only those arranges nothing.
   function arrange(): boolean {
     if (!openFlow) return false;
-    const chosen = new Set([...view.selection].filter(isInGraphOnScreen));
+    const chosen = selectedNodesToArrange();
     if (view.selection.size > 0 && chosen.size === 0) return false;
     arrangeGraphOnScreen(chosen.size > 0 ? chosen : undefined);
     return true;
+  }
+
+  function selectedNodesToArrange(): Set<FlowNode> {
+    return new Set([...view.selection].filter(isInGraphOnScreen));
   }
 
   function arrangeGraphOnScreen(chosen?: Set<FlowNode>): void {
@@ -1820,7 +1824,7 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     session.runAction(() => {
       let planned: PlannedBend[] = [];
       applyToDoc(owner, () => {
-        planned = arrangeGraphScope(items, chosen, (node) => layerSync.shapeOf(owner, node)).bends;
+        planned = arrangeGraphScope(items, chosen, layerReadingOn(owner)).bends;
       }, { commit: 'now' });
       const bends = planned.flatMap((plan) => {
         const edge = modelEdgeOf(plan);
@@ -1830,8 +1834,19 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     });
   }
 
-  // The edge on screen a document edge is drawn as. Read after the model has been rebuilt from the
-  // arranged document, which keeps every spec object and so every flow edge's identity.
+  // How the open flow's layer draws its nodes and edges, read before anything moves.
+  function layerReadingOn(owner: DocumentOwner): LayerReading {
+    return {
+      shapeOf: (node) => layerSync.shapeOf(owner, node),
+      bendOf: (documentEdge) => {
+        const edge = modelEdgeOf(documentEdge);
+        return edge ? layerSync.edgeStyleOf(owner, edge).bend : null;
+      },
+    };
+  }
+
+  // The edge on screen a document edge is drawn as. A rebuild from the arranged document keeps
+  // every spec object, and so every flow edge's identity, so this reads alike before and after.
   function modelEdgeOf({ node, spec }: DocumentEdge): ModelEdge | undefined {
     return openFlow?.model.edges.find((edge) =>
       edge.from === node && (spec ? edge.spec === spec : edge.kind === 'error'));

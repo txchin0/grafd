@@ -2,7 +2,7 @@
 // document, through the editor's Arrange command, and from `grafd layout`.
 
 import fc from 'fast-check';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -190,7 +190,7 @@ describe('arranging polishes the layered drawing', () => {
     const shapeOf = (node: FlowNode): NodeShape => shapes[node.name] ?? 'rectangle';
     const layer = emptyCanvasLayer();
     for (const node of allNodes(doc)) setNodeShape(layer, node.id!, shapeOf(node));
-    setPlannedBends(layer, doc, arrangeGraphScope(doc.items, undefined, shapeOf).bends);
+    setPlannedBends(layer, doc, arrangeGraphScope(doc.items, undefined, { shapeOf }).bends);
     const [body] = scoreDocumentText(serializeFlow(doc), layer);
     expect(body.current.counts['edge-through-node']).toBe(0);
     const spine = ['Transform Data', 'Load Warehouse', 'Refresh Dashboards'].map((name) => nodeNamed(doc, name).pos!);
@@ -430,6 +430,13 @@ describe('grafd layout', () => {
     await runFlowLayout([root, '--all']);
     expect(await readFile(canvasLayerPathOf(file), 'utf8')).toBe('{ not json');
     expect(posOf(await readFile(file, 'utf8'), 'C')).not.toEqual({ x: 600, y: 600, w: 200, h: 88 });
+  });
+
+  it('never takes a layer that is there but cannot be opened for no layer, and writes nothing over it', async () => {
+    const { root, file } = await workspaceWith(SKIPPING_FLOW);
+    await mkdir(canvasLayerPathOf(file));
+    expect(await runFlowLayout([root, '--all'])).toBe(0);
+    expect((await stat(canvasLayerPathOf(file))).isDirectory()).toBe(true);
   });
 
   it('turns every graph the way --direction says', async () => {

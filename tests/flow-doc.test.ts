@@ -133,6 +133,27 @@ Alert
     expect(entryNames).toEqual(['A', 'Alert']);
   });
 
+  it('reads the node a graph\'s own on_error fails into as reached, not as an entry', () => {
+    const handlerDoc = docFrom(`---
+name: Checkout
+on_error: -> Show Error
+---
+
+A
+  ${PLACED(0, 0)}
+  -> B
+
+B
+  ${PLACED(300, 0)}
+
+Show Error
+  ${PLACED(0, 300)}
+`);
+    const handlerModel = buildModel(handlerDoc, null);
+    const entryNames = handlerModel.nodes.filter((node) => handlerModel.traits.get(node)?.entry).map((node) => node.name);
+    expect(entryNames).toEqual(['A']);
+  });
+
   it('records the source document on the model', () => {
     expect(model.sourceDoc).toBe(doc);
   });

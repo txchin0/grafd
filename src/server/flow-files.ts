@@ -3,7 +3,7 @@
 // paths, and hashing file contents so the watcher can recognize the server's own writes.
 
 import { createHash } from 'node:crypto';
-import { readdir } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { isCanvasLayerPath, isFlowPath } from '../shared/canvas-layer.js';
 import { MANIFEST_FILE_NAME } from '../shared/manifest.js';
@@ -54,6 +54,23 @@ async function listWorkspaceFiles(
     }
   }
   return files.sort();
+}
+
+// A file there but not readable — locked by another process, a directory, not permitted — which a
+// writer must never mistake for no file and write over.
+export const UNREADABLE_FILE = Symbol('unreadable file');
+
+// A file's text, or null when there is no file at all.
+export async function readFileIfPresent(file: string): Promise<string | null | typeof UNREADABLE_FILE> {
+  try {
+    return await readFile(file, 'utf8');
+  } catch (error) {
+    return isMissingFileError(error) ? null : UNREADABLE_FILE;
+  }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT';
 }
 
 export function contentHash(text: string): string {

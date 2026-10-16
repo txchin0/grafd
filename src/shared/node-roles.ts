@@ -10,7 +10,7 @@
 import { DEFAULT_NODE_SHAPE, documentIdentities, nodeShapeOf, setNodeShape, type CanvasLayer, type NodeShape } from './canvas-layer.js';
 import { setEdgeStyle } from './canvas-edge-style.js';
 import { assignMissingNodeIds } from './document-layout.js';
-import { getProp, parseEdgeExpression, unquote, type FlowDocument, type FlowItem, type FlowNode, type Rect } from './flow-format.js';
+import { getPreambleField, getProp, parseEdgeExpression, unquote, type FlowDocument, type FlowItem, type FlowNode, type Rect } from './flow-format.js';
 import { estimateNodeSize, textCutOff } from './node-size-estimate.js';
 import { rectCenter, snapToCanvasGrid } from './rect-math.js';
 
@@ -52,17 +52,27 @@ export function branchesOnLabels(node: FlowNode): boolean {
 
 // Where a flow begins: declared so, or with no edge leading into it — an `on_error` included, since
 // a node only failed into is reached when something fails rather than where the flow starts.
+// `namesLedInto` holds the scope's graph-level handler too (`graphErrorTargets`).
 export function isEntryNode(node: FlowNode, namesLedInto: ReadonlySet<string>): boolean {
   return getProp(node, 'entrypoint') === 'true' || !namesLedInto.has(node.name);
+}
+
+// The node a graph's own `on_error` fails into, which is led into as surely as one a node's
+// `on_error` names. Only the file body has a preamble, so a `graph:` block's scope has none.
+export function graphErrorTargets(doc: FlowDocument, items: FlowItem[]): string[] {
+  return items === doc.items ? errorTargetsOf(getPreambleField(doc, 'on_error')) : [];
 }
 
 // The roles a graph scope's structure gives its nodes: an entry that leads somewhere starts the
 // flow, a node only ever failed into handles errors, one that branches on labels decides, and one
 // that leads nowhere ends it. Everything else is a process.
-export function inferRoles(items: FlowItem[]): Map<FlowNode, NodeRole> {
+export function inferRoles(doc: FlowDocument, items: FlowItem[]): Map<FlowNode, NodeRole> {
   const nodes = nodesOf(items);
   const flowTargets = new Set(nodes.flatMap((node) => node.edges.map((edge) => edge.target)));
-  const errorTargets = new Set(nodes.flatMap((node) => errorTargetsOf(node)));
+  const errorTargets = new Set([
+    ...nodes.flatMap((node) => errorTargetsOf(getProp(node, 'on_error'))),
+    ...graphErrorTargets(doc, items),
+  ]);
   const targets = { flow: flowTargets, error: errorTargets, any: new Set([...flowTargets, ...errorTargets]) };
   return new Map(nodes.map((node) => [node, inferredRoleOf(node, targets)]));
 }
@@ -150,6 +160,7 @@ function markEdgesIntoErrors(doc: FlowDocument, items: FlowItem[], layer: Canvas
 // each node not named, as long as it still has the default shape. A shape someone chose is never
 // replaced by a guess.
 export function rolesToApply(
+  doc: FlowDocument,
   items: FlowItem[],
   layer: CanvasLayer,
   named: ReadonlyMap<FlowNode, NodeRole>,
@@ -157,7 +168,7 @@ export function rolesToApply(
 ): Map<FlowNode, NodeRole> {
   const roles = new Map(named);
   if (!infer) return roles;
-  for (const [node, role] of inferRoles(items)) {
+  for (const [node, role] of inferRoles(doc, items)) {
     if (!roles.has(node) && nodeShapeOf(layer, node.id) === DEFAULT_NODE_SHAPE) roles.set(node, role);
   }
   return roles;
@@ -167,7 +178,6 @@ function nodesOf(items: FlowItem[]): FlowNode[] {
   return items.flatMap((item) => (item.kind === 'node' ? [item.node] : []));
 }
 
-function errorTargetsOf(node: FlowNode): string[] {
-  const onError = getProp(node, 'on_error');
+function errorTargetsOf(onError: string | null): string[] {
   return onError?.startsWith('->') ? [parseEdgeExpression(onError).target] : [];
 }

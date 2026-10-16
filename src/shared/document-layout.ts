@@ -7,8 +7,8 @@
 import { arrangeScope, arrangeSelected, placeNodes, type Arrangement, type LayoutScope } from './auto-layout.js';
 import { polishPlacement } from './layout-polish.js';
 import type { LayoutDirection } from './layered-layout.js';
-import { bendThroughPoint, setEdgeStyle, type EdgeBend } from './canvas-edge-style.js';
-import { documentIdentities, type CanvasLayer, type NodeShape } from './canvas-layer.js';
+import { bendThroughPoint, edgeStyleOf, setEdgeStyle, type EdgeBend } from './canvas-edge-style.js';
+import { documentIdentities, nodeShapeOf, type CanvasLayer, type NodeShape } from './canvas-layer.js';
 import {
   getProp,
   newUuid,
@@ -45,6 +45,25 @@ export interface ArrangeOutcome {
   bends: PlannedBend[];
 }
 
+// What a scope's canvas layer says about how it is drawn, for the steps that read the layer: the
+// shape each node is drawn in, and the bend each edge has. Placing a node the canvas has never
+// drawn reads neither, since the canvas and the linter must place it alike and only one of them
+// reads the layer.
+export interface LayerReading {
+  shapeOf?(node: FlowNode): NodeShape;
+  bendOf?(edge: DocumentEdge): EdgeBend | null;
+}
+
+// The reading of a document's layer as it stands; a null layer (none, or unreadable) reads as
+// defaults throughout.
+export function layerReadingOf(doc: FlowDocument, layer: CanvasLayer | null): Required<LayerReading> {
+  const identities = documentIdentities(doc);
+  return {
+    shapeOf: (node) => nodeShapeOf(layer, node.id),
+    bendOf: ({ node, spec }) => edgeStyleOf(layer, identities.edgeKeys.get(spec ?? node) ?? null, spec ? 'flow' : 'error').bend,
+  };
+}
+
 export function layoutScopeOfItems(items: FlowItem[]): LayoutScope {
   return layoutScopeWithEdgesOf(items).scope;
 }
@@ -52,7 +71,7 @@ export function layoutScopeOfItems(items: FlowItem[]): LayoutScope {
 // `edges` names, for each of the scope's edges, the document edge it was read from.
 export function layoutScopeWithEdgesOf(
   items: FlowItem[],
-  shapeOf?: (node: FlowNode) => NodeShape,
+  { shapeOf, bendOf }: LayerReading = {},
 ): { scope: LayoutScope; edges: DocumentEdge[] } {
   const nodes = nodesOf(items);
   const edges = nodes.flatMap((node) => [
@@ -69,7 +88,13 @@ export function layoutScopeWithEdgesOf(
         entrypoint: getProp(node, 'entrypoint') === 'true',
         shape: shapeOf?.(node),
       })),
-      edges: edges.map((edge) => ({ from: indexOf.get(edge.node)!, target: edge.read.target, kind: edge.kind, label: edge.read.label })),
+      edges: edges.map((edge) => ({
+        from: indexOf.get(edge.node)!,
+        target: edge.read.target,
+        kind: edge.kind,
+        label: edge.read.label,
+        bend: bendOf?.({ node: edge.node, spec: edge.spec }),
+      })),
       regions: contextItemsOf(items).map(({ block }) => ({ members: block.members, pos: block.pos })),
     },
     edges: edges.map(({ node, spec }) => ({ node, spec })),
@@ -100,10 +125,10 @@ export function placeMissingPositions(doc: FlowDocument): boolean {
 // Steps `settling` — nodes placed just now and since resized, as styling grows a node to fit its
 // shape — clear of whatever their new size crowds or covers, as placing them would have; every
 // other node stays where it is. Says whether any moved.
-export function settleNewlyPlacedNodes(items: FlowItem[], settling: ReadonlySet<FlowNode>, shapeOf: (node: FlowNode) => NodeShape): boolean {
+export function settleNewlyPlacedNodes(items: FlowItem[], settling: ReadonlySet<FlowNode>, reading: LayerReading): boolean {
   const nodes = nodesOf(items);
   if (!nodes.some((node) => settling.has(node)) || nodes.some((node) => !node.pos)) return false;
-  const { scope } = layoutScopeWithEdgesOf(items, shapeOf);
+  const { scope } = layoutScopeWithEdgesOf(items, reading);
   const movable = { ...scope, nodes: scope.nodes.map((node, index) => (settling.has(nodes[index]) ? { ...node, pos: null } : node)) };
   const settled = polishPlacement(movable, nodes.map((node) => node.pos!));
   let moved = false;
@@ -120,17 +145,18 @@ export function settleNewlyPlacedNodes(items: FlowItem[], settling: ReadonlySet<
 // reserved beyond its members: drawn around the old layout, it would now cover nodes that are not
 // its members. The bends are not written here: they belong to the canvas layer, which the editor
 // and `grafd layout --all` write.
-// `shapeOf` tells it how each node is drawn, so a diamond or an ellipse is sized for the text it has
-// room for; without it every node is sized as a rectangle. A whole scope flows the way it already
-// does, unless given a `direction`.
+// `reading` tells it how each node is drawn, so a diamond or an ellipse is sized for the text it has
+// room for (without it every node is sized as a rectangle), and how the edges it leaves alone bend,
+// so chosen nodes are placed clear of where those edges really run. A whole scope flows the way it
+// already does, unless given a `direction`.
 export function arrangeGraphScope(
   items: FlowItem[],
   chosen?: Set<FlowNode>,
-  shapeOf?: (node: FlowNode) => NodeShape,
+  reading?: LayerReading,
   direction?: LayoutDirection,
 ): ArrangeOutcome {
   const nodes = nodesOf(items);
-  const { scope, edges } = layoutScopeWithEdgesOf(items, shapeOf);
+  const { scope, edges } = layoutScopeWithEdgesOf(items, reading);
   const chosenIndices = chosen && new Set([...nodes.keys()].filter((index) => chosen.has(nodes[index])));
   const wholeScope = !chosenIndices || chosenIndices.size === nodes.length;
   const arrangement = wholeScope ? arrangeScope(scope, direction) : arrangeSelected(scope, chosenIndices);
@@ -165,8 +191,8 @@ function worthwhileBend(bend: EdgeBend | null, from: { x: number; y: number }, t
 
 // Arranges every graph scope of a document. The bends it settles are for the document's canvas
 // layer, through `setPlannedBends`.
-export function arrangeDocument(doc: FlowDocument, shapeOf?: (node: FlowNode) => NodeShape, direction?: LayoutDirection): ArrangeOutcome {
-  const outcomes = graphScopesOf(doc).map((items) => arrangeGraphScope(items, undefined, shapeOf, direction));
+export function arrangeDocument(doc: FlowDocument, reading?: LayerReading, direction?: LayoutDirection): ArrangeOutcome {
+  const outcomes = graphScopesOf(doc).map((items) => arrangeGraphScope(items, undefined, reading, direction));
   return { moved: outcomes.some((outcome) => outcome.moved), bends: outcomes.flatMap((outcome) => outcome.bends) };
 }
 
