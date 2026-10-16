@@ -117,7 +117,8 @@ The canvas layer means nothing to you and its content is not part of the format.
 
 ### Inference Rules
 
-- No incoming edges → entry point / trigger
+- No incoming edges → entry point / trigger. An `on_error` pointing at a node counts as an incoming edge.
+- Reached only through `on_error` → error handler, not an entry point
 - Multiple labeled outgoing edges → decision node
 - No `expand` → leaf, you implement freely
 - Has `expand` → follow the referenced graph
@@ -385,7 +386,7 @@ All other identifiers are user-defined node names or context names.
 | `expand` | Leaf node — you decide implementation |
 | `on_error` | Error bubbles up to parent graph |
 | `updates` | Node is read-only with respect to context |
-| `entrypoint` | Inferred: no incoming edges = entry point |
+| `entrypoint` | Inferred: no incoming edges (an `on_error` counts as one) = entry point |
 | no `context:` blocks | File declares no providers of its own |
 | `inherits` | Graph inherits nothing (root, or its host node is in no region) |
 | `pos` on a `context` block | Region is the bounding box of its members |

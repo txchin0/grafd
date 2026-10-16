@@ -201,13 +201,15 @@ inherits: [Auth]
 Nodes do not have explicit types. The LLM infers a node's purpose from:
 
 1. **Title** — `Clear Session` implies clearing session data. `Is Authenticated?` implies a decision.
-2. **Structure** — A node with multiple labeled outgoing edges is a decision. A node with no incoming edges is an entry point.
+2. **Structure** — A node with multiple labeled outgoing edges is a decision. A node with no incoming edges is an entry point. A node reached only through `on_error` is an error handler.
 3. **Description** — Additional detail narrows the LLM's interpretation.
 4. **Expansion** — If the node has `expand`, the referenced graph defines its internals.
 
 ### 4.4 Entry Points
 
 Entry points (triggers) are inferred from structure: **a node with no incoming edges is treated as an entry point.** This is the default behavior.
+
+An `on_error` that points at a node counts as an incoming edge (see [Section 7: Error Handling](#7-error-handling)). A node reached only through `on_error` is where failures go, not a second place the flow starts, so it is an error handler, not an entry point.
 
 To explicitly mark a node as an entry point (overriding the inference, e.g., when the graph is called from another graph), use the `entrypoint` property:
 
@@ -1095,7 +1097,7 @@ The format has a minimal set of reserved keywords:
 | ----------------- | --------------------------------------------------------------------------------- | ------------------------------------------------ |
 | Abstraction model | Implicit recursive depth                                                          | Leaf = LLM decides, expanded = LLM follows       |
 | Node types        | Inferred from title and structure                                                 | Minimal syntax, natural language                 |
-| Entry points      | Inferred from no incoming edges + optional override                               | Structure tells the story                        |
+| Entry points      | Inferred from no incoming edges (`on_error` included) + optional override         | Structure tells the story                        |
 | Edge semantics    | Inferred from labels                                                              | Natural language over symbolic types             |
 | Execution order   | Unspecified fan-out = LLM decides                                                 | Consistent implicit philosophy                   |
 | Subgraph nesting  | Flat with references                                                              | LLMs parse flat structures better                |
