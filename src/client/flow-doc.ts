@@ -677,15 +677,13 @@ function inferTraits(
   edges: ModelEdge[],
   contexts: ModelContext[],
 ): Map<FlowNode, NodeTraits> {
-  const namesWithIncoming = new Set(
-    edges.filter((edge) => edge.kind === 'flow').map((edge) => edge.spec.target),
-  );
+  const namesLedInto = new Set(edges.map((edge) => edge.spec.target));
   const contextNamesByMember = contextNamesByNode(contexts);
   const inheritsContexts = parseListValue(getPreambleField(doc, 'inherits')).length > 0;
   const traits = new Map<FlowNode, NodeTraits>();
   for (const node of nodes) {
     traits.set(node, {
-      entry: isEntryNode(node, namesWithIncoming),
+      entry: isEntryNode(node, namesLedInto),
       decision: branchesOnLabels(node),
       expand: getProp(node, 'expand'),
       updates: parseListValue(getProp(node, 'updates')),

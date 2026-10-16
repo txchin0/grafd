@@ -50,7 +50,8 @@ export function branchesOnLabels(node: FlowNode): boolean {
   return node.edges.filter((edge) => edge.label).length >= 2;
 }
 
-// Where a flow begins: declared so, or with no flow edge leading into it.
+// Where a flow begins: declared so, or with no edge leading into it — an `on_error` included, since
+// a node only failed into is reached when something fails rather than where the flow starts.
 export function isEntryNode(node: FlowNode, namesLedInto: ReadonlySet<string>): boolean {
   return getProp(node, 'entrypoint') === 'true' || !namesLedInto.has(node.name);
 }
@@ -62,15 +63,22 @@ export function inferRoles(items: FlowItem[]): Map<FlowNode, NodeRole> {
   const nodes = nodesOf(items);
   const flowTargets = new Set(nodes.flatMap((node) => node.edges.map((edge) => edge.target)));
   const errorTargets = new Set(nodes.flatMap((node) => errorTargetsOf(node)));
-  return new Map(nodes.map((node) => [node, inferredRoleOf(node, flowTargets, errorTargets)]));
+  const targets = { flow: flowTargets, error: errorTargets, any: new Set([...flowTargets, ...errorTargets]) };
+  return new Map(nodes.map((node) => [node, inferredRoleOf(node, targets)]));
 }
 
-function inferredRoleOf(node: FlowNode, flowTargets: ReadonlySet<string>, errorTargets: ReadonlySet<string>): NodeRole {
+interface ScopeTargets {
+  flow: ReadonlySet<string>;
+  error: ReadonlySet<string>;
+  any: ReadonlySet<string>;
+}
+
+function inferredRoleOf(node: FlowNode, targets: ScopeTargets): NodeRole {
   const leadsSomewhere = node.edges.length > 0;
-  if (errorTargets.has(node.name) && !flowTargets.has(node.name)) return 'error';
-  if (isEntryNode(node, flowTargets) && leadsSomewhere) return 'start';
+  if (targets.error.has(node.name) && !targets.flow.has(node.name)) return 'error';
+  if (isEntryNode(node, targets.any) && leadsSomewhere) return 'start';
   if (branchesOnLabels(node)) return 'decision';
-  if (!leadsSomewhere && flowTargets.has(node.name)) return 'end';
+  if (!leadsSomewhere && targets.flow.has(node.name)) return 'end';
   return 'process';
 }
 

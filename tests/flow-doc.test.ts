@@ -106,8 +106,31 @@ H
     const h = model.nodesByName.get('H')!;
     expect(model.traits.get(a)).toMatchObject({ entry: true, decision: true, hasErrorHandler: true });
     expect(model.traits.get(b)).toMatchObject({ entry: false, decision: false });
-    // Error edges do not count as incoming flow, so the handler still reads as an entry.
-    expect(model.traits.get(h)).toMatchObject({ entry: true });
+    expect(model.traits.get(h)).toMatchObject({ entry: false });
+  });
+
+  it('reads a handler that leads on as reached rather than a second entry, unless it is declared one', () => {
+    const handlerDoc = docFrom(`A
+  ${PLACED(0, 0)}
+  -> B
+  on_error: -> H
+
+B
+  ${PLACED(300, 0)}
+  on_error: -> Alert
+
+H
+  ${PLACED(0, 300)}
+  -> B
+
+Alert
+  ${PLACED(300, 300)}
+  entrypoint: true
+  -> B
+`);
+    const handlerModel = buildModel(handlerDoc, null);
+    const entryNames = handlerModel.nodes.filter((node) => handlerModel.traits.get(node)?.entry).map((node) => node.name);
+    expect(entryNames).toEqual(['A', 'Alert']);
   });
 
   it('records the source document on the model', () => {

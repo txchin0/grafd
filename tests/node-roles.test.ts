@@ -66,6 +66,22 @@ describe('roles read off a graph', () => {
     });
   });
 
+  it('handles errors at a node only failed into, even one that leads on, rather than starting there', () => {
+    const doc = parseFlow(`Cart
+  -> Pay
+
+Pay
+  on_error: -> Refund
+  -> Receipt
+
+Refund
+  -> Receipt
+
+Receipt
+`);
+    expect(rolesByName(doc)).toEqual({ Cart: 'start', Pay: 'process', Refund: 'error', Receipt: 'end' });
+  });
+
   it('never replaces a shape someone chose with a guess, but applies a role named outright', () => {
     const doc = parseFlow(CHECKOUT);
     const layer = emptyCanvasLayer();
