@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_HOST, DEFAULT_PORT, startServer } from './server/server.js';
 import { emptyManifest, MANIFEST_FILE_NAME, serializeManifest } from './shared/manifest.js';
+import { installSkill, removeSkill, SKILL_NAME, type SkillInstallLocation } from './skill-install.js';
 import { runFlowLayout } from './tools/flow-layout.js';
 import { runFlowLint } from './tools/flow-lint.js';
 import { runFlowRender } from './tools/flow-render.js';
@@ -175,6 +177,48 @@ async function runInit(args: string[]): Promise<number> {
   }
 }
 
+async function runInstall(args: string[]): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    printInstallHelp();
+    return 0;
+  }
+  const unknown = args.find((argument) => argument !== '--remove');
+  if (unknown !== undefined) {
+    console.error(`Unknown option: ${unknown}`);
+    printInstallHelp();
+    return 2;
+  }
+  const removing = args.includes('--remove');
+  try {
+    if (removing) await reportSkillRemoval(userSkillLocation());
+    else await reportSkillInstall(userSkillLocation(), readPackageVersion());
+    return 0;
+  } catch (error) {
+    console.error(`Could not ${removing ? 'remove' : 'install'} the ${SKILL_NAME} skill: ${errorMessage(error)}`);
+    return 1;
+  }
+}
+
+function userSkillLocation(): SkillInstallLocation {
+  const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  return { home: os.homedir(), claudeConfigDir: claudeConfigDir === '' ? undefined : claudeConfigDir };
+}
+
+const INSTALL_OUTCOME_LABELS = { created: 'Installed', updated: 'Updated', unchanged: 'Already up to date' } as const;
+
+async function reportSkillInstall(location: SkillInstallLocation, version: string): Promise<void> {
+  for (const { file, outcome } of await installSkill(location, version)) {
+    console.log(`${INSTALL_OUTCOME_LABELS[outcome]} ${file} (grafd-ai@${version})`);
+  }
+  console.log('Agents pick up the skill in their next session, in any repository.');
+}
+
+async function reportSkillRemoval(location: SkillInstallLocation): Promise<void> {
+  for (const { file, outcome } of await removeSkill(location)) {
+    console.log(`${outcome === 'removed' ? 'Removed' : 'Not installed'} ${file}`);
+  }
+}
+
 export interface StartContext {
   // Fallback workspace when no path argument is given; null resolves a manifest-bearing
   // directory instead.
@@ -315,6 +359,8 @@ export async function runCli(argv: string[]): Promise<number> {
   switch (argv[0]) {
     case 'init':
       return runInit(argv.slice(1));
+    case 'install':
+      return runInstall(argv.slice(1));
     case 'start':
       return runStart(argv.slice(1));
     case 'lint':
@@ -339,6 +385,7 @@ function printGlobalHelp(): void {
 
 Commands:
   init       Create ${DEFAULT_WORKSPACE_DIR}/ with main.flow, grafd.manifest.json, and SAVE-GUIDE.md
+  install    Install the ${SKILL_NAME} agent skill for your user, so agents in any repository can diagram
   start      Run the editor server (default command; defaults to ${DEFAULT_HOST}:${DEFAULT_PORT})
   lint       Lint .flow workspaces
   layout     Place nodes that have no position, or lay every graph out afresh with --all
@@ -354,6 +401,20 @@ function printInitHelp(): void {
 
 Creates ${DEFAULT_WORKSPACE_DIR}/main.flow, ${DEFAULT_WORKSPACE_DIR}/${MANIFEST_FILE_NAME}, and
 ${DEFAULT_WORKSPACE_DIR}/SAVE-GUIDE.md. Existing files are left untouched.`);
+}
+
+function printInstallHelp(): void {
+  console.log(`Usage: grafd install [--remove]
+
+Installs the ${SKILL_NAME} skill for your user: ~/.agents/skills/${SKILL_NAME}/, which Codex,
+Cursor, OpenCode, Gemini CLI and Copilot read, and Claude Code's skills folder when Claude Code is
+set up (~/.claude, or CLAUDE_CONFIG_DIR). The skill teaches an agent to set up a workspace and draw
+a readable diagram in any repository, using this version of grafd. Run it again from a newer
+version to update the skill.
+
+Options:
+  --remove   remove the skill from those folders
+  --help     show this message`);
 }
 
 function printStartHelp(): void {

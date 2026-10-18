@@ -1,16 +1,23 @@
 ---
 name: grafd-diagrams
-description: Create or edit Grafd `.flow` diagrams that read well at a glance — process flows, user journeys, state machines, system architecture, decision trees. Use whenever asked to diagram, map, chart or visualize a flow, system or process as a .flow file, or to add to or restructure an existing .flow graph.
+description: Create or edit Grafd `.flow` diagrams that read well at a glance — process flows, user journeys, state machines, system architecture, decision trees. Use whenever asked to diagram, map, chart or visualize a flow, system or process as a .flow file, or to add to or restructure an existing .flow graph. Works in any repo: it sets up a Grafd workspace when there is none.
 ---
 
 # Grafd diagrams
 
 You write the meaning; the `grafd` tools do all the geometry. Never hand-place nodes.
 
-`grafd` = `npx grafd-ai` (inside the grafd repo itself: `node dist/cli-main.js`). A workspace is
+`grafd` = `npx --yes grafd-ai` (inside the grafd repo itself: `node dist/cli-main.js`). A workspace is
 the folder holding `grafd.manifest.json` (usually `.grafd/`). `lint`, `layout` and `score` take the
 workspace folder; `style` and `render` take a file. You need nothing else: don't read
 SAVE-GUIDE.md, FLOW-SPEC.md or any `.canvas.json`.
+
+## Setup (no workspace yet)
+
+If neither `.grafd/` nor the repo root holds a `grafd.manifest.json`, run `grafd init` from the
+repo root; the workspace `W` is then `.grafd`. Its `main.flow` is a placeholder (`name: My Flow`,
+one `Start` node) and the file the editor opens first: write the first diagram over it, and give
+later diagrams their own files. When done, tell the user `grafd start --open` shows it in the editor.
 
 ## The loop (new graph)
 

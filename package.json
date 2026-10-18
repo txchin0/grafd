@@ -11,7 +11,8 @@
     "dist",
     "public",
     "SAVE-GUIDE.md",
-    "FLOW-SPEC.md"
+    "FLOW-SPEC.md",
+    ".claude/skills/grafd-diagrams/SKILL.md"
   ],
   "engines": {
     "node": ">=20"

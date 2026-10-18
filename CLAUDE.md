@@ -190,6 +190,10 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   shape), arranging (which reads the layer for each node's shape) and the score. Placing a node
   the canvas has never drawn sizes it as a rectangle, since the canvas and linter must agree and
   only one of them reads the layer.
+- `src/skill-install.ts` — `grafd install`: writes `.claude/skills/grafd-diagrams/SKILL.md` (shipped
+  in the package for this) to `~/.agents/skills/` and, when Claude Code is set up, its skills folder,
+  with its `grafd` command pinned to the installing version. The skill's command binding must
+  appear exactly once, which a test holds it to.
 - `scripts/build-site.mjs` — assembles the static `site/` build (`npm run build:site`).
 - `src/client/flow-doc.ts` — document mutations (add/rename/delete nodes and edges), scope
   resolution for `graph:` blocks, auto-layout for nodes missing `pos`, view-model building

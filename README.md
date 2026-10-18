@@ -93,13 +93,14 @@ references defaults to the launch directory (`--project-root=<path>` to override
 
 ## npm CLI
 
-The `grafd-ai` package ships one command with seven subcommands. Use `npx grafd-ai` to run
+The `grafd-ai` package ships one command with eight subcommands. Use `npx grafd-ai` to run
 it without installing; once the package is installed, use `npx grafd` (or `grafd` when
 `node_modules/.bin` is on your path):
 
 ```sh
 npx grafd-ai            # shorthand for npx grafd-ai start
 npx grafd-ai init
+npx grafd-ai install [--remove]
 npx grafd-ai start [workspace] [--port <n>] [--host <host>] [--open] [--project-root=<path>]
 npx grafd-ai lint [workspace...] [--strict] [--format=json]
 npx grafd-ai layout [workspace...] [--all]
@@ -123,6 +124,25 @@ off the graph — and is how an agent styles a graph without writing the layer i
 when it exists, otherwise the current directory when it contains `.flow` files, otherwise they
 exit with a hint to run `init`. `init` never overwrites an
 existing `.grafd/` workspace.
+
+## Agent skill
+
+Install the `grafd-diagrams` skill once, and any coding agent can draw Grafd diagrams in any
+repository:
+
+```sh
+npx grafd-ai install
+```
+
+It writes the skill to `~/.agents/skills/grafd-diagrams/`, the shared Agent Skills folder that
+Codex, Cursor, OpenCode, Gemini CLI and GitHub Copilot read, and to Claude Code's skills folder
+when Claude Code is set up (`~/.claude`, or `CLAUDE_CONFIG_DIR`). Agents load it in their next
+session. Ask one to diagram something, and it runs `grafd init` if the repository has no
+workspace yet, writes the `.flow`, then lints, styles, lays out, scores and renders it until the
+graph reads well.
+
+The installed skill runs the grafd version that installed it, so its commands always match.
+Run `npx grafd-ai@latest install` to update it, or `npx grafd-ai install --remove` to remove it.
 
 ## Hosting modes
 
@@ -200,6 +220,7 @@ The `.grafd/` directory in this repository is a working example workspace
 
 ```
 src/
+  skill-install.ts  grafd install: the agent skill, pinned to the installing version
   shared/    Parser/serializer, linter, manifest, geometry — no DOM, no Node APIs
   server/    Express host, WebSocket sync, file watcher, path safety
   client/    Canvas, editors, workspace backends, theming, export
