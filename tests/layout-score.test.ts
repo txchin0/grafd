@@ -206,6 +206,16 @@ describe('scoring a file', () => {
     expect(bent.current.counts['edge-through-node']).toBe(0);
   });
 
+  it('draws edges from the ends the canvas layer pins them to, as arranged too', () => {
+    const lowered = SKIPPING_FLOW.replace('pos: 300, 0, 200, 88', 'pos: 300, 30, 200, 88');
+    const [straight] = scoreDocumentText(lowered, null);
+    expect(straight.current.counts['edge-through-node']).toBe(1);
+
+    const layer = parseCanvasLayer(JSON.stringify({ format: 'grafd-canvas/1', edges: { 'a-1 -> #c-1': { startAngle: 0, endAngle: 0 } } }));
+    const [pinned] = scoreDocumentText(lowered, layer);
+    expect(pinned.current.counts['edge-through-node']).toBe(0);
+  });
+
   it('says what arranging would score', () => {
     const [scored] = scoreDocumentText(SKIPPING_FLOW, null);
     expect(scored.arranged).toBeGreaterThan(scored.current.score);

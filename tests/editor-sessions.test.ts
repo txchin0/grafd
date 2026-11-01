@@ -241,6 +241,8 @@ function cursorGrabs(cursor: string): boolean {
 // the view's PressTarget does not compile here until it is listed — and once it is, the coverage
 // test below fails until a session target can reach it.
 const EVERY_PRESS_TARGET: Record<PressTargetKind, true> = {
+  'edge-end-handle': true,
+  'arrow-end-handle': true,
   'port': true,
   'drawing-handle': true,
   'selected-edge-grip': true,

@@ -1,4 +1,4 @@
-// What the canvas's drawing gestures write. A stroke, a text or an image is stored in the canvas layer of
+// What the canvas's drawing gestures write. A stroke, a text, an image or an arrow is stored in the canvas layer of
 // the file that owns the graph it was made in, filed under that graph's scope — one made inside an
 // unfolded frame belongs to the subgraph the frame shows, whichever file that lives in.
 //
@@ -9,12 +9,14 @@
 import { canvasLayerPathOf, type CanvasLayer } from '../shared/canvas-layer.js';
 import {
   STROKE_KIND,
+  addArrowDrawing,
   addImageDrawing,
   addStroke,
   addTextDrawing,
   drawingsToCopy,
   pasteDrawings as pasteDrawingsInto,
   removeDrawings,
+  setArrowEnd,
   setDrawingColor,
   setTextDrawing,
   transformDrawings,
@@ -24,6 +26,8 @@ import {
 import { isStretch, translationBy, type DrawingTransform } from '../shared/drawing-geometry.js';
 import { TEXT_KIND, textDrawingOf, type TextDrawing } from '../shared/canvas-text.js';
 import { IMAGE_KIND, type ImageDrawing } from '../shared/canvas-image.js';
+import { ARROW_KIND, type ArrowDrawing } from '../shared/canvas-arrow.js';
+import type { EdgeEnd } from '../shared/canvas-edge-style.js';
 import { groupDrawings as groupDrawingsIn, ungroupDrawings as ungroupDrawingsIn } from '../shared/canvas-groups.js';
 import { newUuid, type FlowNode, type Rect } from '../shared/flow-format.js';
 import type { DrawStyle } from './canvas/canvas-view.js';
@@ -63,6 +67,17 @@ export interface NewImage {
   box: Rect;
 }
 
+// An arrow about to be drawn: its two ends in the coordinate space of the graph under `frameHost`,
+// and how it is drawn.
+export interface NewArrow {
+  points: [Point, Point];
+  frameHost: FlowNode | null;
+  style: Omit<ArrowDrawing, 'kind' | 'id' | 'graph' | 'points'>;
+  // Words written beside it — an edge's label, when an edge became the arrow — centred on
+  // `center` and grouped with the arrow so the two move as one.
+  caption?: { text: string; center: Point; fontPx: number };
+}
+
 // Strokes copied out of one graph, ready to be pasted into any.
 export interface CopiedDrawings {
   owner: DocumentOwner;
@@ -94,6 +109,11 @@ export interface DrawingOps {
   createText(newText: NewText): StoredDrawing | null;
   // Where the new image is stored, or null when nothing could be written.
   createImage(newImage: NewImage): StoredDrawing | null;
+  // Where the new arrow is stored, or null when nothing could be written.
+  createArrow(newArrow: NewArrow): StoredDrawing | null;
+  // Whether a drawing made in the graph under `frameHost` can be written at all.
+  canDrawUnder(frameHost: FlowNode | null): boolean;
+  moveArrowEnd(selection: DrawingSelection, end: EdgeEnd, point: Point): void;
   // Rewrites a text in place: its top-left corner, size and wrap width stay, and its box fits the
   // new words.
   setText(selection: DrawingSelection, text: string): void;
@@ -144,6 +164,38 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
     const written = writeIntoScope(target, (layer) => addImageDrawing(layer, drawing));
     reportWrite(target.owner, written);
     return written ? { path: target.owner.path, scope: target.scope, id: drawing.id } : null;
+  }
+
+  function createArrow({ points, frameHost, style, caption }: NewArrow): StoredDrawing | null {
+    const target = options.creationTargetFor(frameHost);
+    if (!target) return null;
+    const arrow: ArrowDrawing = { kind: ARROW_KIND, id: newUuid(), graph: target.scope, ...style, points };
+    const captionText = caption ? captionDrawing(caption, target.scope, style.color) : null;
+    const written = writeIntoScope(target, (layer) => {
+      addArrowDrawing(layer, arrow);
+      if (!captionText) return;
+      addTextDrawing(layer, captionText);
+      groupDrawingsIn(layer, new Set([arrow.id, captionText.id]));
+    });
+    reportWrite(target.owner, written);
+    return written ? { path: target.owner.path, scope: target.scope, id: arrow.id } : null;
+  }
+
+  function captionDrawing(caption: NonNullable<NewArrow['caption']>, scope: string | null, color: string | null): TextDrawing {
+    const measured = textBoxFor(caption.text, caption.center, caption.fontPx, options.measureLine());
+    const box = { ...measured, x: caption.center.x - measured.w / 2, y: caption.center.y - measured.h / 2 };
+    return { kind: TEXT_KIND, id: newUuid(), graph: scope, color, text: caption.text, box, size: caption.fontPx, wrap: false };
+  }
+
+  function canDrawUnder(frameHost: FlowNode | null): boolean {
+    const target = options.creationTargetFor(frameHost);
+    return target != null && layerSync.drawingsAreEditable(target.owner);
+  }
+
+  function moveArrowEnd(selection: DrawingSelection, end: EdgeEnd, point: Point): void {
+    writeEachFile([selection], (layer, ids) => {
+      for (const id of ids) setArrowEnd(layer, id, end, point);
+    });
   }
 
   function setText(selection: DrawingSelection, text: string): void {
@@ -297,6 +349,9 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
     createStroke,
     createText,
     createImage,
+    createArrow,
+    canDrawUnder,
+    moveArrowEnd,
     setText,
     moveDrawings,
     resizeDrawings,

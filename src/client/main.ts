@@ -68,6 +68,7 @@ const elements = {
   toolContextButton: elementById<HTMLButtonElement>('tool-context-button'),
   toolDrawButton: elementById<HTMLButtonElement>('tool-draw-button'),
   toolTextButton: elementById<HTMLButtonElement>('tool-text-button'),
+  toolArrowButton: elementById<HTMLButtonElement>('tool-arrow-button'),
   drawStyle: elementById<HTMLDivElement>('draw-style'),
   drawColor: elementById<HTMLDivElement>('draw-color'),
   drawWidth: elementById<HTMLDivElement>('draw-width'),
@@ -336,19 +337,25 @@ function setTool(tool: Tool): void {
   elements.toolContextButton.classList.toggle('active', tool === 'context');
   elements.toolDrawButton.classList.toggle('active', tool === 'draw');
   elements.toolTextButton.classList.toggle('active', tool === 'text');
+  elements.toolArrowButton.classList.toggle('active', tool === 'arrow');
   showDrawStyleWhenRelevant();
 }
 
-// The pen's colour and width show while drawing or writing, and while drawings are selected — a
+// The pen's colour and width show while drawing, writing or drawing arrows (an arrow is inked with
+// the pen), and while drawings are selected — a
 // swatch picked outside the draw tool then recolours them as well. With the pen in hand it only
 // sets the pen: drawings still selected from before are not what the user is choosing a colour
 // for. Text has a colour but no line, so the width row stays out of the text tool's way, and an
 // image has neither, so a selection of images alone shows no pen at all.
 function showDrawStyleWhenRelevant(): void {
-  const relevant = currentTool === 'draw' || currentTool === 'text' || anySelectedDrawingHasColor();
+  const relevant = isInkingTool(currentTool) || currentTool === 'text' || anySelectedDrawingHasColor();
   if (elements.drawStyle.hidden === relevant) elements.drawStyle.hidden = !relevant;
   const widthRelevant = currentTool !== 'text';
   if (elements.drawWidth.hidden === widthRelevant) elements.drawWidth.hidden = !widthRelevant;
+}
+
+function isInkingTool(tool: Tool): boolean {
+  return tool === 'draw' || tool === 'arrow';
 }
 
 function anySelectedDrawingHasColor(): boolean {
@@ -360,7 +367,7 @@ function anySelectedDrawingHasColor(): boolean {
 
 const drawColorPicker = createColorSwatches(elements.drawColor, (color) => {
   const selected = view.selectedDrawings;
-  if (selected.length > 0 && currentTool !== 'draw') core.drawingOps.recolorDrawings(selected, color);
+  if (selected.length > 0 && !isInkingTool(currentTool)) core.drawingOps.recolorDrawings(selected, color);
   setDrawStyle({ ...view.drawStyle, color });
 });
 const drawWidthPicker = createStrokeWidthPicker(elements.drawWidth, (width) => setDrawStyle({ ...view.drawStyle, width }));
@@ -381,6 +388,7 @@ function wireViewControls(): void {
   elements.toolContextButton.addEventListener('click', () => setTool('context'));
   elements.toolDrawButton.addEventListener('click', () => setTool('draw'));
   elements.toolTextButton.addEventListener('click', () => setTool('text'));
+  elements.toolArrowButton.addEventListener('click', () => setTool('arrow'));
   elements.zoomIn.addEventListener('click', () => view.stepZoom(1));
   elements.zoomOut.addEventListener('click', () => view.stepZoom(-1));
   elements.zoomLevel.addEventListener('click', () => view.setZoom(1));
@@ -515,6 +523,8 @@ function wireKeyboard(): void {
       setTool('draw');
     } else if (!ctrl && (event.key.toLowerCase() === 't' || event.key === '5')) {
       setTool('text');
+    } else if (!ctrl && (event.key.toLowerCase() === 'a' || event.key === '6')) {
+      setTool('arrow');
     } else if (event.key === '?') {
       elements.helpOverlay.classList.toggle('hidden');
     }

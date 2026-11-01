@@ -20,6 +20,7 @@ import type { TextEditRequest } from '../src/client/text-drawing-editor.js';
 import type { ResizeHandle } from '../src/client/canvas/resize-handles.js';
 import type { GraphUnit } from '../src/client/paste-transplant.js';
 import type { HeadlessEditor } from './editor-harness.js';
+import { ARROW_KIND, type ArrowDrawing } from '../src/shared/canvas-arrow.js';
 
 // What a pick can aim at. Handles, ports and grips are all one kind, `affordance`, resolved
 // against what the view itself reports is on screen (`CanvasView.affordances`), so a target never
@@ -36,6 +37,7 @@ export const TARGET_KINDS = [
   'stroke',
   'text',
   'image',
+  'arrow',
   'affordance',
   'empty',
   'frame-inside',
@@ -49,7 +51,7 @@ export interface TargetPick {
   nudge: Point;
 }
 
-export const TOOLS = ['select', 'node', 'context', 'draw', 'text'] as const satisfies readonly Tool[];
+export const TOOLS = ['select', 'node', 'context', 'draw', 'text', 'arrow'] as const satisfies readonly Tool[];
 
 // Every keyboard command the page binds, from the same table it binds them with.
 export const COMMANDS = EDITOR_COMMANDS;
@@ -253,6 +255,10 @@ function anchorOf(editor: HeadlessEditor, pick: TargetPick): Point | null {
     case 'image': {
       const image = itemAt((model.visuals?.drawings() ?? []).filter((drawing): drawing is ImageDrawing => drawing.kind === IMAGE_KIND), pick.index);
       return image ? { x: image.box.x + image.box.w / 2, y: image.box.y + image.box.h / 2 } : null;
+    }
+    case 'arrow': {
+      const arrow = itemAt((model.visuals?.drawings() ?? []).filter((drawing): drawing is ArrowDrawing => drawing.kind === ARROW_KIND), pick.index);
+      return arrow ? { x: (arrow.points[0].x + arrow.points[1].x) / 2, y: (arrow.points[0].y + arrow.points[1].y) / 2 } : null;
     }
 
     case 'empty':

@@ -5,6 +5,7 @@
 import { STROKE_KIND, STROKE_LINE_WIDTHS, drawingBounds, unknownDrawingKind, type CanvasDrawing } from '../../shared/canvas-drawings.js';
 import { IMAGE_KIND } from '../../shared/canvas-image.js';
 import { TEXT_KIND } from '../../shared/canvas-text.js';
+import { ARROW_KIND } from '../../shared/canvas-arrow.js';
 import type { Rect } from '../../shared/flow-format.js';
 import { padRect, rectContainsRect } from '../../shared/rect-math.js';
 import type { FlowModel } from '../flow-doc.js';
@@ -38,11 +39,12 @@ export function hitDrawingAt(surfaces: readonly DrawingSurface[], world: Point, 
   return null;
 }
 
-// A stroke is picked up along its ink; a text or an image anywhere in its box, which is where a
-// reader looks.
+// A stroke or an arrow is picked up along its ink; a text or an image anywhere in its box, which is
+// where a reader looks.
 function drawingIsWithin(drawing: CanvasDrawing, point: Point, slop: number): boolean {
   switch (drawing.kind) {
-    case STROKE_KIND: return distanceToPolyline(point, drawing.points) <= STROKE_LINE_WIDTHS[drawing.width] / 2 + slop;
+    case STROKE_KIND:
+    case ARROW_KIND: return distanceToPolyline(point, drawing.points) <= STROKE_LINE_WIDTHS[drawing.width] / 2 + slop;
     case TEXT_KIND:
     case IMAGE_KIND: return rectContains(padRect(drawing.box, slop), point);
     default: return unknownDrawingKind(drawing);

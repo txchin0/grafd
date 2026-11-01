@@ -21,9 +21,18 @@ import {
   defaultEdgeStyle,
   isArrowhead,
   isLineStyle,
+  readEdgeAngle,
   readEdgeBend,
   type Arrowhead,
 } from './canvas-edge-style.js';
+import {
+  ARROW_KIND,
+  ARROW_WIDTHS,
+  DEFAULT_ARROW_END_HEAD,
+  DEFAULT_ARROW_START_HEAD,
+  arrowPointsOf,
+  isArrowWidth,
+} from './canvas-arrow.js';
 import { REGION_FILL_PATTERNS, isRegionFillPattern } from './canvas-region-style.js';
 import { STROKE_KIND, STROKE_WIDTHS, isStrokeWidth, strokePointsOf } from './canvas-drawings.js';
 import { TEXT_KIND, isDrawableText, isTextSize } from './canvas-text.js';
@@ -97,6 +106,11 @@ function edgeVisualDiagnostics(visual: Record<string, unknown>, line: number): D
   if (visual.bend !== undefined && !readEdgeBend(visual.bend)) {
     diagnostics.push(warning('invalid-edge-bend', line, `Invalid bend ${JSON.stringify(visual.bend)}; the edge is drawn unbent. A bend is a pair of numbers, [along, across].`));
   }
+  for (const [field, end] of [['startAngle', 'start'], ['endAngle', 'end']] as const) {
+    if (visual[field] !== undefined && readEdgeAngle(visual[field]) == null) {
+      diagnostics.push(warning('invalid-edge-angle', line, `Invalid ${field} ${JSON.stringify(visual[field])}; the edge's ${end} meets its node wherever its route puts it. An angle is a number of degrees, clockwise from the top: 0 top, 90 right, 180 bottom, 270 left.`));
+    }
+  }
   return diagnostics;
 }
 
@@ -138,6 +152,7 @@ function drawingDiagnostics(layerText: string, flow: FlowDocument | null): Diagn
     if (entry.kind === STROKE_KIND) diagnostics.push(...strokeDiagnostics(entry, line, blockNames));
     if (entry.kind === TEXT_KIND) diagnostics.push(...textDiagnostics(entry, line, blockNames));
     if (entry.kind === IMAGE_KIND) diagnostics.push(...imageDiagnostics(entry, line, blockNames));
+    if (entry.kind === ARROW_KIND) diagnostics.push(...arrowDiagnostics(entry, line, blockNames));
   });
   return diagnostics;
 }
@@ -188,6 +203,7 @@ interface DrawingKindTerms {
 const STROKE_TERMS: DrawingKindTerms = { noun: 'stroke', invalidCode: 'invalid-stroke', colorCode: 'invalid-stroke-color' };
 const TEXT_TERMS: DrawingKindTerms = { noun: 'text', invalidCode: 'invalid-text', colorCode: 'invalid-text-color' };
 const IMAGE_TERMS: DrawingKindTerms = { noun: 'image', invalidCode: 'invalid-image', colorCode: 'invalid-image-color' };
+const ARROW_TERMS: DrawingKindTerms = { noun: 'arrow', invalidCode: 'invalid-arrow', colorCode: 'invalid-arrow-color' };
 
 // Past this many characters of source, one image makes every write of its layer heavy: the layer
 // is rewritten whole on each edit and kept whole in each undo step.
@@ -230,6 +246,27 @@ function imageDiagnostics(image: Record<string, unknown>, line: number, blockNam
   }
   if (!drawingBoxOf(image.box)) {
     diagnostics.push(warning('invalid-image', line, "This image's `box` must be [x, y, width, height] with a positive width and height; it is not drawn."));
+  }
+  return diagnostics;
+}
+
+function arrowDiagnostics(arrow: Record<string, unknown>, line: number, blockNames: Set<string> | null): Diagnostic[] {
+  const diagnostics = commonDrawingDiagnostics(arrow, line, blockNames, ARROW_TERMS);
+  if (!arrowPointsOf(arrow.points)) {
+    diagnostics.push(warning('invalid-arrow', line, 'This arrow\'s `points` must be exactly two [x, y] number pairs, where it starts and where it points; it is not drawn.'));
+  }
+  if (arrow.width !== undefined && !isArrowWidth(arrow.width)) {
+    diagnostics.push(warning('unknown-arrow-width', line, `Unknown width ${JSON.stringify(arrow.width)}; the arrow is drawn medium. Widths: ${ARROW_WIDTHS.join(', ')}.`));
+  }
+  if (arrow.line !== undefined && !isLineStyle(arrow.line)) {
+    diagnostics.push(warning('unknown-arrow-line', line, `Unknown line ${JSON.stringify(arrow.line)}; the arrow is drawn solid. Lines: ${LINE_STYLES.join(', ')}.`));
+  }
+  const defaultHeads = { startHead: DEFAULT_ARROW_START_HEAD, endHead: DEFAULT_ARROW_END_HEAD };
+  for (const [field, end] of [['startHead', 'start'], ['endHead', 'end']] as const) {
+    if (arrow[field] !== undefined && !isArrowhead(arrow[field])) {
+      const drawnAs = ARROWHEAD_DESCRIPTIONS[defaultHeads[field]];
+      diagnostics.push(warning('unknown-arrowhead', line, `Unknown ${end} head ${JSON.stringify(arrow[field])}; the arrow is drawn with ${drawnAs} there. Heads: ${ARROWHEADS.join(', ')}.`));
+    }
   }
   return diagnostics;
 }

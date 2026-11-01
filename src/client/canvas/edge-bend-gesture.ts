@@ -6,7 +6,7 @@ import type { EdgeBend } from '../../shared/canvas-edge-style.js';
 import { edgeIdentityOf, type ModelEdge } from '../flow-doc.js';
 import { distanceBetween, rectContains, type Point } from '../geometry.js';
 import { bendThrough, canBendAlong, distanceFromChord } from './edge-bend.js';
-import type { EdgeBendOverrides } from './edge-layout.js';
+import type { EdgeRouteOverrides } from './edge-layout.js';
 import type { EdgeChord, EdgeGeometry } from './edge-path.js';
 
 // Screen pixels: how near an unlabelled edge's grip a press must land to bend the edge, and how
@@ -68,6 +68,6 @@ export function extendEdgeBend(
 }
 
 // The bend to paint before anything is written, once the press has become a drag.
-export function bendOverridesOf(gesture: EdgeBendGesture): EdgeBendOverrides | null {
-  return gesture.moved ? new Map([[edgeIdentityOf(gesture.edge), gesture.bend]]) : null;
+export function bendOverridesOf(gesture: EdgeBendGesture): EdgeRouteOverrides | null {
+  return gesture.moved ? new Map([[edgeIdentityOf(gesture.edge), { bend: gesture.bend }]]) : null;
 }

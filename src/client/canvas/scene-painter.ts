@@ -32,11 +32,12 @@ import {
   drawnShapeOf,
   edgeReachesInsideOpenFrame,
   layOutModelEdges,
-  type EdgeBendOverrides,
+  type EdgeRouteOverrides,
   type EdgeGeometryMap,
 } from './edge-layout.js';
 import { STROKE_KIND, STROKE_LINE_WIDTHS, unknownDrawingKind, type CanvasDrawing } from '../../shared/canvas-drawings.js';
 import { IMAGE_KIND } from '../../shared/canvas-image.js';
+import { ARROW_KIND, type ArrowDrawing } from '../../shared/canvas-arrow.js';
 import { TEXT_KIND } from '../../shared/canvas-text.js';
 import type { DrawingTransform } from '../../shared/drawing-geometry.js';
 import { storedDrawingKey } from './drawing-selection.js';
@@ -177,8 +178,12 @@ export interface ScenePainterOptions {
   // How each drawing a gesture is moving or resizing has been carried so far, in its own model's
   // units, keyed by `storedDrawingKey`. The layer is written only when the drag lands.
   drawingTransforms?: ReadonlyMap<string, DrawingTransform> | null;
-  // The bend an edge being dragged would take, painted before anything is written.
-  edgeBends?: EdgeBendOverrides | null;
+  // Drawings a gesture is reshaping in a way no transform says — an arrow with one end dragged —
+  // painted in place of the stored ones, keyed by `storedDrawingKey`.
+  drawingReplacements?: ReadonlyMap<string, CanvasDrawing> | null;
+  // The route an edge being dragged would take (its bend, or an end's pinned angle), or that it is
+  // hidden while a drag turns it into a free arrow — painted before anything is written.
+  edgeRoutes?: EdgeRouteOverrides | null;
   // An image's decoded pixels, or null while it is not decoded yet.
   images(src: string): CanvasImageSource | null;
 }
@@ -201,7 +206,8 @@ export class ScenePainter {
   private readonly expansions: ExpansionLayer;
   private readonly regionRects: ReadonlyMap<ContextBlock, Rect> | null;
   private readonly drawingTransforms: ReadonlyMap<string, DrawingTransform> | null;
-  private readonly edgeBends: EdgeBendOverrides | null;
+  private readonly drawingReplacements: ReadonlyMap<string, CanvasDrawing> | null;
+  private readonly edgeRoutes: EdgeRouteOverrides | null;
   private readonly images: (src: string) => CanvasImageSource | null;
 
   constructor(options: ScenePainterOptions) {
@@ -214,7 +220,8 @@ export class ScenePainter {
     this.expansions = options.expansions;
     this.regionRects = options.regionRects ?? null;
     this.drawingTransforms = options.drawingTransforms ?? null;
-    this.edgeBends = options.edgeBends ?? null;
+    this.drawingReplacements = options.drawingReplacements ?? null;
+    this.edgeRoutes = options.edgeRoutes ?? null;
     this.images = options.images;
   }
 
@@ -226,7 +233,7 @@ export class ScenePainter {
     // for an unfolded frame therefore places that file's regions above the host frame and below
     // the inner nodes (R20a) with no special casing.
     this.drawRegions(model);
-    layOutModelEdges(model, this.edgeGeometry, this.edgeBends);
+    layOutModelEdges(model, this.edgeGeometry, this.edgeRoutes);
     const redirected: ModelEdge[] = [];
     for (const edge of model.edges) {
       if (edgeReachesInsideOpenFrame(model, edge)) redirected.push(edge);
@@ -243,8 +250,10 @@ export class ScenePainter {
 
   private drawDrawings(model: FlowModel): void {
     for (const stored of model.visuals?.drawings() ?? []) {
-      const transform = this.drawingTransforms?.get(storedDrawingKey(model, stored.id));
-      this.drawDrawing(transform ? drawingAsCarried(stored, transform, canvasLineMeasurer(this.ctx)) : stored);
+      const key = storedDrawingKey(model, stored.id);
+      const transform = this.drawingTransforms?.get(key);
+      const replaced = this.drawingReplacements?.get(key);
+      this.drawDrawing(replaced ?? (transform ? drawingAsCarried(stored, transform, canvasLineMeasurer(this.ctx)) : stored));
     }
   }
 
@@ -259,9 +268,35 @@ export class ScenePainter {
       case IMAGE_KIND:
         inkImage(this.ctx, this.images(drawing.src), drawing.box);
         return;
+      case ARROW_KIND:
+        this.drawFreeArrow(drawing);
+        return;
       default:
         unknownDrawingKind(drawing);
     }
+  }
+
+  // Inked as an edge is, in the arrow's own line and heads, so a free arrow and an edge beside it
+  // read as the same kind of mark. The view's gesture overlay draws the one being made with this.
+  drawFreeArrow(arrow: Pick<ArrowDrawing, 'id' | 'color' | 'width' | 'line' | 'startHead' | 'endHead' | 'points'>): void {
+    const [start, end] = arrow.points;
+    const color = drawingInkColor(arrow.color);
+    const lineStroke = LINE_STROKES[arrow.line];
+    const options: RoughOptions = {
+      seed: seedFrom(arrow.id),
+      stroke: color,
+      strokeWidth: STROKE_LINE_WIDTHS[arrow.width],
+      roughness: this.roughnessFor(EDGE_ROUGHNESS),
+      bowing: 0.4,
+      disableMultiStroke: lineStroke.singlePass,
+    };
+    if (lineStroke.dash.length > 0) options.strokeLineDash = lineStroke.dash;
+    this.ctx.save();
+    this.ctx.lineCap = EDGE_LINE_CAP;
+    this.rough.line(start.x, start.y, end.x, end.y, options);
+    this.ctx.restore();
+    this.drawArrowhead(arrow.endHead, start, end, color);
+    this.drawArrowhead(arrow.startHead, end, start, color);
   }
 
   // A region is an enclosure, not a container: by default a hachure fill and a dashed outline, so

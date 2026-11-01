@@ -71,6 +71,11 @@ describe('lintCanvasLayer', () => {
     ]);
   });
 
+  it('passes pinned ends, and warns about an angle that is not a number', () => {
+    expect(rulesOf(layerText({ edges: { [EDGE_KEY]: { startAngle: 180, endAngle: 0 } } }))).toEqual([]);
+    expect(rulesOf(layerText({ edges: { [EDGE_KEY]: { startAngle: 'bottom', endAngle: 90 } } }))).toEqual(['warning invalid-edge-angle']);
+  });
+
   it('says which end of the edge an unknown head is on', () => {
     const messages = lintCanvasLayer(layerText({ edges: { [EDGE_KEY]: { startHead: 'flag' } } }), FLOW).map((diagnostic) => diagnostic.message);
     expect(messages).toEqual([expect.stringContaining('start head "flag"')]);
@@ -152,6 +157,27 @@ describe('lintCanvasLayer on drawings', () => {
       'unknown-stroke-width {"id":"bad-style",',
       'invalid-stroke {"kind":"stroke","',
       'invalid-drawings "not an object"',
+    ]);
+  });
+
+  const GOOD_ARROW = { id: 'pointer', kind: 'arrow', graph: 'Steps', color: 'red', width: 'thick', line: 'dashed', startHead: 'dot', points: [[0, 0], [40, 30]] };
+
+  it('passes a free arrow, and flags one it cannot draw or styles it does not know', () => {
+    expect(rulesOf(layerWithDrawings([GOOD_ARROW]), FLOW_WITH_BLOCK)).toEqual([]);
+    const text = layerWithDrawings([
+      { ...GOOD_ARROW, id: 'three-points', points: [[0, 0], [1, 1], [2, 2]] },
+      { ...GOOD_ARROW, id: 'odd-style', color: 'mauve', width: 'huge', line: 'wavy', endHead: 'spear' },
+      { ...GOOD_ARROW, id: 'lost', graph: 'Gone' },
+    ]);
+    const lines = text.split('\n');
+    const idOnLine = (line: number) => /"id":"([^"]+)"/.exec(lines[line - 1])?.[1];
+    expect(lintCanvasLayer(text, FLOW_WITH_BLOCK).map((diagnostic) => `${diagnostic.rule} ${idOnLine(diagnostic.line)}`)).toEqual([
+      'invalid-arrow three-points',
+      'invalid-arrow-color odd-style',
+      'unknown-arrow-line odd-style',
+      'unknown-arrow-width odd-style',
+      'unknown-arrowhead odd-style',
+      'unknown-drawing-graph lost',
     ]);
   });
 

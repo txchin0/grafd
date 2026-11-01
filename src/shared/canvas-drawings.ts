@@ -4,8 +4,9 @@
 // unfolded inside a frame. `followIdentityChanges` (canvas-layer.ts) keeps `graph` in step with
 // block renames and removals.
 //
-// This editor draws three kinds: a freehand stroke (its geometry is `points`), free text (its
-// geometry is a `box`, canvas-text.ts) and an image (also a `box`, canvas-image.ts). Drawings of
+// This editor draws four kinds: a freehand stroke (its geometry is `points`), free text (its
+// geometry is a `box`, canvas-text.ts), an image (also a `box`, canvas-image.ts) and a free arrow
+// (two `points`, canvas-arrow.ts). Drawings of
 // other kinds, and fields this editor does not know, are kept verbatim and simply not drawn.
 //
 // Whatever depends on the kind switches over every kind and ends in `unknownDrawingKind`, so a
@@ -22,6 +23,17 @@ import {
   type TextDrawing,
 } from './canvas-text.js';
 import { IMAGE_KIND, imageDrawingOf, imageDrawingRecord, type ImageDrawing } from './canvas-image.js';
+import {
+  ARROWHEAD_REACH,
+  ARROW_KIND,
+  arrowDrawingOf,
+  arrowDrawingRecord,
+  arrowPointsOf,
+  storedArrowPoints,
+  withArrowEnd,
+  type ArrowDrawing,
+} from './canvas-arrow.js';
+import type { EdgeEnd } from './canvas-edge-style.js';
 import {
   applyDrawingTransform,
   isFiniteNumber,
@@ -54,7 +66,7 @@ export interface Stroke {
 }
 
 // Every drawing this editor can draw, read from the layer.
-export type CanvasDrawing = Stroke | TextDrawing | ImageDrawing;
+export type CanvasDrawing = Stroke | TextDrawing | ImageDrawing | ArrowDrawing;
 
 export function unknownDrawingKind(drawing: never): never {
   throw new Error(`No drawing kind ${(drawing as { kind: unknown }).kind}`);
@@ -65,7 +77,7 @@ export function isStrokeWidth(value: unknown): value is StrokeWidth {
 }
 
 export function drawingOf(drawing: Drawing): CanvasDrawing | null {
-  return strokeOf(drawing) ?? textDrawingOf(drawing) ?? imageDrawingOf(drawing);
+  return strokeOf(drawing) ?? textDrawingOf(drawing) ?? imageDrawingOf(drawing) ?? arrowDrawingOf(drawing);
 }
 
 // Null for anything that is not a drawable stroke. A bad colour or width only costs the stroke
@@ -126,15 +138,17 @@ export function drawingBounds(drawing: CanvasDrawing): Rect {
     case STROKE_KIND: return strokeBounds(drawing);
     case TEXT_KIND:
     case IMAGE_KIND: return drawing.box;
+    case ARROW_KIND: return arrowBounds(drawing);
     default: return unknownDrawingKind(drawing);
   }
 }
 
-// The box a resize stretches: a stroke's points (its line width is style and stays), a text's or
-// an image's box.
+// The box a resize stretches: a stroke's or an arrow's points (its line width is style and stays),
+// a text's or an image's box.
 export function drawingGeometryBox(drawing: CanvasDrawing): Rect {
   switch (drawing.kind) {
-    case STROKE_KIND: return strokePointBounds(drawing);
+    case STROKE_KIND:
+    case ARROW_KIND: return strokePointBounds(drawing);
     case TEXT_KIND:
     case IMAGE_KIND: return drawing.box;
     default: return unknownDrawingKind(drawing);
@@ -147,8 +161,13 @@ export function transformedDrawing(drawing: CanvasDrawing, transform: DrawingTra
     case STROKE_KIND: return { ...drawing, points: drawing.points.map((point) => applyDrawingTransform(point, transform)) };
     case TEXT_KIND: return { ...drawing, ...transformedTextLayout(drawing, transform) };
     case IMAGE_KIND: return { ...drawing, box: transformedRect(drawing.box, transform) };
+    case ARROW_KIND: return { ...drawing, points: transformedArrowPoints(drawing.points, transform) };
     default: return unknownDrawingKind(drawing);
   }
+}
+
+function transformedArrowPoints(points: ArrowDrawing['points'], transform: DrawingTransform): ArrowDrawing['points'] {
+  return [applyDrawingTransform(points[0], transform), applyDrawingTransform(points[1], transform)];
 }
 
 // A text scaled evenly scales its size with its box. Stretched sideways, it keeps its size and
@@ -169,6 +188,14 @@ export function strokeBounds(stroke: Stroke): Rect {
   return { x: points.x - halfLine, y: points.y - halfLine, w: points.w + 2 * halfLine, h: points.h + 2 * halfLine };
 }
 
+// A head can reach past an end in any direction it points, so the points are grown by whichever
+// is further: half the line, or a head.
+function arrowBounds(arrow: ArrowDrawing): Rect {
+  const points = strokePointBounds(arrow);
+  const reach = Math.max(STROKE_LINE_WIDTHS[arrow.width] / 2, ARROWHEAD_REACH);
+  return { x: points.x - reach, y: points.y - reach, w: points.w + 2 * reach, h: points.h + 2 * reach };
+}
+
 // The box the points themselves span. Folded rather than spread into Math.min, which runs out of
 // stack on a long enough hand-written stroke.
 export function strokePointBounds(stroke: Pick<Stroke, 'points'>): Rect {
@@ -187,7 +214,7 @@ export function strokePointBounds(stroke: Pick<Stroke, 'points'>): Rect {
 export function drawingAnchorPoints(drawing: Drawing): DrawingPoint[] {
   const readable = drawingOf(drawing);
   if (!readable) return [];
-  if (readable.kind === STROKE_KIND) return readable.points;
+  if (readable.kind === STROKE_KIND || readable.kind === ARROW_KIND) return readable.points;
   const box = drawingGeometryBox(readable);
   return [{ x: box.x, y: box.y }, { x: box.x + box.w, y: box.y + box.h }];
 }
@@ -202,6 +229,19 @@ export function addTextDrawing(layer: CanvasLayer, text: TextDrawing): void {
 
 export function addImageDrawing(layer: CanvasLayer, image: ImageDrawing): void {
   layer.drawings = [...layer.drawings, imageDrawingRecord(image)];
+}
+
+export function addArrowDrawing(layer: CanvasLayer, arrow: ArrowDrawing): void {
+  layer.drawings = [...layer.drawings, arrowDrawingRecord(arrow)];
+}
+
+// Moves one end of the arrow with this id, keeping every other field it was read with.
+export function setArrowEnd(layer: CanvasLayer, id: string, end: EdgeEnd, point: DrawingPoint): void {
+  layer.drawings = layer.drawings.map((drawing) => {
+    if (drawing.id !== id) return drawing;
+    const points = arrowPointsOf(drawing.points);
+    return points ? { ...drawing, points: storedArrowPoints(withArrowEnd(points, end, point)) } : drawing;
+  });
 }
 
 export function removeDrawings(layer: CanvasLayer, ids: ReadonlySet<string>): void {
@@ -225,6 +265,7 @@ function withTransformedGeometry(drawing: Drawing, transform: DrawingTransform):
     case STROKE_KIND: return { ...drawing, points: readable.points.map((point) => storedCoordinatePair(applyDrawingTransform(point, transform))) };
     case TEXT_KIND: return { ...drawing, ...storedTextLayout(transformedTextLayout(readable, transform)) };
     case IMAGE_KIND: return { ...drawing, box: storedDrawingBox(transformedRect(readable.box, transform)) };
+    case ARROW_KIND: return { ...drawing, points: storedArrowPoints(transformedArrowPoints(readable.points, transform)) };
     default: return unknownDrawingKind(readable);
   }
 }
@@ -233,7 +274,8 @@ function withTransformedGeometry(drawing: Drawing, transform: DrawingTransform):
 export function hasDrawingColor(drawing: CanvasDrawing): boolean {
   switch (drawing.kind) {
     case STROKE_KIND:
-    case TEXT_KIND: return true;
+    case TEXT_KIND:
+    case ARROW_KIND: return true;
     case IMAGE_KIND: return false;
     default: return unknownDrawingKind(drawing);
   }

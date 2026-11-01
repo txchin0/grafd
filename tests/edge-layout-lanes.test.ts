@@ -4,11 +4,10 @@
 // onto its neighbour fails here rather than in a screenshot.
 
 import { describe, expect, it } from 'vitest';
-import { edgePathBounds, layOutModelEdges, type EdgeGeometryMap } from '../src/client/canvas/edge-layout.js';
+import { edgePathBounds, layOutModelEdges, type EdgeGeometryMap, type EdgeRouteOverride } from '../src/client/canvas/edge-layout.js';
 import { edgeEnd, edgeStart, type EdgeGeometry } from '../src/client/canvas/edge-path.js';
 import { assignMissingIds, buildModel, edgeIdentityOf, type EdgeIdentity, type ModelEdge } from '../src/client/flow-doc.js';
 import { distanceToEdgePath, edgePathMidpoint } from '../src/client/canvas/edge-path.js';
-import type { EdgeBend } from '../src/shared/canvas-edge-style.js';
 import { rectCenter, unitVectorBetween, type Point } from '../src/client/geometry.js';
 import { parseFlow, type Rect } from '../src/shared/flow-format.js';
 import { parseCanvasLayer } from '../src/shared/canvas-layer.js';
@@ -239,7 +238,7 @@ describe('bent edges', () => {
   // Half way along, and a quarter of the 800-unit chord to one side: 200 units off the axis.
   const BEND = { along: 0.5, across: 0.25 };
 
-  function layOutBent(flowText: string, edges: Record<string, unknown>, overrides?: Map<EdgeIdentity, EdgeBend | null>) {
+  function layOutBent(flowText: string, edges: Record<string, unknown>, overrides?: Map<EdgeIdentity, EdgeRouteOverride>) {
     const doc = parseFlow(flowText);
     assignMissingIds(doc);
     const model = dressModel(buildModel(doc, null), parseCanvasLayer(JSON.stringify({ edges })));
@@ -271,7 +270,7 @@ describe('bent edges', () => {
   it('lays an edge whose drag override is null out exactly as an unbent one, back in its lane', () => {
     const plain = layOutBent(PAIR, {});
     const bentInLayer = layOutBent(PAIR, { [SECOND_KEY]: { bend: [BEND.along, BEND.across] } });
-    const overrides = new Map<EdgeIdentity, EdgeBend | null>([[edgeIdentityOf(bentInLayer.model.edges[1]), null]]);
+    const overrides = new Map<EdgeIdentity, EdgeRouteOverride>([[edgeIdentityOf(bentInLayer.model.edges[1]), { bend: null }]]);
     const relaidOut: EdgeGeometryMap = new Map();
     layOutModelEdges(bentInLayer.model, relaidOut, overrides);
     plain.model.edges.forEach((edge, index) => {
@@ -286,7 +285,7 @@ describe('bent edges', () => {
     const pressedOn = dressModel(buildModel(doc, null), layer);
     const rebuilt = dressModel(buildModel(doc, null), layer);
     expect(rebuilt.edges[0]).not.toBe(pressedOn.edges[0]);
-    const overrides = new Map([[edgeIdentityOf(pressedOn.edges[0]), BEND]]);
+    const overrides = new Map([[edgeIdentityOf(pressedOn.edges[0]), { bend: BEND }]]);
     const geometry: EdgeGeometryMap = new Map();
     layOutModelEdges(rebuilt, geometry, overrides);
     expect(geometry.get(rebuilt.edges[0])!.grip.y).toBeCloseTo(44 + 200, 6);
@@ -314,5 +313,67 @@ describe('bent edges', () => {
     const laned = geometry.get(model.edges[0])!;
     expect(laned.grip).toEqual(edgePathMidpoint(laned.path));
     expect(laned.chord).not.toBeNull();
+  });
+});
+
+describe('pinned ends', () => {
+  const PAIR = flowBetween(['  -> B', '  -> B'], []);
+  const FIRST_KEY = 'a-1 -> #b-1';
+
+  function layOutWith(flowText: string, edges: Record<string, unknown>, overrides?: Map<EdgeIdentity, EdgeRouteOverride>) {
+    const doc = parseFlow(flowText);
+    assignMissingIds(doc);
+    const model = dressModel(buildModel(doc, null), parseCanvasLayer(JSON.stringify({ edges })));
+    const geometry: EdgeGeometryMap = new Map();
+    layOutModelEdges(model, geometry, overrides);
+    return { model, geometry, rects: model.nodes.map((node) => node.pos!) };
+  }
+
+  it('leave the node at the angle they are pinned to, and run straight from there', () => {
+    const { model, geometry } = layOutWith(PAIR, { [FIRST_KEY]: { startAngle: 180, endAngle: 0 } });
+    const pinned = geometry.get(model.edges[0])!;
+    expect(edgeStart(pinned).x).toBeCloseTo(100, 6);
+    expect(edgeStart(pinned).y).toBeCloseTo(88, 6);
+    expect(edgeEnd(pinned).x).toBeCloseTo(900, 6);
+    expect(edgeEnd(pinned).y).toBeCloseTo(0, 6);
+    expect(distanceToEdgePath({ x: 500, y: 44 }, pinned.path)).toBeCloseTo(0, 6);
+  });
+
+  it('meet a diamond on its outline, not its rectangle', () => {
+    const doc = parseFlow(PAIR);
+    assignMissingIds(doc);
+    const layer = parseCanvasLayer(JSON.stringify({ nodes: { 'a-1': { shape: 'diamond' } }, edges: { [FIRST_KEY]: { startAngle: 45 } } }));
+    const model = dressModel(buildModel(doc, null), layer);
+    const geometry: EdgeGeometryMap = new Map();
+    layOutModelEdges(model, geometry);
+    const start = edgeStart(geometry.get(model.edges[0])!);
+    // On the diamond's upper-right side: |dx| / 100 + |dy| / 44 = 1, along the 45° ray.
+    expect((start.x - 100) / 100 + (44 - start.y) / 44).toBeCloseTo(1, 6);
+    expect(start.x - 100).toBeCloseTo(44 - start.y, 6);
+  });
+
+  it('take a pinned edge out of its bundle, so the one left runs down the middle', () => {
+    const { model, geometry, rects } = layOutWith(PAIR, { [FIRST_KEY]: { endAngle: 270 } });
+    const remaining = offsetsOf(geometry.get(model.edges[1])!, rects);
+    expect(remaining.start).toBeCloseTo(0, 6);
+    expect(remaining.mid).toBeCloseTo(0, 6);
+  });
+
+  it('aim a free end at the other end\'s pinned point', () => {
+    const { model, geometry } = layOutWith(PAIR, { [FIRST_KEY]: { endAngle: 180 } });
+    const edge = geometry.get(model.edges[0])!;
+    const toward = unitVectorBetween(rectCenter({ x: 0, y: 0, w: 200, h: 88 }), { x: 900, y: 88 });
+    const leaving = unitVectorBetween({ x: 100, y: 44 }, edgeStart(edge));
+    expect(leaving.x).toBeCloseTo(toward.x, 6);
+    expect(leaving.y).toBeCloseTo(toward.y, 6);
+  });
+
+  it('hide an edge a drag is turning into an arrow', () => {
+    const plain = layOutWith(PAIR, {});
+    const overrides = new Map<EdgeIdentity, EdgeRouteOverride>([[edgeIdentityOf(plain.model.edges[0]), { hidden: true }]]);
+    const relaidOut: EdgeGeometryMap = new Map();
+    layOutModelEdges(plain.model, relaidOut, overrides);
+    expect(relaidOut.has(plain.model.edges[0])).toBe(false);
+    expect(relaidOut.has(plain.model.edges[1])).toBe(true);
   });
 });

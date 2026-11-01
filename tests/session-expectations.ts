@@ -8,13 +8,14 @@ import type { Tool } from '../src/client/canvas/canvas-view.js';
 import type { Point } from '../src/client/geometry.js';
 import { allNodes, buildModel, containingGraphBlockName, graphBlockNames, regionRectOf, type FlowModel } from '../src/client/flow-doc.js';
 import { parseFlow, type FlowDocument, type Rect } from '../src/shared/flow-format.js';
-import { canvasLayerPathOf, isCanvasLayerPath, parseCanvasLayer } from '../src/shared/canvas-layer.js';
+import { canvasLayerPathOf, isCanvasLayerPath, isFlowPath, parseCanvasLayer } from '../src/shared/canvas-layer.js';
 import { isDrawableText, textDrawingOf, type TextDrawing } from '../src/shared/canvas-text.js';
 import { imageDrawingOf, type ImageDrawing } from '../src/shared/canvas-image.js';
 import { axesOf, isResizeEdge, type ResizeEdge } from '../src/client/canvas/resize-handles.js';
 import { boundsOfRects, rectContainsRect } from '../src/shared/rect-math.js';
 import { arrangeGraphScope, layerReadingOf } from '../src/shared/document-layout.js';
 import { STROKE_KIND, drawingBounds, strokeBounds, strokePointBounds, strokePointsOf, type Stroke } from '../src/shared/canvas-drawings.js';
+import { arrowDrawingOf } from '../src/shared/canvas-arrow.js';
 import type { HeadlessEditor } from './editor-harness.js';
 import { isHistoryAction, type ActionTrace, type SessionAction } from './session-actions.js';
 import { contentChanged, contentOf, differingPaths, type FileSnapshot, type Violation } from './session-invariants.js';
@@ -168,7 +169,58 @@ export function expectationViolations(step: SessionStep): Violation[] {
     ...imageResizedOutOfProportion(step, was, now),
     ...imagePasteNotAsAsked(step),
     ...sideDragThatMovedOtherSides(step, was, now),
+    ...arrowToolDragNotOneArrowOrEdge(step),
+    ...edgeEndDragNotPinOrDetach(step),
   ];
+}
+
+// Every edge and every free arrow in the workspace, and the .flow files' text: what an arrow
+// gesture may add to, take from or leave alone.
+interface ArrowCensus {
+  edges: number;
+  arrows: number;
+  flowText: string;
+}
+
+function arrowCensusOf(snapshot: FileSnapshot): ArrowCensus {
+  let edges = 0;
+  let arrows = 0;
+  const flowTexts: string[] = [];
+  for (const [path, text] of [...contentOf(snapshot)].sort(([a], [b]) => a.localeCompare(b))) {
+    if (isFlowPath(path)) {
+      flowTexts.push(`${path}\n${text}`);
+      edges += allNodes(parseFlow(text)).reduce((count, node) => count + node.edges.length + (node.props.some((prop) => prop.key === 'on_error') ? 1 : 0), 0);
+    } else if (isCanvasLayerPath(path)) {
+      arrows += parseCanvasLayer(text).drawings.filter((drawing) => arrowDrawingOf(drawing) != null).length;
+    }
+  }
+  return { edges, arrows, flowText: flowTexts.join('\n') };
+}
+
+// The arrow tool writes exactly one thing: an edge in the .flow when it joined two nodes, or one
+// free arrow, leaving every .flow as it was, when it did not.
+function arrowToolDragNotOneArrowOrEdge(step: SessionStep): Violation[] {
+  const isDrag = step.action.type === 'drag' || step.action.type === 'nudge' || step.action.type === 'wiggle';
+  if (!isDrag || step.tool !== 'arrow' || !step.trace.path || !contentChanged(step.before, step.after)) return [];
+  const was = arrowCensusOf(step.before);
+  const now = arrowCensusOf(step.after);
+  const drewOneEdge = now.edges === was.edges + 1 && now.arrows === was.arrows;
+  const drewOneArrow = now.arrows === was.arrows + 1 && now.flowText === was.flowText;
+  if (drewOneEdge || drewOneArrow) return [];
+  return violation('the arrow tool draws one arrow or one edge', `edges ${was.edges} -> ${now.edges}, arrows ${was.arrows} -> ${now.arrows}, .flow ${now.flowText === was.flowText ? 'unchanged' : 'changed'}`);
+}
+
+// An edge's end dot either pins the end, which only its canvas layer hears of, or pulls the edge
+// off into a free arrow: one edge out of the .flow, one arrow into a layer.
+function edgeEndDragNotPinOrDetach(step: SessionStep): Violation[] {
+  if (step.trace.pressedKind !== 'edge-end-handle' || step.tool === 'draw' || step.tool === 'arrow') return [];
+  if (!contentChanged(step.before, step.after)) return [];
+  const was = arrowCensusOf(step.before);
+  const now = arrowCensusOf(step.after);
+  const pinned = now.flowText === was.flowText && now.arrows === was.arrows;
+  const detached = now.edges === was.edges - 1 && now.arrows === was.arrows + 1;
+  if (pinned || detached) return [];
+  return violation('an edge end is pinned or pulled off into an arrow', `edges ${was.edges} -> ${now.edges}, arrows ${was.arrows} -> ${now.arrows}, .flow ${now.flowText === was.flowText ? 'unchanged' : 'changed'}`);
 }
 
 function violation(invariant: string, detail: string): Violation[] {

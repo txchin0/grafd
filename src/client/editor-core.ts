@@ -75,7 +75,9 @@ import {
 import { drawingsForExtractedDocument } from '../shared/canvas-drawings.js';
 import { CanvasLayerStore } from './canvas-layer-store.js';
 import { createCanvasLayerSync } from './canvas-layer-sync.js';
-import type { EdgeStylePatch } from '../shared/canvas-edge-style.js';
+import { angleFieldOf, shownEdgeLabel, type EdgeEnd, type EdgeStylePatch } from '../shared/canvas-edge-style.js';
+import { DEFAULT_ARROW_END_HEAD, DEFAULT_ARROW_LINE, DEFAULT_ARROW_START_HEAD, EDGE_ARROW_WIDTH } from '../shared/canvas-arrow.js';
+import { EDGE_LABEL_FONT_PX } from '../shared/node-text-metrics.js';
 import { dressModel } from './model-visuals.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
 import { createClipboard, type PastePlacement } from './clipboard.js';
@@ -1061,6 +1063,41 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     applyLayerEdit(owner, () => layerSync.setEdgeStyle(owner, edge, patch));
   }
 
+  // A null angle frees the end again.
+  function pinEdgeEnd(edge: ModelEdge, end: EdgeEnd, angle: number | null): void {
+    applyEdgeStyleEdit(edge, { [angleFieldOf(end)]: angle });
+  }
+
+  function hasPinnedEnd(edge: ModelEdge): boolean {
+    const style = layerSync.edgeStyleOf(ownerOf(edge.from), edge);
+    return style.startAngle != null || style.endAngle != null;
+  }
+
+  // An edge pulled off its node leaves the .flow, and stays on the canvas as a free arrow drawn the
+  // way the edge was, its label beside it — one undo step. When the arrow cannot be written the
+  // edge stays, since deleting it would lose what the user only meant to move.
+  function detachEdgeToArrow(edge: ModelEdge, detached: { points: [Point, Point]; labelAt: Point }, frameHost: FlowNode | null): void {
+    if (!openFlow) return;
+    if (!drawingOps.canDrawUnder(frameHost)) {
+      view.flashNotice('Edge kept: its canvas layer cannot be edited until it is fixed');
+      return;
+    }
+    const style = layerSync.edgeStyleOf(ownerOf(edge.from), edge);
+    const label = shownEdgeLabel(edge.spec.label, edge.kind);
+    editors.closeAll();
+    session.runAction(() => {
+      const stored = drawingOps.createArrow({
+        points: detached.points,
+        frameHost,
+        style: { color: style.color, width: EDGE_ARROW_WIDTH, line: style.line, startHead: style.startHead, endHead: style.endHead },
+        caption: label ? { text: label, center: detached.labelAt, fontPx: EDGE_LABEL_FONT_PX } : undefined,
+      });
+      if (!stored) return;
+      writeEdgeDeletions([edge]);
+      view.setSelection([], [], [stored]);
+    });
+  }
+
   function applyEdit(node: FlowNode, mutation: () => void, options?: { commit?: CommitTiming }): void {
     applyToDoc(ownerOf(node), mutation, options);
   }
@@ -1558,6 +1595,14 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     completeEdge,
     editEdge: (edge) => editors.openEdgeEditor(edge),
     bendEdge: (edge, bend) => applyEdgeStyleEdit(edge, { bend }),
+    pinEdgeEnd: (edge, end, angle) => pinEdgeEnd(edge, end, angle),
+    detachEdge: (edge, detached, frameHost) => detachEdgeToArrow(edge, detached, frameHost),
+    createArrow: (points, frameHost, style) => {
+      if (!openFlow) return;
+      const arrowStyle = { ...style, line: DEFAULT_ARROW_LINE, startHead: DEFAULT_ARROW_START_HEAD, endHead: DEFAULT_ARROW_END_HEAD };
+      drawingOps.createArrow({ points, frameHost, style: arrowStyle });
+    },
+    moveArrowEnd: (drawing, end, point) => drawingOps.moveArrowEnd(drawing, end, point),
     editNodeTitle: (node) => editors.openTitleEditor(node),
     placeText: (point, frameHost) => {
       if (!openFlow) return;
@@ -1680,6 +1725,9 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     const items: MenuItem[] = [{ label: 'Edit label', onSelect: () => editors.openEdgeEditor(edge) }];
     if (layerSync.edgeStyleOf(ownerOf(edge.from), edge).bend) {
       items.push({ label: 'Straighten', onSelect: () => applyEdgeStyleEdit(edge, { bend: null }) });
+    }
+    if (hasPinnedEnd(edge)) {
+      items.push({ label: 'Reset ends', onSelect: () => applyEdgeStyleEdit(edge, { startAngle: null, endAngle: null }) });
     }
     items.push({ separator: true });
     items.push({ label: 'Delete edge', danger: true, onSelect: deleteSelection });

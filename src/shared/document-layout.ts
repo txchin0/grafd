@@ -8,6 +8,7 @@ import { arrangeScope, arrangeSelected, placeNodes, type Arrangement, type Layou
 import { polishPlacement } from './layout-polish.js';
 import type { LayoutDirection } from './layered-layout.js';
 import { bendThroughPoint, edgeStyleOf, setEdgeStyle, type EdgeBend } from './canvas-edge-style.js';
+import type { PinnedEnds } from './edge-sketch.js';
 import { documentIdentities, nodeShapeOf, type CanvasLayer, type NodeShape } from './canvas-layer.js';
 import {
   getProp,
@@ -52,6 +53,8 @@ export interface ArrangeOutcome {
 export interface LayerReading {
   shapeOf?(node: FlowNode): NodeShape;
   bendOf?(edge: DocumentEdge): EdgeBend | null;
+  // The angles the edge's ends are pinned to; arranging leaves them where they are.
+  pinnedEndsOf?(edge: DocumentEdge): PinnedEnds;
 }
 
 // The reading of a document's layer as it stands; a null layer (none, or unreadable) reads as
@@ -61,6 +64,10 @@ export function layerReadingOf(doc: FlowDocument, layer: CanvasLayer | null): Re
   return {
     shapeOf: (node) => nodeShapeOf(layer, node.id),
     bendOf: ({ node, spec }) => edgeStyleOf(layer, identities.edgeKeys.get(spec ?? node) ?? null, spec ? 'flow' : 'error').bend,
+    pinnedEndsOf: ({ node, spec }) => {
+      const { startAngle, endAngle } = edgeStyleOf(layer, identities.edgeKeys.get(spec ?? node) ?? null, spec ? 'flow' : 'error');
+      return { startAngle, endAngle };
+    },
   };
 }
 
