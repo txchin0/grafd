@@ -104,7 +104,8 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   filed under its node in `edgeKeys`, since the property has no stable EdgeSpec object.
   `canvas-drawings.ts` reads and edits the drawings — strokes (`points`), text (`box`,
   `canvas-text.ts`), images (`box`, `canvas-image.ts`) and free arrows (two `points`, start then
-  tip, `canvas-arrow.ts`, drawn with an edge's line and heads and joining nothing) — and moves and resizes every kind as
+  tip, `canvas-arrow.ts`, drawn with an edge's line and heads — and with no colour of its own, in
+  the edges' colour rather than the ink strokes and text default to — and joining nothing) — and moves and resizes every kind as
   one `DrawingTransform` (`drawing-geometry.ts`) applied to whichever geometry the entry has.
   Whatever depends on a drawing's kind switches over every kind and ends in `unknownDrawingKind`,
   so a new kind does not compile until each such place answers for it. An image carries its pixels

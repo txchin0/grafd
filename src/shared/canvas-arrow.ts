@@ -35,7 +35,7 @@ export interface ArrowDrawing {
   kind: typeof ARROW_KIND;
   id: string;
   graph: string | null;
-  // A colour slot or `#rrggbb`; null draws in the theme's ink.
+  // A colour slot or `#rrggbb`; null draws in the theme's edge colour, as an edge with none is.
   color: string | null;
   width: ArrowWidth;
   line: LineStyle;

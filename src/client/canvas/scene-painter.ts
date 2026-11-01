@@ -42,7 +42,7 @@ import { TEXT_KIND } from '../../shared/canvas-text.js';
 import type { DrawingTransform } from '../../shared/drawing-geometry.js';
 import { storedDrawingKey } from './drawing-selection.js';
 import type { ExpansionLayer, FrameExpansion } from './expansion.js';
-import { drawingInkColor, inkStroke } from './stroke-painter.js';
+import { arrowInkColor, drawingInkColor, inkStroke } from './stroke-painter.js';
 import { inkText } from './text-painter.js';
 import { inkImage } from './image-painter.js';
 import { canvasLineMeasurer, drawingAsCarried } from './text-drawing-layout.js';
@@ -276,11 +276,11 @@ export class ScenePainter {
     }
   }
 
-  // Inked as an edge is, in the arrow's own line and heads, so a free arrow and an edge beside it
-  // read as the same kind of mark. The view's gesture overlay draws the one being made with this.
+  // Inked as an edge is — in the edges' colour unless it has its own, with its own line and heads —
+  // so a free arrow and an edge beside it read as the same kind of mark. The view's gesture overlay draws the one being made with this.
   drawFreeArrow(arrow: Pick<ArrowDrawing, 'id' | 'color' | 'width' | 'line' | 'startHead' | 'endHead' | 'points'>): void {
     const [start, end] = arrow.points;
-    const color = drawingInkColor(arrow.color);
+    const color = arrowInkColor(arrow.color);
     const lineStroke = LINE_STROKES[arrow.line];
     const options: RoughOptions = {
       seed: seedFrom(arrow.id),

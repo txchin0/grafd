@@ -12,6 +12,8 @@ import {
   transformDrawings,
 } from '../src/shared/canvas-drawings.js';
 import { emptyCanvasLayer, parseCanvasLayer, serializeCanvasLayer } from '../src/shared/canvas-layer.js';
+import { arrowInkColor, drawingInkColor } from '../src/client/canvas/stroke-painter.js';
+import { canvasPalette, resolveLayerColor } from '../src/client/theme.js';
 
 const ARROW: ArrowDrawing = {
   kind: 'arrow',
@@ -74,5 +76,16 @@ describe('editing a free arrow', () => {
     const target = emptyCanvasLayer();
     pasteDrawings(target, { drawings: source.drawings, groups: [] }, 'Steps', { x: 100, y: 0 });
     expect(drawingOf(target.drawings[0])).toMatchObject({ graph: 'Steps', points: [{ x: 110, y: 20 }, { x: 210, y: 70 }] });
+  });
+});
+
+describe("a free arrow's colour", () => {
+  it('is the edges\' colour by default, as an edge with none is drawn, not the ink strokes take', () => {
+    expect(arrowInkColor(null)).toBe(canvasPalette.edge);
+    expect(arrowInkColor(null)).not.toBe(drawingInkColor(null));
+  });
+
+  it('is its own colour once it has one', () => {
+    expect(arrowInkColor('red')).toBe(resolveLayerColor('red'));
   });
 });
