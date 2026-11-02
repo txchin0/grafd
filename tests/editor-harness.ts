@@ -220,10 +220,12 @@ export async function createHeadlessEditor(
     press,
     moveTo,
     release,
+    // A frame passes before letting go, so what a gesture paints while in flight is painted.
     async drag(path, options = {}) {
       const [first, ...rest] = path;
       press(first, options);
       for (const point of rest) moveTo(point);
+      await vi.advanceTimersByTimeAsync(FRAME_MS);
       release(path[path.length - 1]);
       await settle();
     },
@@ -308,7 +310,7 @@ function createHeadlessContext() {
   const drawingCalls = [
     'setTransform', 'clearRect', 'fillRect', 'strokeRect', 'save', 'restore', 'beginPath', 'moveTo', 'lineTo',
     'bezierCurveTo', 'quadraticCurveTo', 'ellipse', 'stroke', 'fill', 'fillText', 'setLineDash', 'clip', 'rect',
-    'roundRect', 'arc', 'closePath', 'translate', 'scale', 'drawImage',
+    'roundRect', 'arc', 'closePath', 'translate', 'scale', 'transform', 'drawImage',
   ];
   return {
     ...Object.fromEntries(drawingCalls.map((name) => [name, doNothing])),

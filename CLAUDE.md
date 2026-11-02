@@ -238,8 +238,8 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
     `edge-bend-gesture.ts`, pure like the other gesture modules. A lone selected edge also shows a
     dot at each end (`edge-end-gesture.ts`): let go on or just around its own node, it pins that
     end's angle (layer only); let go on empty canvas, the edge leaves the .flow and a free arrow
-    drawn the same way takes its place, its label as text grouped with it, in one undo step; let go
-    on another node, nothing. A lone ungrouped free arrow shows end dots in place of box handles,
+    drawn the same way takes its place in one undo step (its label and data fields go with the
+    edge); let go on another node, nothing. A lone ungrouped free arrow shows end dots in place of box handles,
     each moving its end anywhere. The arrow tool (`arrow-gesture.ts`) draws over everything like
     the pen: a drag a port drag would turn into an edge onto a node already there writes that edge
     to the .flow, anything else draws a free arrow in the graph the press landed in. Zoom-to-fit
@@ -401,7 +401,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   keys run which command is the table in `editor-commands.ts`, read by main.ts's keyboard handler
   and the test sessions alike). It touches no DOM: floating editors, menus,
   breadcrumb, sidebar and graph panel are reached through the `EditorShell` it is handed, which
-  is what lets tests run the whole editing stack headless.
+  is what lets tests run the whole editing stack headless. A .flow on screen replaced from disk
+  abandons any gesture under way, as Escape does: the gesture holds the replaced document's
+  objects, and finishing it would write through objects no file holds.
 - `src/client/main.ts` — the page shell: DOM elements, sidebar, breadcrumb, graph panel, editors,
   modals, toolbar, preferences and keyboard shortcuts, wired to the core. It edits nothing itself.
 - `tests/` — Vitest unit tests for the parser/serializer, document mutations, server file

@@ -114,7 +114,7 @@ The canvas layer means nothing to you and its content is not part of the format.
 - Keeping node `id`s keeps node styling. Relabelling or retargeting an edge drops its look (colour, line style, arrowheads, bend, pinned ends) — expected; the linter lists the leftover entry as `info`, which needs no action.
 - A free arrow drawn on the canvas is decoration in the layer, not an edge: it joins no nodes and means nothing to the graph. Only an edge line in the `.flow` connects two nodes.
 - A region's look (colour and background) is filed under its `context:` block's name. Renaming or removing the block drops it — also expected, also reported as `info`.
-- Drawings (freehand strokes, free text and images) made inside a `graph:` block are filed under the block's name. Renaming or removing the block leaves them unshown — also expected, also reported as `info`.
+- Drawings (freehand strokes, free text, free arrows and images) made inside a `graph:` block are filed under the block's name. Renaming or removing the block leaves them unshown — also expected, also reported as `info`.
 
 ### Inference Rules
 

@@ -6,7 +6,7 @@
 // anyway. An error edge is drawn dashed by default, so what counts as a default depends on the
 // edge's kind, which is why both reads and writes are told it.
 
-import { isLayerColor, setEntryField, type CanvasLayer } from './canvas-layer.js';
+import { isLayerColor, setEntryField, type CanvasLayer, type LayerColorSlot } from './canvas-layer.js';
 import type { Point } from './rect-math.js';
 
 export type EdgeKind = 'flow' | 'error';
@@ -41,6 +41,10 @@ const ANCHOR_SNAP_STEP_DEGREES = 45;
 const ANCHOR_SNAP_DEGREES = 6;
 
 export type EdgeEnd = 'start' | 'end';
+
+// The colour slot that marks an edge as leading into an error, wherever one has to be written —
+// the theme's own error colour has no slot, so a layer cannot name it.
+export const ERROR_EDGE_COLOR: LayerColorSlot = 'red';
 
 export interface EdgeStyle {
   // Null draws the edge kind's own colour, which the theme decides.

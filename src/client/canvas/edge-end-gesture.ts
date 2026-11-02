@@ -4,7 +4,8 @@
 // Pure — the view converts the pointer into the edge's model coordinates and says what is under
 // it; this decides what the gesture means.
 
-import { angleFieldOf, angleToward, snapAnchorAngle, type EdgeEnd } from '../../shared/canvas-edge-style.js';
+import { EDGE_ARROW_WIDTH, type ArrowDrawing } from '../../shared/canvas-arrow.js';
+import { angleFieldOf, angleToward, ERROR_EDGE_COLOR, snapAnchorAngle, type EdgeEnd, type EdgeStyle } from '../../shared/canvas-edge-style.js';
 import { padRect } from '../../shared/rect-math.js';
 import { edgeIdentityOf, type ModelEdge } from '../flow-doc.js';
 import { distanceBetween, rectCenter, rectContains, type Point } from '../geometry.js';
@@ -29,11 +30,9 @@ export interface EdgeEndGesture {
   end: EdgeEnd;
   // The outline this end meets, measured once at the press: nothing the drag does moves a node.
   endpoint: Endpoint;
-  // Where the other end is drawn, which a detached edge's arrow keeps, and where its label sits,
-  // which a detached edge's label keeps. Both measured at the press: once pulled off, the edge is
-  // no longer laid out.
+  // Where the other end is drawn, which a detached edge's arrow keeps. Measured at the press: once
+  // pulled off, the edge is no longer laid out.
   keptPoint: Point;
-  labelAt: Point;
   startScreen: Point;
   moved: boolean;
   drop: EdgeEndDrop;
@@ -42,7 +41,7 @@ export interface EdgeEndGesture {
 export function beginEdgeEnd(
   edge: ModelEdge,
   end: EdgeEnd,
-  measured: Pick<EdgeEndGesture, 'endpoint' | 'keptPoint' | 'labelAt'>,
+  measured: Pick<EdgeEndGesture, 'endpoint' | 'keptPoint'>,
   screen: Point,
 ): EdgeEndGesture {
   return { type: 'edge-end', edge, end, ...measured, startScreen: screen, moved: false, drop: { kind: 'none' } };
@@ -81,6 +80,14 @@ export function edgeEndOverridesOf(gesture: EdgeEndGesture): EdgeRouteOverrides 
   if (gesture.drop.kind === 'pin') return new Map([[identity, { [angleFieldOf(gesture.end)]: gesture.drop.angle }]]);
   if (gesture.drop.kind === 'detach') return new Map([[identity, { hidden: true as const }]]);
   return null;
+}
+
+// How the free arrow a detached edge becomes is drawn: as the edge was. An error edge left in its
+// default colour is drawn in the theme's error colour, which an arrow left in its own default is not,
+// so it is written in the error slot.
+export function detachedArrowStyle(edge: ModelEdge, style: EdgeStyle): Omit<ArrowDrawing, 'kind' | 'id' | 'graph' | 'points'> {
+  const color = style.color ?? (edge.kind === 'error' ? ERROR_EDGE_COLOR : null);
+  return { color, width: EDGE_ARROW_WIDTH, line: style.line, startHead: style.startHead, endHead: style.endHead };
 }
 
 // The free arrow a detach would leave, start to end in the edge's own direction.

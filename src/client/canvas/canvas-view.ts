@@ -68,6 +68,7 @@ import {
   EDGE_END_HIT_RADIUS_PX,
   beginEdgeEnd,
   detachedArrowPoints,
+  detachedArrowStyle,
   edgeEndOverridesOf,
   extendEdgeEnd,
   type EdgeEndGesture,
@@ -80,7 +81,7 @@ import {
   type ArrowEndGesture,
   type ArrowGesture,
 } from './arrow-gesture.js';
-import { ARROW_KIND, EDGE_ARROW_WIDTH, DEFAULT_ARROW_END_HEAD, DEFAULT_ARROW_LINE, DEFAULT_ARROW_START_HEAD, withArrowEnd, type ArrowDrawing } from '../../shared/canvas-arrow.js';
+import { ARROW_KIND, DEFAULT_ARROW_END_HEAD, DEFAULT_ARROW_LINE, DEFAULT_ARROW_START_HEAD, withArrowEnd, type ArrowDrawing } from '../../shared/canvas-arrow.js';
 import {
   beginEdgeBend,
   bendOverridesOf,
@@ -395,6 +396,11 @@ function cursorFor(target: PressTarget, canvasCursor: CanvasCursor): CanvasCurso
   }
 }
 
+// Ends a switch over every kind of target, so a new kind does not compile until it is answered.
+function unknownPressTarget(target: never): never {
+  throw new Error(`No press target ${(target as PressTarget).kind}`);
+}
+
 // The cursor that shows which way a handle resizes.
 function resizeCursorOf(handle: ResizeHandle): CanvasCursor {
   const axes = axesOf(handle);
@@ -500,9 +506,8 @@ export interface CanvasActions {
   // Pins the angle one end of the edge meets its node at.
   pinEdgeEnd(edge: ModelEdge, end: EdgeEnd, angle: number): void;
   // Takes the edge out of the .flow and leaves a free arrow running from `points[0]` to
-  // `points[1]` in its place, its label at `labelAt` — all in the coordinate space of the graph the
-  // edge is drawn in.
-  detachEdge(edge: ModelEdge, detached: { points: [Point, Point]; labelAt: Point }, frameHost: FlowNode | null): void;
+  // `points[1]` in its place, in the coordinate space of the graph the edge is drawn in.
+  detachEdge(edge: ModelEdge, points: [Point, Point], frameHost: FlowNode | null): void;
   // Points are in the coordinate space of the graph that will own the arrow.
   createArrow(points: [Point, Point], frameHost: FlowNode | null, style: DrawStyle): void;
   // `point` is in the arrow's own model's units.
@@ -1289,6 +1294,7 @@ export class CanvasView {
 
     const creating = this.createsOnPress(event.shiftKey);
     const target = this.pressTargetAt(world, { creating });
+    if (event.shiftKey && this.shiftPressedOwnerOf(target, world, screen)) return;
     switch (target.kind) {
       case 'edge-end-handle':
         this.gesture = this.beginEdgeEndDrag(target.edge, target.end, screen);
@@ -1303,8 +1309,7 @@ export class CanvasView {
         this.gesture = this.beginDrawingResize(target.resizable, target.handle, world, screen);
         return;
       case 'selected-edge-grip':
-        if (event.shiftKey) this.pressEdge(target.edge, world, screen, true);
-        else this.gesture = this.edgeBendGrabbedAt(target.edge, world, screen);
+        this.gesture = this.edgeBendGrabbedAt(target.edge, world, screen);
         return;
       case 'node-handle':
         this.gesture = {
@@ -1339,6 +1344,34 @@ export class CanvasView {
       case 'canvas':
         this.pressCanvas(world, screen, event.shiftKey, creating);
         return;
+      default:
+        unknownPressTarget(target);
+    }
+  }
+
+  // Shift on a handle, grip or end dot means what shift on the thing it belongs to means: adding it
+  // to the selection or taking it out. A port keeps shift for itself — drawing an edge from it with
+  // shift keeps the selection. Whether the press was answered here.
+  private shiftPressedOwnerOf(target: PressTarget, world: Point, screen: Point): boolean {
+    switch (target.kind) {
+      case 'node-handle':
+        this.pressNode(target.node, null, world, screen, true);
+        return true;
+      case 'region-handle':
+        this.pressRegion(target.context, world, screen, true);
+        return true;
+      case 'selected-edge-grip':
+      case 'edge-end-handle':
+        this.pressEdge(target.edge, world, screen, true);
+        return true;
+      case 'drawing-handle':
+        this.pressDrawing(target.resizable.drawings[0], world, screen, true);
+        return true;
+      case 'arrow-end-handle':
+        this.pressDrawing(target.drawing, world, screen, true);
+        return true;
+      default:
+        return false;
     }
   }
 
@@ -2072,8 +2105,8 @@ export class CanvasView {
   }
 
   private onDoubleClick(event: MouseEvent): void {
-    // A pen tapped twice is drawing dots, not asking for a node.
-    if (this.sceneTransition || this.tool === 'draw') return;
+    // A pen or arrow tapped twice is drawing, not asking for a node or an editor.
+    if (this.sceneTransition || this.drawsOverEverything()) return;
     const world = this.screenToWorld(this.eventPoint(event));
     // Edges win over nodes so edges inside unfolded frames stay editable — a frame always
     // contains its subgraph's edges.
@@ -2133,6 +2166,7 @@ export class CanvasView {
         this.openNodeMenu(target.node, screenPoint, this.isFrameBackground(target.node, world) ? world : null);
         return;
       case 'selected-edge-grip':
+      case 'edge-end-handle':
       case 'edge':
         this.openEdgeMenu(target.edge, screenPoint);
         return;
@@ -2141,6 +2175,7 @@ export class CanvasView {
         this.openRegionMenu(target.context, screenPoint);
         return;
       case 'drawing':
+      case 'arrow-end-handle':
         if (!this.isDrawingHeld(target.drawing)) this.selectOnlyDrawing(target.drawing);
         this.actions.contextMenu({ kind: 'drawing' }, screenPoint);
         return;
@@ -2151,6 +2186,8 @@ export class CanvasView {
       case 'canvas':
         this.actions.contextMenu({ kind: 'canvas', world }, screenPoint);
         return;
+      default:
+        unknownPressTarget(target);
     }
   }
 
@@ -2842,11 +2879,7 @@ export class CanvasView {
   private drawDetachingEdgeOverlay(gesture: EdgeEndGesture, dropped: Point, painter: ScenePainter): void {
     const style = edgeStyleIn(this.modelOfEdge(gesture.edge), gesture.edge);
     this.drawArrowPreview(painter, this.edgeModelTransform(gesture.edge), {
-      color: style.color,
-      width: EDGE_ARROW_WIDTH,
-      line: style.line,
-      startHead: style.startHead,
-      endHead: style.endHead,
+      ...detachedArrowStyle(gesture.edge, style),
       points: detachedArrowPoints(gesture, dropped),
     });
   }
@@ -3196,9 +3229,9 @@ export class CanvasView {
     this.actions.canvasClicked();
     if (!endpoints || !geometry) return null;
     const current = this.currentEdgeMatching(edge) ?? edge;
-    const { path, grip } = geometry;
+    const { path } = geometry;
     const keptPoint = end === 'start' ? path[path.length - 1] : path[0];
-    return beginEdgeEnd(current, end, { endpoint: end === 'start' ? endpoints.from : endpoints.to, keptPoint, labelAt: grip }, screen);
+    return beginEdgeEnd(current, end, { endpoint: end === 'start' ? endpoints.from : endpoints.to, keptPoint }, screen);
   }
 
   private beginArrowEndDrag(drawing: DrawingSelection, end: EdgeEnd, world: Point, screen: Point): ArrowEndGesture {
@@ -3220,8 +3253,7 @@ export class CanvasView {
     if (!gesture.moved) return;
     if (drop.kind === 'pin') this.actions.pinEdgeEnd(edge, end, drop.angle);
     else if (drop.kind === 'detach') {
-      const detached = { points: detachedArrowPoints(gesture, drop.point), labelAt: gesture.labelAt };
-      this.actions.detachEdge(edge, detached, this.expansionLayer.hostOf(edge.from));
+      this.actions.detachEdge(edge, detachedArrowPoints(gesture, drop.point), this.expansionLayer.hostOf(edge.from));
     }
   }
 

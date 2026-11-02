@@ -103,7 +103,7 @@ describe("an edge's end dots", () => {
     expect(editor.workspace.file(LAYER_PATH)).toBeNull();
   });
 
-  it('pull the edge off into a free arrow, its label beside it, when dropped on empty canvas', async () => {
+  it('pull the edge off into a lone free arrow, its label gone with it, when dropped on empty canvas', async () => {
     const editor = await openEditor();
     const [start, end] = await selectTheEdge(editor);
     await editor.drag(pathBetween(end, EMPTY));
@@ -114,13 +114,35 @@ describe("an edge's end dots", () => {
     expect(arrow.points[1]).toEqual(EMPTY);
     expect(arrow.endHead).toBe('arrow');
     const layer = parseCanvasLayer(editor.workspace.file(LAYER_PATH));
-    const caption = layer.drawings.flatMap((drawing) => textDrawingOf(drawing) ?? [])[0];
-    expect(caption.text).toBe('go');
-    expect(layer.groups).toHaveLength(1);
-    expect(editor.core.view.selectedDrawings.map((drawing) => drawing.id).sort()).toEqual([arrow.id, caption.id].sort());
+    expect(layer.drawings.flatMap((drawing) => textDrawingOf(drawing) ?? [])).toEqual([]);
+    expect(layer.groups).toEqual([]);
+    expect(editor.core.view.selectedDrawings.map((drawing) => drawing.id)).toEqual([arrow.id]);
+    expect(endDots(editor, 'arrow-end-handle')).toHaveLength(2);
 
     await undo(editor);
     expect(edgesOfA(editor)).toEqual(['B']);
+    expect(arrowsIn(editor)).toEqual([]);
+  });
+
+  it('keep an error edge red once pulled off', async () => {
+    const editor = await createHeadlessEditor({ [FLOW_PATH]: FLOW.replace('  -> B : "go"', '  on_error: -> B') }, { open: FLOW_PATH });
+    const [, end] = await selectTheEdge(editor);
+    await editor.drag(pathBetween(end, EMPTY));
+    expect(arrowsIn(editor).map((arrow) => [arrow.color, arrow.line])).toEqual([['red', 'dashed']]);
+  });
+
+  it('write nothing when the edge was removed on disk mid-drag', async () => {
+    const editor = await openEditor();
+    const [, end] = await selectTheEdge(editor);
+    const [first, ...rest] = pathBetween(end, EMPTY);
+    editor.press(first);
+    editor.moveTo(rest[0]);
+    const withoutTheEdge = FLOW.replace('  -> B : "go"\n', '');
+    editor.workspace.writeExternally(FLOW_PATH, withoutTheEdge);
+    for (const point of rest.slice(1)) editor.moveTo(point);
+    editor.release(EMPTY);
+    await editor.settle();
+    expect(editor.workspace.file(FLOW_PATH)).toBe(withoutTheEdge);
     expect(arrowsIn(editor)).toEqual([]);
   });
 
@@ -158,6 +180,16 @@ describe('the arrow tool', () => {
     await editor.drag(pathBetween(A_CENTER, EMPTY));
     expect(edgesOfA(editor)).toEqual(['B']);
     expect(arrowsIn(editor).map((arrow) => arrow.points)).toEqual([[A_CENTER, EMPTY]]);
+  });
+
+  it('makes no node and opens no editor on a double-click', async () => {
+    const editor = await openEditor();
+    const before = editor.workspace.snapshot();
+    editor.setTool('arrow');
+    await editor.doubleClick(EMPTY);
+    await editor.doubleClick(ON_THE_EDGE);
+    expect(editor.workspace.snapshot()).toEqual(before);
+    expect(editor.core.view.selectedEdges).toEqual([]);
   });
 
   it('draws nothing for a drag that comes back to where it began', async () => {

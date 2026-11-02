@@ -75,9 +75,9 @@ import {
 import { drawingsForExtractedDocument } from '../shared/canvas-drawings.js';
 import { CanvasLayerStore } from './canvas-layer-store.js';
 import { createCanvasLayerSync } from './canvas-layer-sync.js';
-import { angleFieldOf, shownEdgeLabel, type EdgeEnd, type EdgeStylePatch } from '../shared/canvas-edge-style.js';
-import { DEFAULT_ARROW_END_HEAD, DEFAULT_ARROW_LINE, DEFAULT_ARROW_START_HEAD, EDGE_ARROW_WIDTH } from '../shared/canvas-arrow.js';
-import { EDGE_LABEL_FONT_PX } from '../shared/node-text-metrics.js';
+import { angleFieldOf, type EdgeEnd, type EdgeStylePatch } from '../shared/canvas-edge-style.js';
+import { DEFAULT_ARROW_END_HEAD, DEFAULT_ARROW_LINE, DEFAULT_ARROW_START_HEAD } from '../shared/canvas-arrow.js';
+import { detachedArrowStyle } from './canvas/edge-end-gesture.js';
 import { dressModel } from './model-visuals.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
 import { createClipboard, type PastePlacement } from './clipboard.js';
@@ -343,7 +343,10 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
   // A watcher push replaces a document wholesale. Routing it through the session cancels any
   // commit still pending for that path, which would otherwise fire holding the pre-push object
   // and serialize it back over the content that just arrived.
+  // A gesture under way holds objects of the document being replaced, and finishing it would write
+  // through objects no file holds any more — so it is abandoned, as Escape abandons it.
   function adoptWatchedText(path: string, text: string): void {
+    if (view.cancelGesture()) view.flashNotice('Drag cancelled: the file changed on disk');
     const doc = session.adoptText(path, text);
     if (path === openFlow?.path) {
       adoptOpenDocument(doc);
@@ -1074,24 +1077,19 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
   }
 
   // An edge pulled off its node leaves the .flow, and stays on the canvas as a free arrow drawn the
-  // way the edge was, its label beside it — one undo step. When the arrow cannot be written the
-  // edge stays, since deleting it would lose what the user only meant to move.
-  function detachEdgeToArrow(edge: ModelEdge, detached: { points: [Point, Point]; labelAt: Point }, frameHost: FlowNode | null): void {
+  // way the edge was — one undo step. Its label and data fields go with the edge: an arrow joins
+  // nothing, so it carries no meaning. When the arrow cannot be written the edge stays, since
+  // deleting it would lose what the user only meant to move.
+  function detachEdgeToArrow(edge: ModelEdge, points: [Point, Point], frameHost: FlowNode | null): void {
     if (!openFlow) return;
     if (!drawingOps.canDrawUnder(frameHost)) {
       view.flashNotice('Edge kept: its canvas layer cannot be edited until it is fixed');
       return;
     }
     const style = layerSync.edgeStyleOf(ownerOf(edge.from), edge);
-    const label = shownEdgeLabel(edge.spec.label, edge.kind);
     editors.closeAll();
     session.runAction(() => {
-      const stored = drawingOps.createArrow({
-        points: detached.points,
-        frameHost,
-        style: { color: style.color, width: EDGE_ARROW_WIDTH, line: style.line, startHead: style.startHead, endHead: style.endHead },
-        caption: label ? { text: label, center: detached.labelAt, fontPx: EDGE_LABEL_FONT_PX } : undefined,
-      });
+      const stored = drawingOps.createArrow({ points, frameHost, style: detachedArrowStyle(edge, style) });
       if (!stored) return;
       writeEdgeDeletions([edge]);
       view.setSelection([], [], [stored]);
@@ -1596,7 +1594,7 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     editEdge: (edge) => editors.openEdgeEditor(edge),
     bendEdge: (edge, bend) => applyEdgeStyleEdit(edge, { bend }),
     pinEdgeEnd: (edge, end, angle) => pinEdgeEnd(edge, end, angle),
-    detachEdge: (edge, detached, frameHost) => detachEdgeToArrow(edge, detached, frameHost),
+    detachEdge: (edge, points, frameHost) => detachEdgeToArrow(edge, points, frameHost),
     createArrow: (points, frameHost, style) => {
       if (!openFlow) return;
       const arrowStyle = { ...style, line: DEFAULT_ARROW_LINE, startHead: DEFAULT_ARROW_START_HEAD, endHead: DEFAULT_ARROW_END_HEAD };

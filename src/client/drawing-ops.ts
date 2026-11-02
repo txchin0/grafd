@@ -73,9 +73,6 @@ export interface NewArrow {
   points: [Point, Point];
   frameHost: FlowNode | null;
   style: Omit<ArrowDrawing, 'kind' | 'id' | 'graph' | 'points'>;
-  // Words written beside it — an edge's label, when an edge became the arrow — centred on
-  // `center` and grouped with the arrow so the two move as one.
-  caption?: { text: string; center: Point; fontPx: number };
 }
 
 // Strokes copied out of one graph, ready to be pasted into any.
@@ -166,25 +163,13 @@ export function createDrawingOps(options: DrawingOpsOptions): DrawingOps {
     return written ? { path: target.owner.path, scope: target.scope, id: drawing.id } : null;
   }
 
-  function createArrow({ points, frameHost, style, caption }: NewArrow): StoredDrawing | null {
+  function createArrow({ points, frameHost, style }: NewArrow): StoredDrawing | null {
     const target = options.creationTargetFor(frameHost);
     if (!target) return null;
     const arrow: ArrowDrawing = { kind: ARROW_KIND, id: newUuid(), graph: target.scope, ...style, points };
-    const captionText = caption ? captionDrawing(caption, target.scope, style.color) : null;
-    const written = writeIntoScope(target, (layer) => {
-      addArrowDrawing(layer, arrow);
-      if (!captionText) return;
-      addTextDrawing(layer, captionText);
-      groupDrawingsIn(layer, new Set([arrow.id, captionText.id]));
-    });
+    const written = writeIntoScope(target, (layer) => addArrowDrawing(layer, arrow));
     reportWrite(target.owner, written);
     return written ? { path: target.owner.path, scope: target.scope, id: arrow.id } : null;
-  }
-
-  function captionDrawing(caption: NonNullable<NewArrow['caption']>, scope: string | null, color: string | null): TextDrawing {
-    const measured = textBoxFor(caption.text, caption.center, caption.fontPx, options.measureLine());
-    const box = { ...measured, x: caption.center.x - measured.w / 2, y: caption.center.y - measured.h / 2 };
-    return { kind: TEXT_KIND, id: newUuid(), graph: scope, color, text: caption.text, box, size: caption.fontPx, wrap: false };
   }
 
   function canDrawUnder(frameHost: FlowNode | null): boolean {
