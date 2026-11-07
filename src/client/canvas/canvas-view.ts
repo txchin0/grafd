@@ -63,7 +63,25 @@ import {
 } from '../geometry.js';
 import { boundsOfRects, padRect, rectContainsRect, snapToCanvasGrid } from '../../shared/rect-math.js';
 import { distanceToEdgePath, type EdgeGeometry } from './edge-path.js';
-import { drawnShapeOf, edgePathBounds, type EdgeBendOverrides, type EdgeGeometryMap } from './edge-layout.js';
+import { drawnShapeOf, edgeEndpointsOf, edgePathBounds, type EdgeRouteOverrides, type EdgeGeometryMap } from './edge-layout.js';
+import {
+  EDGE_END_HIT_RADIUS_PX,
+  beginEdgeEnd,
+  detachedArrowPoints,
+  detachedArrowStyle,
+  edgeEndOverridesOf,
+  extendEdgeEnd,
+  type EdgeEndGesture,
+} from './edge-end-gesture.js';
+import {
+  beginArrowEnd,
+  beginArrowGesture,
+  extendArrowEnd,
+  extendArrowGesture,
+  type ArrowEndGesture,
+  type ArrowGesture,
+} from './arrow-gesture.js';
+import { ARROW_KIND, DEFAULT_ARROW_END_HEAD, DEFAULT_ARROW_LINE, DEFAULT_ARROW_START_HEAD, withArrowEnd, type ArrowDrawing } from '../../shared/canvas-arrow.js';
 import {
   beginEdgeBend,
   bendOverridesOf,
@@ -72,7 +90,7 @@ import {
   type EdgeBendGesture,
 } from './edge-bend-gesture.js';
 import { canBendAlong } from './edge-bend.js';
-import type { EdgeBend } from '../../shared/canvas-edge-style.js';
+import type { EdgeBend, EdgeEnd } from '../../shared/canvas-edge-style.js';
 import { shapeBorderPointToward, shapeTextBox } from './node-shapes.js';
 import { BADGE_HIT_RADIUS, nodeBadges, type BadgeHit } from './node-badges.js';
 import { ScenePainter } from './scene-painter.js';
@@ -85,7 +103,7 @@ import {
   titleBandOf,
   type NodeTextLayout,
 } from './node-metrics.js';
-import { nodeTextSizeIn } from '../model-visuals.js';
+import { edgeStyleIn, nodeTextSizeIn } from '../model-visuals.js';
 import {
   applyCombinedMove,
   applyRegionResize,
@@ -162,7 +180,7 @@ import {
 export type { CameraLink, View, ViewportSize } from './camera-transition.js';
 export { childViewLinkedTo, interpolateView, parentViewLinkedTo } from './camera-transition.js';
 
-export type Tool = 'select' | 'node' | 'context' | 'draw' | 'text';
+export type Tool = 'select' | 'node' | 'context' | 'draw' | 'text' | 'arrow';
 
 // What the pen draws with: a colour slot or `#rrggbb` (null for the theme's ink) and a width.
 export interface DrawStyle {
@@ -270,6 +288,9 @@ type Gesture =
       transform: DrawingTransform;
     })
   | EdgeBendGesture
+  | EdgeEndGesture
+  | ArrowGesture
+  | ArrowEndGesture
   // A ghost is made real by a click, so a press that is dragged away, or abandoned, makes nothing.
   | ({ type: 'ghost-press'; ghost: GhostNode } & DragStart)
   | { type: 'pinch'; pointers: [number, number]; start: PinchAnchor };
@@ -279,6 +300,8 @@ type Gesture =
 // cursor and the context menu all read this one answer (`pressTargetAt`), so the cursor cannot
 // promise what a press would not do, and a kind of thing added here reaches every reader at once.
 type PressTarget =
+  | { kind: 'edge-end-handle'; edge: ModelEdge; end: EdgeEnd }
+  | { kind: 'arrow-end-handle'; drawing: DrawingSelection; end: EdgeEnd }
   | { kind: 'port'; node: FlowNode; port: Point }
   | { kind: 'drawing-handle'; resizable: ResizableDrawings; handle: ResizeHandle }
   | { kind: 'selected-edge-grip'; edge: ModelEdge }
@@ -304,7 +327,7 @@ type CornerHandles =
 // Something the selection, or the node under the pointer, offers a press beyond the object
 // itself: a port, a corner or side handle, a bend grip.
 export interface Affordance {
-  kind: Extract<PressTargetKind, 'port' | CornerHandles['kind'] | 'selected-edge-grip'>;
+  kind: Extract<PressTargetKind, 'port' | CornerHandles['kind'] | 'selected-edge-grip' | 'edge-end-handle' | 'arrow-end-handle'>;
   point: Point;
   // Which corner or side, for a resize handle.
   handle?: ResizeHandle;
@@ -357,6 +380,8 @@ function cursorFor(target: PressTarget, canvasCursor: CanvasCursor): CanvasCurso
     case 'region-handle':
       return resizeCursorOf(target.handle);
     case 'selected-edge-grip':
+    case 'edge-end-handle':
+    case 'arrow-end-handle':
     case 'region':
     case 'drawing':
       return 'move';
@@ -369,6 +394,11 @@ function cursorFor(target: PressTarget, canvasCursor: CanvasCursor): CanvasCurso
     case 'canvas':
       return canvasCursor;
   }
+}
+
+// Ends a switch over every kind of target, so a new kind does not compile until it is answered.
+function unknownPressTarget(target: never): never {
+  throw new Error(`No press target ${(target as PressTarget).kind}`);
 }
 
 // The cursor that shows which way a handle resizes.
@@ -473,6 +503,15 @@ export interface CanvasActions {
   editEdge(edge: ModelEdge): void;
   // Null takes the bend away, returning the edge to its automatic route.
   bendEdge(edge: ModelEdge, bend: EdgeBend | null): void;
+  // Pins the angle one end of the edge meets its node at.
+  pinEdgeEnd(edge: ModelEdge, end: EdgeEnd, angle: number): void;
+  // Takes the edge out of the .flow and leaves a free arrow running from `points[0]` to
+  // `points[1]` in its place, in the coordinate space of the graph the edge is drawn in.
+  detachEdge(edge: ModelEdge, points: [Point, Point], frameHost: FlowNode | null): void;
+  // Points are in the coordinate space of the graph that will own the arrow.
+  createArrow(points: [Point, Point], frameHost: FlowNode | null, style: DrawStyle): void;
+  // `point` is in the arrow's own model's units.
+  moveArrowEnd(drawing: DrawingSelection, end: EdgeEnd, point: Point): void;
   editNodeTitle(node: FlowNode): void;
   // The text tool pressed bare canvas here, in the coordinate space of the graph that will own
   // the text. Nothing is written until the text is typed.
@@ -538,6 +577,9 @@ const PORT_HIT_RADIUS = 14;
 const EDGE_HIT_DISTANCE = 10;
 // Screen pixels: how large the grip is drawn on a selected, unlabelled edge.
 const EDGE_GRIP_DRAWN_RADIUS_PX = 4.5;
+const END_HANDLE_DRAWN_RADIUS_PX = 5;
+// The arrow being drawn has no id yet; this only seeds its sketchiness.
+const ARROW_PREVIEW_ID = 'arrow-in-progress';
 // Screen pixels: the width of the selection outlines and the grip's ring.
 const SELECTION_LINE_WIDTH_PX = 1.4;
 const FIT_PADDING = 80;
@@ -866,9 +908,11 @@ export class CanvasView {
   }
 
   // Where every affordance on screen sits, from the geometry its press is tested against: the
-  // corner and side handles of a sole selection, a lone edge's bend grip, then the ports of the
-  // selected and hovered nodes.
+  // end dots of a lone edge or arrow, the corner and side handles of a sole selection, a lone
+  // edge's bend grip, then the ports of the selected and hovered nodes.
   affordances(): Affordance[] {
+    const edgeEnds = this.edgeEndHandles().map(({ point }) => ({ kind: 'edge-end-handle' as const, point }));
+    const arrowEnds = this.arrowEndHandles().map(({ point }) => ({ kind: 'arrow-end-handle' as const, point }));
     const handles = this.cornerHandles();
     const corners = handles
       ? resizeHandlePointsOf(handles.frame, this.handleReach()).map(({ handle, x, y }) => ({ kind: handles.kind, point: { x, y }, handle }))
@@ -877,7 +921,7 @@ export class CanvasView {
     const grip = loneEdge ? this.edgeAnchor(loneEdge) : null;
     const grips = loneEdge && grip && this.edgeGripContains(loneEdge, grip) ? [{ kind: 'selected-edge-grip' as const, point: grip }] : [];
     const ports = [...this.nodesShowingPorts()].flatMap((node) => this.portPositions(node).map((point) => ({ kind: 'port' as const, point })));
-    return [...corners, ...grips, ...ports];
+    return [...edgeEnds, ...arrowEnds, ...corners, ...grips, ...ports];
   }
 
   select(node: FlowNode): void {
@@ -1240,10 +1284,24 @@ export class CanvasView {
       this.requestRender();
       return;
     }
+    if (this.tool === 'arrow') {
+      this.actions.canvasClicked();
+      const fromNode = this.nodeAnsweringPress(this.hitNode(world), world, true);
+      this.gesture = beginArrowGesture(this.expansionLayer.frameAt(world), fromNode, world, screen);
+      this.requestRender();
+      return;
+    }
 
     const creating = this.createsOnPress(event.shiftKey);
     const target = this.pressTargetAt(world, { creating });
+    if (event.shiftKey && this.shiftPressedOwnerOf(target, world, screen)) return;
     switch (target.kind) {
+      case 'edge-end-handle':
+        this.gesture = this.beginEdgeEndDrag(target.edge, target.end, screen);
+        return;
+      case 'arrow-end-handle':
+        this.gesture = this.beginArrowEndDrag(target.drawing, target.end, world, screen);
+        return;
       case 'port':
         this.gesture = { type: 'edge', from: target.node, toWorld: world, hoverTarget: null, startScreen: screen, moved: false, additive: event.shiftKey };
         return;
@@ -1251,8 +1309,7 @@ export class CanvasView {
         this.gesture = this.beginDrawingResize(target.resizable, target.handle, world, screen);
         return;
       case 'selected-edge-grip':
-        if (event.shiftKey) this.pressEdge(target.edge, world, screen, true);
-        else this.gesture = this.edgeBendGrabbedAt(target.edge, world, screen);
+        this.gesture = this.edgeBendGrabbedAt(target.edge, world, screen);
         return;
       case 'node-handle':
         this.gesture = {
@@ -1287,6 +1344,34 @@ export class CanvasView {
       case 'canvas':
         this.pressCanvas(world, screen, event.shiftKey, creating);
         return;
+      default:
+        unknownPressTarget(target);
+    }
+  }
+
+  // Shift on a handle, grip or end dot means what shift on the thing it belongs to means: adding it
+  // to the selection or taking it out. A port keeps shift for itself — drawing an edge from it with
+  // shift keeps the selection. Whether the press was answered here.
+  private shiftPressedOwnerOf(target: PressTarget, world: Point, screen: Point): boolean {
+    switch (target.kind) {
+      case 'node-handle':
+        this.pressNode(target.node, null, world, screen, true);
+        return true;
+      case 'region-handle':
+        this.pressRegion(target.context, world, screen, true);
+        return true;
+      case 'selected-edge-grip':
+      case 'edge-end-handle':
+        this.pressEdge(target.edge, world, screen, true);
+        return true;
+      case 'drawing-handle':
+        this.pressDrawing(target.resizable.drawings[0], world, screen, true);
+        return true;
+      case 'arrow-end-handle':
+        this.pressDrawing(target.drawing, world, screen, true);
+        return true;
+      default:
+        return false;
     }
   }
 
@@ -1300,6 +1385,8 @@ export class CanvasView {
   // interior to the subgraph being drawn into rather than to the frame's host; it never hides
   // anything already drawn there, so every tool can grab whatever the select tool can.
   private pressTargetAt(world: Point, { creating }: { creating: boolean }): PressTarget {
+    const endHandle = this.hitEndHandle(world);
+    if (endHandle) return endHandle;
     const port = this.hitPort(world);
     if (port) return { kind: 'port', ...port };
     const cornerHandle = this.hitCornerHandle(world);
@@ -1714,6 +1801,19 @@ export class CanvasView {
       const { edge } = gesture;
       const local = this.pointInEdgeModel(edge, world);
       if (extendEdgeBend(gesture, local, this.screenScaleOf(edge.from), screen, DRAG_THRESHOLD_PX)) this.requestRender();
+    } else if (gesture.type === 'edge-end') {
+      const local = this.pointInEdgeModel(gesture.edge, world);
+      const overOtherNode = this.isOverNodeOtherThan(gesture.edge, gesture.end, world);
+      if (extendEdgeEnd(gesture, local, this.screenScaleOf(gesture.edge.from), screen, DRAG_THRESHOLD_PX, overOtherNode)) this.requestRender();
+    } else if (gesture.type === 'arrow') {
+      if (!hasBecomeDrag(gesture, screen)) return;
+      extendArrowGesture(gesture, world);
+      gesture.edgeTarget = this.arrowEdgeTargetAt(gesture, world);
+      this.requestRender();
+    } else if (gesture.type === 'arrow-end') {
+      if (!hasBecomeDrag(gesture, screen)) return;
+      extendArrowEnd(gesture, world);
+      this.requestRender();
     } else if (gesture.type === 'ghost-press') {
       hasBecomeDrag(gesture, screen);
     } else if (gesture.type === 'drawing-resize') {
@@ -1807,6 +1907,12 @@ export class CanvasView {
       this.actions.resizeDrawings(gesture.drawings, gesture.transform);
     } else if (gesture.type === 'edge-bend' && gesture.moved) {
       this.actions.bendEdge(gesture.edge, gesture.bend);
+    } else if (gesture.type === 'edge-end') {
+      this.releaseEdgeEnd(gesture);
+    } else if (gesture.type === 'arrow' && gesture.moved) {
+      this.releaseArrow(gesture, world);
+    } else if (gesture.type === 'arrow-end' && gesture.moved) {
+      this.actions.moveArrowEnd(gesture.drawing, gesture.end, gesture.point);
     } else if (gesture.type === 'ghost-press' && !gesture.moved) {
       this.actions.materializeGhost(gesture.ghost);
     }
@@ -1999,8 +2105,8 @@ export class CanvasView {
   }
 
   private onDoubleClick(event: MouseEvent): void {
-    // A pen tapped twice is drawing dots, not asking for a node.
-    if (this.sceneTransition || this.tool === 'draw') return;
+    // A pen or arrow tapped twice is drawing, not asking for a node or an editor.
+    if (this.sceneTransition || this.drawsOverEverything()) return;
     const world = this.screenToWorld(this.eventPoint(event));
     // Edges win over nodes so edges inside unfolded frames stay editable — a frame always
     // contains its subgraph's edges.
@@ -2060,6 +2166,7 @@ export class CanvasView {
         this.openNodeMenu(target.node, screenPoint, this.isFrameBackground(target.node, world) ? world : null);
         return;
       case 'selected-edge-grip':
+      case 'edge-end-handle':
       case 'edge':
         this.openEdgeMenu(target.edge, screenPoint);
         return;
@@ -2068,6 +2175,7 @@ export class CanvasView {
         this.openRegionMenu(target.context, screenPoint);
         return;
       case 'drawing':
+      case 'arrow-end-handle':
         if (!this.isDrawingHeld(target.drawing)) this.selectOnlyDrawing(target.drawing);
         this.actions.contextMenu({ kind: 'drawing' }, screenPoint);
         return;
@@ -2078,6 +2186,8 @@ export class CanvasView {
       case 'canvas':
         this.actions.contextMenu({ kind: 'canvas', world }, screenPoint);
         return;
+      default:
+        unknownPressTarget(target);
     }
   }
 
@@ -2213,7 +2323,9 @@ export class CanvasView {
   private cornerHandles(): CornerHandles | null {
     const sole = this.soleSelection();
     if (sole?.kind === 'node') return { kind: 'node-handle', node: sole.node, frame: this.selectionOutlineAround(this.rect(sole.node)) };
-    if (sole?.kind === 'drawings') return { kind: 'drawing-handle', resizable: sole.resizable, frame: this.drawingHandleFrame(sole.resizable) };
+    if (sole?.kind === 'drawings' && !loneArrowOf(sole.resizable)) {
+      return { kind: 'drawing-handle', resizable: sole.resizable, frame: this.drawingHandleFrame(sole.resizable) };
+    }
     if (sole?.kind !== 'region') return null;
     const rect = this.selectedRegionDisplayRectOf(sole.context);
     return rect ? { kind: 'region-handle', context: sole.context, frame: handleFrameAround(rect, 0) } : null;
@@ -2354,13 +2466,15 @@ export class CanvasView {
     return locus ? inverseTransformPoint(world, locus.transform) : world;
   }
 
-  private edgeBendsInFlight(): EdgeBendOverrides | null {
-    return this.gesture?.type === 'edge-bend' ? bendOverridesOf(this.gesture) : null;
+  private edgeRoutesInFlight(): EdgeRouteOverrides | null {
+    if (this.gesture?.type === 'edge-bend') return bendOverridesOf(this.gesture);
+    if (this.gesture?.type === 'edge-end') return edgeEndOverridesOf(this.gesture);
+    return null;
   }
 
   // What bare canvas shows under each tool: where a press will make something, and what.
   private canvasCursorOfTool(): CanvasCursor {
-    if (this.tool === 'node' || this.tool === 'draw') return 'crosshair';
+    if (this.tool === 'node' || this.tool === 'draw' || this.tool === 'arrow') return 'crosshair';
     return this.tool === 'text' ? 'text' : 'default';
   }
 
@@ -2371,7 +2485,7 @@ export class CanvasView {
   private cursorAt(world: Point | undefined, shiftKey: boolean): CanvasCursor {
     if (this.spaceDown || this.gesture?.type === 'pan') return 'grab';
     const canvasCursor = this.canvasCursorOfTool();
-    if (!world || this.tool === 'draw') return canvasCursor;
+    if (!world || this.drawsOverEverything()) return canvasCursor;
     return cursorFor(this.pressTargetAt(world, { creating: this.createsOnPress(shiftKey) }), canvasCursor);
   }
 
@@ -2388,7 +2502,8 @@ export class CanvasView {
     return new ScenePainter({
       regionRects: this.regionRectsForPainting(),
       drawingTransforms: this.drawingTransformsInFlight(),
-      edgeBends: this.edgeBendsInFlight(),
+      edgeRoutes: this.edgeRoutesInFlight(),
+      drawingReplacements: this.drawingReplacementsInFlight(),
       ctx: this.ctx,
       rough: this.rough,
       baseRoughness: this.baseRoughness,
@@ -2602,6 +2717,7 @@ export class CanvasView {
     ctx.restore();
 
     this.drawSelectedEdgeGrip();
+    this.drawEndHandles();
     this.drawResizeHandles();
   }
 
@@ -2665,7 +2781,7 @@ export class CanvasView {
   }
 
   private drawPorts(): void {
-    if (this.tool === 'draw' || (this.gesture && this.gesture.type !== 'edge')) return;
+    if (this.drawsOverEverything() || (this.gesture && this.gesture.type !== 'edge')) return;
     const { ctx } = this;
     const nodesWithPorts = new Set([...this.selection]);
     if (this.hoverNode) nodesWithPorts.add(this.hoverNode);
@@ -2703,34 +2819,77 @@ export class CanvasView {
       ctx.lineWidth = 1 / this.view.scale;
       ctx.strokeRect(gesture.rect.x, gesture.rect.y, gesture.rect.w, gesture.rect.h);
     } else if (gesture.type === 'edge') {
-      const start = this.outlinePointToward(gesture.from, gesture.toWorld);
-      const end = gesture.hoverTarget
-        ? this.outlinePointToward(gesture.hoverTarget, rectCenter(this.rect(gesture.from)))
-        : gesture.toWorld;
-      ctx.save();
-      ctx.strokeStyle = canvasPalette.select;
-      ctx.setLineDash([7 / this.view.scale, 5 / this.view.scale]);
-      ctx.lineWidth = 1.6 / this.view.scale;
-      ctx.beginPath();
-      ctx.moveTo(start.x, start.y);
-      ctx.lineTo(end.x, end.y);
-      ctx.stroke();
-      ctx.restore();
-      painter.drawArrowhead('arrow', start, end, canvasPalette.select);
-      if (gesture.hoverTarget) {
-        const { x, y, w, h } = this.rect(gesture.hoverTarget);
-        ctx.strokeStyle = canvasPalette.select;
-        const inflate = EDGE_TARGET_OUTLINE_INFLATE_PX / this.view.scale;
-        ctx.lineWidth = 2 / this.view.scale;
-        ctx.strokeRect(x - inflate, y - inflate, w + inflate * 2, h + inflate * 2);
-      }
+      this.drawEdgeInFlight(gesture.from, gesture.toWorld, gesture.hoverTarget, painter);
     } else if (gesture.type === 'draw') {
       const { scale, tx, ty } = gesture.transform;
       ctx.save();
       ctx.transform(scale, 0, 0, scale, tx, ty);
       inkStroke(ctx, gesture.points, drawingInkColor(this.drawStyle.color), STROKE_LINE_WIDTHS[this.drawStyle.width]);
       ctx.restore();
+    } else if (gesture.type === 'arrow' && gesture.moved) {
+      this.drawArrowGestureOverlay(gesture, painter);
+    } else if (gesture.type === 'edge-end' && gesture.moved && gesture.drop.kind === 'detach') {
+      this.drawDetachingEdgeOverlay(gesture, gesture.drop.point, painter);
     }
+  }
+
+  // The dashed edge a port drag (or an arrow-tool drag from a node) is drawing, with the node it
+  // would join lit up.
+  private drawEdgeInFlight(from: FlowNode, toWorld: Point, hoverTarget: FlowNode | null, painter: ScenePainter): void {
+    const { ctx } = this;
+    const start = this.outlinePointToward(from, toWorld);
+    const end = hoverTarget ? this.outlinePointToward(hoverTarget, rectCenter(this.rect(from))) : toWorld;
+    ctx.save();
+    ctx.strokeStyle = canvasPalette.select;
+    ctx.setLineDash([7 / this.view.scale, 5 / this.view.scale]);
+    ctx.lineWidth = 1.6 / this.view.scale;
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+    ctx.restore();
+    painter.drawArrowhead('arrow', start, end, canvasPalette.select);
+    if (!hoverTarget) return;
+    const { x, y, w, h } = this.rect(hoverTarget);
+    const inflate = EDGE_TARGET_OUTLINE_INFLATE_PX / this.view.scale;
+    ctx.save();
+    ctx.strokeStyle = canvasPalette.select;
+    ctx.lineWidth = 2 / this.view.scale;
+    ctx.strokeRect(x - inflate, y - inflate, w + inflate * 2, h + inflate * 2);
+    ctx.restore();
+  }
+
+  // Joining two nodes, the drag shows the edge it would write; anywhere else, the arrow.
+  private drawArrowGestureOverlay(gesture: ArrowGesture, painter: ScenePainter): void {
+    if (gesture.fromNode && gesture.edgeTarget) {
+      this.drawEdgeInFlight(gesture.fromNode, transformPoint(gesture.end, gesture.transform), gesture.edgeTarget, painter);
+      return;
+    }
+    this.drawArrowPreview(painter, gesture.transform, {
+      color: this.drawStyle.color,
+      width: this.drawStyle.width,
+      line: DEFAULT_ARROW_LINE,
+      startHead: DEFAULT_ARROW_START_HEAD,
+      endHead: DEFAULT_ARROW_END_HEAD,
+      points: [gesture.start, gesture.end],
+    });
+  }
+
+  // The free arrow an edge pulled off its node would become, drawn where the edge was.
+  private drawDetachingEdgeOverlay(gesture: EdgeEndGesture, dropped: Point, painter: ScenePainter): void {
+    const style = edgeStyleIn(this.modelOfEdge(gesture.edge), gesture.edge);
+    this.drawArrowPreview(painter, this.edgeModelTransform(gesture.edge), {
+      ...detachedArrowStyle(gesture.edge, style),
+      points: detachedArrowPoints(gesture, dropped),
+    });
+  }
+
+  private drawArrowPreview(painter: ScenePainter, transform: FrameTransform, arrow: Omit<ArrowDrawing, 'kind' | 'id' | 'graph'>): void {
+    const { scale, tx, ty } = transform;
+    this.ctx.save();
+    this.ctx.transform(scale, 0, 0, scale, tx, ty);
+    painter.drawFreeArrow({ ...arrow, id: ARROW_PREVIEW_ID });
+    this.ctx.restore();
   }
 
   // A short message beside the pointer — for an edit the canvas could not make, shown where the
@@ -2993,6 +3152,147 @@ export class CanvasView {
     const bounds = boundsOfRects(shownBounds)!;
     return resizable.members.length > 1 ? handleFrameAround(bounds, GROUP_OUTLINE_INFLATE) : this.selectionOutlineAround(bounds);
   }
+  // The pen and the arrow tool lay ink over whatever is under them, so neither grabs anything.
+  private drawsOverEverything(): boolean {
+    return this.tool === 'draw' || this.tool === 'arrow';
+  }
+
+  // The model an edge is drawn in — an unfolded frame's subgraph, or the open graph — and the
+  // transform from its units to the world's.
+  private modelOfEdge(edge: ModelEdge): FlowModel {
+    return this.expansionLayer.modelOf(edge.from) ?? this.model;
+  }
+
+  private edgeModelTransform(edge: ModelEdge): FrameTransform {
+    return this.expansionLayer.locusOf(edge.from)?.transform ?? TOP_LEVEL_TRANSFORM;
+  }
+
+  // The dots at a lone selected edge's ends, in world units: where it leaves and meets its nodes. A
+  // self-loop has no chord, and no end it could be pulled off by.
+  private edgeEndHandles(): { edge: ModelEdge; end: EdgeEnd; point: Point }[] {
+    const edge = this.edgeSelectedAlone();
+    const geometry = edge ? this.edgeGeometryOf(edge) : null;
+    if (!edge || !geometry?.chord || geometry.path.length < 2) return [];
+    const transform = this.edgeModelTransform(edge);
+    const { path } = geometry;
+    return [
+      { edge, end: 'start' as const, point: transformPoint(path[0], transform) },
+      { edge, end: 'end' as const, point: transformPoint(path[path.length - 1], transform) },
+    ];
+  }
+
+  // The dots at a lone selected arrow's ends, in world units, following any drag in progress.
+  private arrowEndHandles(): { drawing: DrawingSelection; end: EdgeEnd; point: Point }[] {
+    const sole = this.soleSelection();
+    const arrow = sole?.kind === 'drawings' ? loneArrowOf(sole.resizable) : null;
+    if (sole?.kind !== 'drawings' || !arrow) return [];
+    const [selection] = sole.resizable.drawings;
+    const shown = this.drawingReplacementsInFlight()?.get(storedDrawingKey(selection.model, selection.id))
+      ?? this.drawingAsShown(selection, arrow);
+    if (shown.kind !== ARROW_KIND) return [];
+    const { transform } = sole.resizable.surface;
+    return [
+      { drawing: selection, end: 'start' as const, point: transformPoint(shown.points[0], transform) },
+      { drawing: selection, end: 'end' as const, point: transformPoint(shown.points[1], transform) },
+    ];
+  }
+
+  private hitEndHandle(world: Point): PressTarget | null {
+    const isNear = (point: Point) => distanceBetween(world, point) * this.view.scale <= EDGE_END_HIT_RADIUS_PX;
+    const edgeEnd = this.edgeEndHandles().find(({ point }) => isNear(point));
+    if (edgeEnd) return { kind: 'edge-end-handle', edge: edgeEnd.edge, end: edgeEnd.end };
+    const arrowEnd = this.arrowEndHandles().find(({ point }) => isNear(point));
+    return arrowEnd ? { kind: 'arrow-end-handle', drawing: arrowEnd.drawing, end: arrowEnd.end } : null;
+  }
+
+  private drawEndHandles(): void {
+    const { ctx } = this;
+    const points = [...this.edgeEndHandles(), ...this.arrowEndHandles()].map(({ point }) => point);
+    ctx.save();
+    ctx.fillStyle = canvasPalette.portFill;
+    ctx.strokeStyle = canvasPalette.select;
+    ctx.lineWidth = SELECTION_LINE_WIDTH_PX / this.view.scale;
+    for (const point of points) {
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, END_HANDLE_DRAWN_RADIUS_PX / this.view.scale, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Everything is measured before the press closes the editors, which can rebuild the model; the
+  // gesture then holds the edge as it stands afterwards.
+  private beginEdgeEndDrag(edge: ModelEdge, end: EdgeEnd, screen: Point): EdgeEndGesture | null {
+    const endpoints = edgeEndpointsOf(this.modelOfEdge(edge), edge);
+    const geometry = this.edgeGeometryOf(edge);
+    this.actions.canvasClicked();
+    if (!endpoints || !geometry) return null;
+    const current = this.currentEdgeMatching(edge) ?? edge;
+    const { path } = geometry;
+    const keptPoint = end === 'start' ? path[path.length - 1] : path[0];
+    return beginEdgeEnd(current, end, { endpoint: end === 'start' ? endpoints.from : endpoints.to, keptPoint }, screen);
+  }
+
+  private beginArrowEndDrag(drawing: DrawingSelection, end: EdgeEnd, world: Point, screen: Point): ArrowEndGesture {
+    this.actions.canvasClicked();
+    const transform = this.surfaceOfModel(drawing.model)?.transform ?? TOP_LEVEL_TRANSFORM;
+    return beginArrowEnd(drawing, end, transform, world, screen);
+  }
+
+  // A node other than the one this end meets, under the pointer: an unfolded frame's empty interior
+  // is canvas, as it is to every other drop.
+  private isOverNodeOtherThan(edge: ModelEdge, end: EdgeEnd, world: Point): boolean {
+    const hit = this.hitNode(world);
+    if (!hit || this.isFrameBackground(hit, world)) return false;
+    return hit !== (end === 'start' ? edge.from : edge.to);
+  }
+
+  private releaseEdgeEnd(gesture: EdgeEndGesture): void {
+    const { edge, end, drop } = gesture;
+    if (!gesture.moved) return;
+    if (drop.kind === 'pin') this.actions.pinEdgeEnd(edge, end, drop.angle);
+    else if (drop.kind === 'detach') {
+      this.actions.detachEdge(edge, detachedArrowPoints(gesture, drop.point), this.expansionLayer.hostOf(edge.from));
+    }
+  }
+
+  // The node an arrow-tool drag from a node would join it to, released here — a release a port drag
+  // would turn into an edge onto a node already on the canvas.
+  private arrowEdgeTargetAt(gesture: ArrowGesture, world: Point): FlowNode | null {
+    if (!gesture.fromNode) return null;
+    const rawTarget = this.hitNode(world);
+    return dropAttachesToNode(this.resolveEdgeDrop(gesture.fromNode, rawTarget, world)) ? rawTarget : null;
+  }
+
+  // A drag that came back to where it started draws no arrow: there would be nothing to point with.
+  private releaseArrow(gesture: ArrowGesture, world: Point): void {
+    extendArrowGesture(gesture, world);
+    if (gesture.fromNode && this.arrowEdgeTargetAt(gesture, world)) {
+      this.actions.completeEdge(gesture.fromNode, this.resolveEdgeDrop(gesture.fromNode, this.hitNode(world), world));
+      return;
+    }
+    const screenLength = distanceBetween(gesture.start, gesture.end) * gesture.transform.scale * this.view.scale;
+    if (screenLength < DRAG_THRESHOLD_PX) return;
+    this.actions.createArrow([gesture.start, gesture.end], gesture.frameHost, { ...this.drawStyle });
+  }
+
+  // The arrow whose end is being dragged, as it would be let go now — painted in place of the
+  // stored one, which is written only when the drag lands.
+  private drawingReplacementsInFlight(): ReadonlyMap<string, CanvasDrawing> | null {
+    const gesture = this.gesture;
+    if (gesture?.type !== 'arrow-end' || !gesture.moved) return null;
+    const { model, id } = gesture.drawing;
+    const arrow = model.visuals?.drawings().find((drawing) => drawing.id === id);
+    if (arrow?.kind !== ARROW_KIND) return null;
+    return new Map([[storedDrawingKey(model, id), { ...arrow, points: withArrowEnd(arrow.points, gesture.end, gesture.point) }]]);
+  }
+}
+
+// A lone, ungrouped arrow is reshaped by its end dots rather than by a box's handles.
+function loneArrowOf(resizable: ResizableDrawings): ArrowDrawing | null {
+  const [only] = resizable.members;
+  return resizable.members.length === 1 && only.kind === ARROW_KIND ? only : null;
 }
 
 function hasBecomeDrag(gesture: DragStart, screen: Point): boolean {

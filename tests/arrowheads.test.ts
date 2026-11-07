@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { arrowheadOutline, arrowheadPathData, type ArrowheadOutline } from '../src/client/canvas/arrowheads.js';
 import { ARROWHEADS, type Arrowhead } from '../src/shared/canvas-edge-style.js';
+import { ARROWHEAD_REACH } from '../src/shared/canvas-arrow.js';
 import { distanceToPolyline, type Point } from '../src/client/geometry.js';
 
 const TIP = { x: 200, y: 50 };
@@ -60,3 +61,20 @@ describe('arrowhead outlines', () => {
     }
   });
 });
+
+describe('how far a head reaches', () => {
+  it('stays within the reach a free arrow\'s bounds allow for', () => {
+    for (const head of ARROWHEADS) {
+      for (const approach of APPROACHES) {
+        const outline = arrowheadOutline(head, approach, TIP);
+        if (outline) expect(farthestReachFrom(TIP, outline)).toBeLessThanOrEqual(ARROWHEAD_REACH);
+      }
+    }
+  });
+});
+
+function farthestReachFrom(tip: Point, outline: ArrowheadOutline): number {
+  if (outline.kind === 'circle') return Math.hypot(outline.center.x - tip.x, outline.center.y - tip.y) + outline.radius;
+  const points = outline.kind === 'lines' ? outline.strokes.flat() : outline.points;
+  return Math.max(...points.map((point) => Math.hypot(point.x - tip.x, point.y - tip.y)));
+}

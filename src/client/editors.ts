@@ -150,6 +150,7 @@ export function createEditors(context: EditorContext): Editors {
     startHeadChoices: elementById<HTMLDivElement>('ee-start-head'),
     endHeadChoices: elementById<HTMLDivElement>('ee-end-head'),
     straighten: elementById<HTMLButtonElement>('ee-straighten'),
+    resetEnds: elementById<HTMLButtonElement>('ee-reset-ends'),
   };
 
   refuseReservedNameCharacters(elements.title);
@@ -197,6 +198,7 @@ export function createEditors(context: EditorContext): Editors {
   const startHeadPicker = createArrowheadPicker(elements.startHeadChoices, 'start', (startHead) => applyEdgeStyle({ startHead }));
   const endHeadPicker = createArrowheadPicker(elements.endHeadChoices, 'end', (endHead) => applyEdgeStyle({ endHead }));
   elements.straighten.addEventListener('click', () => applyEdgeStyle({ bend: null }));
+  elements.resetEnds.addEventListener('click', () => applyEdgeStyle({ startAngle: null, endAngle: null }));
 
   function applyEdgeStyle(patch: EdgeStylePatch): void {
     const edge = editingEdge();
@@ -212,6 +214,7 @@ export function createEditors(context: EditorContext): Editors {
     startHeadPicker.fill(style.startHead);
     endHeadPicker.fill(style.endHead);
     elements.straighten.classList.toggle('hidden', style.bend == null);
+    elements.resetEnds.classList.toggle('hidden', style.startAngle == null && style.endAngle == null);
   }
 
   const regionColorSwatches = createColorSwatches(elements.regionColorChoices, (color) => applyRegionStyle({ color }));

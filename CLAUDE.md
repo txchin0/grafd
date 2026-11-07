@@ -58,7 +58,7 @@ All styling lives outside the .flow too, in each graph's **canvas layer**
 `<file>.flow.canvas.json` (FLOW-SPEC.md §2.1, §11.5; `src/shared/canvas-layer.ts`): node shapes and
 text sizes keyed by node `id`, edge colours keyed by a key derived from the edge, region colours and
 backgrounds keyed by the provider's name (unique in its file), freehand strokes, free
-text and pasted images in a `drawings` list (each filed under the graph scope it was made in — `graph` names the
+text, free arrows and pasted images in a `drawings` list (each filed under the graph scope it was made in — `graph` names the
 block, absent for the body — in that scope's coordinates), groups of things picked up as one (a `groups` list
 of typed members — drawings for now, built to take nodes later), plus unknown keys carried
 through verbatim. It is purely cosmetic — losing it
@@ -103,7 +103,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   positional capture/apply for copies (one record per copied node). An `on_error` edge's key is
   filed under its node in `edgeKeys`, since the property has no stable EdgeSpec object.
   `canvas-drawings.ts` reads and edits the drawings — strokes (`points`), text (`box`,
-  `canvas-text.ts`) and images (`box`, `canvas-image.ts`) — and moves and resizes every kind as
+  `canvas-text.ts`), images (`box`, `canvas-image.ts`) and free arrows (two `points`, start then
+  tip, `canvas-arrow.ts`, drawn with an edge's line and heads — and with no colour of its own, in
+  the edges' colour rather than the ink strokes and text default to — and joining nothing) — and moves and resizes every kind as
   one `DrawingTransform` (`drawing-geometry.ts`) applied to whichever geometry the entry has.
   Whatever depends on a drawing's kind switches over every kind and ends in `unknownDrawingKind`,
   so a new kind does not compile until each such place answers for it. An image carries its pixels
@@ -116,8 +118,11 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   it is removed. `canvas-groups.ts` holds groups: grouping merges rather than nests, a group left
   with fewer than two members dissolves, and members of kinds the editor does not know are kept.
   `canvas-layer-lint.ts` lints a layer against its .flow. `canvas-edge-style.ts` owns an edge
-  entry — colour, line style, a head at each end, and a `bend` stored as `[along, across]`
-  fractions of the chord between the endpoint centres, so it keeps its shape as nodes move.
+  entry — colour, line style, a head at each end, a `bend` stored as `[along, across]`
+  fractions of the chord between the endpoint centres, so it keeps its shape as nodes move, and a
+  `startAngle`/`endAngle` pinning where an end meets its node: whole degrees clockwise from the
+  top (180 is the bottom), a geometric angle from the node's centre, so it stays on its side as
+  the node is resized.
   Defaults are never written, and an error edge's default line is dashed, so reads and writes
   are told the edge's kind and a read comes back with every field resolved.
   `canvas-region-style.ts` owns a region entry the same way — a `color` for its outline, label
@@ -171,7 +176,8 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   through nodes, non-members inside regions, overlapping regions, crossings, label collisions,
   crowding, cut-off text and near-misses in alignment, each costing a fixed penalty and carrying
   the fix — the move (in snap steps) or resize that removes it. Edges are judged as drawn
-  (`edge-sketch.ts`: a curve through the bend, cut off at both nodes, and where its label sits).
+  (`edge-sketch.ts`: a curve through the bend, from any pinned end's border point, cut off at both
+  nodes, and where its label sits).
   `document-score.ts` scores every graph scope of a file as the canvas shows it (missing
   positions placed, bends read from the layer) next to what arranging it would score;
   `src/tools/flow-score.ts` is `grafd score` (`--min=<n>` fails below a score, `--format=json`).
@@ -229,16 +235,27 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
     label, or the handle at its middle) bends it; the bend is painted as an override (keyed by
     the edge's identity, so a rebuild mid-drag does not lose it) and written to the layer once,
     on release, and dragging back onto the chord straightens it. What a press on a grip means is
-    `edge-bend-gesture.ts`, pure like the other gesture modules. Zoom-to-fit and exports measure
-    the top-level edges as well as the nodes, since a bend can carry an edge far outside them.
+    `edge-bend-gesture.ts`, pure like the other gesture modules. A lone selected edge also shows a
+    dot at each end (`edge-end-gesture.ts`): let go on or just around its own node, it pins that
+    end's angle (layer only); let go on empty canvas, the edge leaves the .flow and a free arrow
+    drawn the same way takes its place in one undo step (its label and data fields go with the
+    edge); let go on another node, nothing. A lone ungrouped free arrow shows end dots in place of box handles,
+    each moving its end anywhere. The arrow tool (`arrow-gesture.ts`) draws over everything like
+    the pen: a drag a port drag would turn into an edge onto a node already there writes that edge
+    to the .flow, anything else draws a free arrow in the graph the press landed in. Zoom-to-fit
+    and exports measure the top-level edges as well as the nodes, since a bend can carry an edge
+    far outside them.
   - `scene-painter.ts` — draws a `FlowModel` in that model's own coordinates. Knows nothing
     about the camera, viewport, selection rectangle or gestures. Built fresh per render pass
     from explicit inputs, which is how an export renders the same scene with different
     settings (no hidden title, its own geometry map) without the view mutating itself.
   - `edge-layout.ts` — where each edge runs: border points (on the node's drawn shape), the
     bow that fans parallel edges apart, self-loops, and redirection onto a node inside an
-    unfolded frame. A bent edge leaves its bundle and runs through its bend point
-    (`edge-bend.ts` holds the bend arithmetic); self-loops are never bent. Each geometry carries
+    unfolded frame. A bent edge, or one with a pinned end, leaves its bundle and runs straight
+    from each pinned end's border point through its bend point (`edge-bend.ts` holds the bend
+    arithmetic), an unpinned end facing whatever comes next along it; self-loops are never bent or
+    pinned. A drag in progress overrides the route by edge identity (`EdgeRouteOverrides`), or
+    hides an edge being pulled off into an arrow. Each geometry carries
     its `grip` — where the label sits and a bend is grabbed — and the `chord` a bend is measured
     against. Pure — the shape of an edge is settled before anything is drawn, so it is
     testable without a renderer.
@@ -384,7 +401,9 @@ types (`FlowDocument`, `FlowNode`, `EdgeSpec`, `Rect`, …).
   keys run which command is the table in `editor-commands.ts`, read by main.ts's keyboard handler
   and the test sessions alike). It touches no DOM: floating editors, menus,
   breadcrumb, sidebar and graph panel are reached through the `EditorShell` it is handed, which
-  is what lets tests run the whole editing stack headless.
+  is what lets tests run the whole editing stack headless. A .flow on screen replaced from disk
+  abandons any gesture under way, as Escape does: the gesture holds the replaced document's
+  objects, and finishing it would write through objects no file holds.
 - `src/client/main.ts` — the page shell: DOM elements, sidebar, breadcrumb, graph panel, editors,
   modals, toolbar, preferences and keyboard shortcuts, wired to the core. It edits nothing itself.
 - `tests/` — Vitest unit tests for the parser/serializer, document mutations, server file

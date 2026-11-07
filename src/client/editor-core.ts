@@ -75,7 +75,9 @@ import {
 import { drawingsForExtractedDocument } from '../shared/canvas-drawings.js';
 import { CanvasLayerStore } from './canvas-layer-store.js';
 import { createCanvasLayerSync } from './canvas-layer-sync.js';
-import type { EdgeStylePatch } from '../shared/canvas-edge-style.js';
+import { angleFieldOf, type EdgeEnd, type EdgeStylePatch } from '../shared/canvas-edge-style.js';
+import { DEFAULT_ARROW_END_HEAD, DEFAULT_ARROW_LINE, DEFAULT_ARROW_START_HEAD } from '../shared/canvas-arrow.js';
+import { detachedArrowStyle } from './canvas/edge-end-gesture.js';
 import { dressModel } from './model-visuals.js';
 import type { Workspace, WorkspaceDelegate } from './workspace.js';
 import { createClipboard, type PastePlacement } from './clipboard.js';
@@ -341,7 +343,10 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
   // A watcher push replaces a document wholesale. Routing it through the session cancels any
   // commit still pending for that path, which would otherwise fire holding the pre-push object
   // and serialize it back over the content that just arrived.
+  // A gesture under way holds objects of the document being replaced, and finishing it would write
+  // through objects no file holds any more — so it is abandoned, as Escape abandons it.
   function adoptWatchedText(path: string, text: string): void {
+    if (view.cancelGesture()) view.flashNotice('Drag cancelled: the file changed on disk');
     const doc = session.adoptText(path, text);
     if (path === openFlow?.path) {
       adoptOpenDocument(doc);
@@ -1061,6 +1066,36 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     applyLayerEdit(owner, () => layerSync.setEdgeStyle(owner, edge, patch));
   }
 
+  // A null angle frees the end again.
+  function pinEdgeEnd(edge: ModelEdge, end: EdgeEnd, angle: number | null): void {
+    applyEdgeStyleEdit(edge, { [angleFieldOf(end)]: angle });
+  }
+
+  function hasPinnedEnd(edge: ModelEdge): boolean {
+    const style = layerSync.edgeStyleOf(ownerOf(edge.from), edge);
+    return style.startAngle != null || style.endAngle != null;
+  }
+
+  // An edge pulled off its node leaves the .flow, and stays on the canvas as a free arrow drawn the
+  // way the edge was — one undo step. Its label and data fields go with the edge: an arrow joins
+  // nothing, so it carries no meaning. When the arrow cannot be written the edge stays, since
+  // deleting it would lose what the user only meant to move.
+  function detachEdgeToArrow(edge: ModelEdge, points: [Point, Point], frameHost: FlowNode | null): void {
+    if (!openFlow) return;
+    if (!drawingOps.canDrawUnder(frameHost)) {
+      view.flashNotice('Edge kept: its canvas layer cannot be edited until it is fixed');
+      return;
+    }
+    const style = layerSync.edgeStyleOf(ownerOf(edge.from), edge);
+    editors.closeAll();
+    session.runAction(() => {
+      const stored = drawingOps.createArrow({ points, frameHost, style: detachedArrowStyle(edge, style) });
+      if (!stored) return;
+      writeEdgeDeletions([edge]);
+      view.setSelection([], [], [stored]);
+    });
+  }
+
   function applyEdit(node: FlowNode, mutation: () => void, options?: { commit?: CommitTiming }): void {
     applyToDoc(ownerOf(node), mutation, options);
   }
@@ -1558,6 +1593,14 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     completeEdge,
     editEdge: (edge) => editors.openEdgeEditor(edge),
     bendEdge: (edge, bend) => applyEdgeStyleEdit(edge, { bend }),
+    pinEdgeEnd: (edge, end, angle) => pinEdgeEnd(edge, end, angle),
+    detachEdge: (edge, points, frameHost) => detachEdgeToArrow(edge, points, frameHost),
+    createArrow: (points, frameHost, style) => {
+      if (!openFlow) return;
+      const arrowStyle = { ...style, line: DEFAULT_ARROW_LINE, startHead: DEFAULT_ARROW_START_HEAD, endHead: DEFAULT_ARROW_END_HEAD };
+      drawingOps.createArrow({ points, frameHost, style: arrowStyle });
+    },
+    moveArrowEnd: (drawing, end, point) => drawingOps.moveArrowEnd(drawing, end, point),
     editNodeTitle: (node) => editors.openTitleEditor(node),
     placeText: (point, frameHost) => {
       if (!openFlow) return;
@@ -1680,6 +1723,9 @@ export function createEditorCore({ canvas, shell, decodeImage }: EditorCoreOptio
     const items: MenuItem[] = [{ label: 'Edit label', onSelect: () => editors.openEdgeEditor(edge) }];
     if (layerSync.edgeStyleOf(ownerOf(edge.from), edge).bend) {
       items.push({ label: 'Straighten', onSelect: () => applyEdgeStyleEdit(edge, { bend: null }) });
+    }
+    if (hasPinnedEnd(edge)) {
+      items.push({ label: 'Reset ends', onSelect: () => applyEdgeStyleEdit(edge, { startAngle: null, endAngle: null }) });
     }
     items.push({ separator: true });
     items.push({ label: 'Delete edge', danger: true, onSelect: deleteSelection });

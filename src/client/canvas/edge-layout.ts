@@ -5,7 +5,7 @@
 // before anything is drawn, so it can be computed and tested without a renderer.
 
 import { DEFAULT_NODE_SHAPE, type NodeShape } from '../../shared/canvas-layer.js';
-import type { EdgeBend } from '../../shared/canvas-edge-style.js';
+import { anchorDirectionOf, type EdgeBend, type EdgeStyle } from '../../shared/canvas-edge-style.js';
 import type { FlowNode, Rect } from '../../shared/flow-format.js';
 import {
   displayRectOf,
@@ -55,7 +55,7 @@ const SELF_LOOP_APEX_OFFSET = { x: 42, y: -40 };
 const SELF_LOOP_NEST_STEP = 16;
 
 // The outline an edge end meets: where it is, and what shape is drawn there.
-interface Endpoint {
+export interface Endpoint {
   rect: Rect;
   shape: NodeShape;
 }
@@ -71,17 +71,24 @@ function isGhost(target: FlowNode | GhostNode): target is GhostNode {
   return 'ghost' in target && target.ghost === true;
 }
 
-// A drag in progress, by edge: the bend it would write, or null for the edge with no bend at all.
-// Keyed by identity rather than by ModelEdge, so a model rebuilt mid-drag still finds it.
-export type EdgeBendOverrides = ReadonlyMap<EdgeIdentity, EdgeBend | null>;
+// What an edge's route is drawn from: its bend and the angles its ends are pinned to.
+export type EdgeRoute = Pick<EdgeStyle, 'bend' | 'startAngle' | 'endAngle'>;
 
-export function layOutModelEdges(model: FlowModel, geometry: EdgeGeometryMap, bendOverrides: EdgeBendOverrides | null = null): void {
-  const bendOf = (edge: ModelEdge): EdgeBend | null => {
-    const identity = edgeIdentityOf(edge);
-    return bendOverrides?.has(identity) ? bendOverrides.get(identity)! : edgeStyleIn(model, edge).bend;
+// A drag in progress, by edge: the part of the route it would write (a field set to null takes
+// that part away), or `hidden` for an edge the drag is turning into something else. Keyed by
+// identity rather than by ModelEdge, so a model rebuilt mid-drag still finds it.
+export type EdgeRouteOverride = Partial<EdgeRoute> & { hidden?: true };
+export type EdgeRouteOverrides = ReadonlyMap<EdgeIdentity, EdgeRouteOverride>;
+
+export function layOutModelEdges(model: FlowModel, geometry: EdgeGeometryMap, routeOverrides: EdgeRouteOverrides | null = null): void {
+  const routeOf = (edge: ModelEdge): EdgeRoute | null => {
+    const override = routeOverrides?.get(edgeIdentityOf(edge));
+    if (override?.hidden) return null;
+    const { bend, startAngle, endAngle } = edgeStyleIn(model, edge);
+    return { bend, startAngle, endAngle, ...override };
   };
   for (const bundle of bundleEdgesByNodePair(model.edges, geometry).values()) {
-    layOutBundle(model, bundle, bendOf, geometry);
+    layOutBundle(model, bundle, routeOf, geometry);
   }
 }
 
@@ -95,25 +102,32 @@ export function edgePathBounds(model: FlowModel): Rect[] {
     .filter((rect): rect is Rect => rect != null);
 }
 
-// A bent edge leaves its bundle: it runs where the user put it, and the edges still laid out
-// automatically share the lanes among themselves. So while one edge of three is being bent, the
-// other two re-lane as a pair — live, because the drag's bend is laid out like a stored one.
-// Self-loops are never bent, whatever their entry says, so their nesting never shifts.
+// A bent or pinned edge leaves its bundle: it runs where the user put it, and the edges still laid
+// out automatically share the lanes among themselves. So while one edge of three is being bent, the
+// other two re-lane as a pair — live, because the drag's route is laid out like a stored one.
+// Self-loops are never bent or pinned, whatever their entry says, so their nesting never shifts.
+// A null route is an edge hidden for the moment, which is laid out nowhere.
 function layOutBundle(
   model: FlowModel,
   bundle: ModelEdge[],
-  bendOf: (edge: ModelEdge) => EdgeBend | null,
+  routeOf: (edge: ModelEdge) => EdgeRoute | null,
   geometry: EdgeGeometryMap,
 ): void {
-  if (bundle[0].to === bundle[0].from) {
-    bundle.forEach((edge, occurrence) => geometry.set(edge, selfLoopGeometry(model, edge.from, occurrence)));
+  const shown = bundle.filter((edge) => {
+    const isShown = routeOf(edge) != null;
+    if (!isShown) geometry.delete(edge);
+    return isShown;
+  });
+  if (shown.length === 0) return;
+  if (shown[0].to === shown[0].from) {
+    shown.forEach((edge, occurrence) => geometry.set(edge, selfLoopGeometry(model, edge.from, occurrence)));
     return;
   }
   const unbent: ModelEdge[] = [];
-  for (const edge of bundle) {
-    const bend = bendOf(edge);
-    const bent = bend ? bentGeometry(endpointsOf(model, edge, edge.to!), bend) : null;
-    if (bent) geometry.set(edge, bent);
+  for (const edge of shown) {
+    const route = routeOf(edge)!;
+    const routed = isRouted(route) ? routedGeometry(endpointsOf(model, edge, edge.to!), route) : null;
+    if (routed) geometry.set(edge, routed);
     else unbent.push(edge);
   }
   unbent.forEach((edge, occurrence) => {
@@ -159,6 +173,17 @@ function inCanonicalOrientation(lane: Lane, from: FlowNode, to: FlowNode | Ghost
   return from.name <= to.name ? lane : { index: -lane.index, extent: lane.extent };
 }
 
+function isRouted(route: EdgeRoute): boolean {
+  return route.bend != null || route.startAngle != null || route.endAngle != null;
+}
+
+// The outlines a drawn edge meets at either end, as the layout measures them — what a pinned end's
+// angle is measured around. Null for a self-loop or an edge not drawn.
+export function edgeEndpointsOf(model: FlowModel, edge: ModelEdge): { from: Endpoint; to: Endpoint } | null {
+  if (!edge.from?.pos || !edge.to?.pos || edge.to === edge.from) return null;
+  return endpointsOf(model, edge, edge.to);
+}
+
 // An edge normally spans its two nodes' borders, but either end is redirected onto a named
 // node inside an unfolded frame when the `{Inner}` form names one (spec §5.7, §5.8).
 function endpointsOf(model: FlowModel, edge: ModelEdge, target: FlowNode | GhostNode): { from: Endpoint; to: Endpoint } {
@@ -198,14 +223,30 @@ function lanedGeometry(ends: { from: Endpoint; to: Endpoint }, lane: Lane): Edge
   return createEdgeGeometry([start, mid, end], { chord: { from: fromCenter, to: toCenter } });
 }
 
-// Null when the chord has no length to measure the bend against, which leaves the edge unbent.
-function bentGeometry(ends: { from: Endpoint; to: Endpoint }, bend: EdgeBend): EdgeGeometry | null {
+// A pinned end sits where its angle leaves the node's outline; the line runs straight from it, to
+// the bend if there is one, or to the other end. An end left free faces whatever comes next along
+// the line: the bend, the other end's pinned point, or the other node's centre. Null when nothing
+// is left to route by — a bend on a chord of no length, with neither end pinned — which leaves the
+// edge to its lane.
+function routedGeometry(ends: { from: Endpoint; to: Endpoint }, route: EdgeRoute): EdgeGeometry | null {
   const chord = { from: rectCenter(ends.from.rect), to: rectCenter(ends.to.rect) };
-  const bendPoint = bendPointOf(bend, chord);
-  if (!bendPoint) return null;
-  const start = shapeBorderPointToward(ends.from.shape, ends.from.rect, aimFrom(ends.from.rect, bendPoint, chord.to));
-  const end = shapeBorderPointToward(ends.to.shape, ends.to.rect, aimFrom(ends.to.rect, bendPoint, chord.from));
-  return createEdgeGeometry([start, bendPoint, end], { grip: bendPoint, chord });
+  const bendPoint = route.bend ? bendPointOf(route.bend, chord) : null;
+  if (!bendPoint && route.startAngle == null && route.endAngle == null) return null;
+  const pinnedStart = route.startAngle != null ? pinnedEndPoint(ends.from, route.startAngle) : null;
+  const pinnedEnd = route.endAngle != null ? pinnedEndPoint(ends.to, route.endAngle) : null;
+  const start = pinnedStart ?? freeEndPoint(ends.from, bendPoint ?? pinnedEnd, chord.to);
+  const end = pinnedEnd ?? freeEndPoint(ends.to, bendPoint ?? pinnedStart, chord.from);
+  const through = bendPoint ?? midpointOf(start, end);
+  return createEdgeGeometry([start, through, end], { grip: through, chord });
+}
+
+export function pinnedEndPoint(endpoint: Endpoint, angle: number): Point {
+  return shapeBorderPointFrom(endpoint.shape, endpoint.rect, rectCenter(endpoint.rect), anchorDirectionOf(angle));
+}
+
+function freeEndPoint(endpoint: Endpoint, nextPoint: Point | null, otherCenter: Point): Point {
+  const facing = nextPoint ? aimFrom(endpoint.rect, nextPoint, otherCenter) : otherCenter;
+  return shapeBorderPointToward(endpoint.shape, endpoint.rect, facing);
 }
 
 // An end leaves its node facing the bend — unless the bend was dragged inside that node, where

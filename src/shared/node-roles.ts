@@ -8,7 +8,7 @@
 // is outside the system — only whoever wrote the graph knows.
 
 import { DEFAULT_NODE_SHAPE, documentIdentities, nodeShapeOf, setNodeShape, type CanvasLayer, type NodeShape } from './canvas-layer.js';
-import { setEdgeStyle } from './canvas-edge-style.js';
+import { ERROR_EDGE_COLOR, setEdgeStyle } from './canvas-edge-style.js';
 import { assignMissingNodeIds } from './document-layout.js';
 import { getPreambleField, getProp, parseEdgeExpression, unquote, type FlowDocument, type FlowItem, type FlowNode, type Rect } from './flow-format.js';
 import { estimateNodeSize, textCutOff } from './node-size-estimate.js';
@@ -149,7 +149,7 @@ function markEdgesIntoErrors(doc: FlowDocument, items: FlowItem[], layer: Canvas
     for (const spec of node.edges) {
       const key = identities.edgeKeys.get(spec);
       if (!errorNames.has(spec.target) || !key) continue;
-      setEdgeStyle(layer, key, { color: 'red', line: 'dashed' }, 'flow');
+      setEdgeStyle(layer, key, { color: ERROR_EDGE_COLOR, line: 'dashed' }, 'flow');
       marked += 1;
     }
   }

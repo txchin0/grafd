@@ -28,6 +28,9 @@ export interface ScoredEdge {
   kind: EdgeKind;
   label: string | null;
   bend: EdgeBend | null;
+  // The angles its ends are pinned to in the canvas layer; absent or null leaves an end to its route.
+  startAngle?: number | null;
+  endAngle?: number | null;
 }
 
 export interface ScoredRegion {
@@ -116,6 +119,7 @@ export function scoreGraph(graph: ScoredGraph): GraphScore {
   const sketches = graph.edges.map((edge) =>
     (edge.from === edge.to ? null : sketchEdge(
       graph.nodes[edge.from].rect, graph.nodes[edge.to].rect, edge.bend, graph.nodes[edge.from].shape, graph.nodes[edge.to].shape,
+      { startAngle: edge.startAngle ?? null, endAngle: edge.endAngle ?? null },
     )));
   const findings = [
     ...overlaps(graph),

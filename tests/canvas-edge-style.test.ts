@@ -3,10 +3,14 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  anchorDirectionOf,
+  angleToward,
   defaultEdgeStyle,
   edgeStyleOf,
+  readEdgeAngle,
   readEdgeBend,
   setEdgeStyle,
+  snapAnchorAngle,
 } from '../src/shared/canvas-edge-style.js';
 import { emptyCanvasLayer, parseCanvasLayer, serializeCanvasLayer, type CanvasLayer } from '../src/shared/canvas-layer.js';
 
@@ -28,6 +32,8 @@ describe('reading an edge style', () => {
       startHead: 'none',
       endHead: 'arrow',
       bend: null,
+      startAngle: null,
+      endAngle: null,
     });
   });
 
@@ -58,7 +64,7 @@ describe('reading an edge style', () => {
 describe('writing an edge style', () => {
   it('round-trips through the layer file', () => {
     const layer = emptyCanvasLayer();
-    setEdgeStyle(layer, KEY, { line: 'dotted', startHead: 'dot', endHead: 'triangle', bend: { along: 0.5, across: 0.25 } }, FLOW_EDGE);
+    setEdgeStyle(layer, KEY, { line: 'dotted', startHead: 'dot', endHead: 'triangle', bend: { along: 0.5, across: 0.25 }, endAngle: 180 }, FLOW_EDGE);
     const reread = parseCanvasLayer(serializeCanvasLayer(layer));
     expect(edgeStyleOf(reread, KEY, FLOW_EDGE)).toEqual({
       color: null,
@@ -66,6 +72,8 @@ describe('writing an edge style', () => {
       startHead: 'dot',
       endHead: 'triangle',
       bend: { along: 0.5, across: 0.25 },
+      startAngle: null,
+      endAngle: 180,
     });
   });
 
@@ -119,5 +127,41 @@ describe('writing an edge style', () => {
     const layer = layerWith({ line: 'dotted', bend: [0.5, 0.2] });
     setEdgeStyle(layer, KEY, { color: 'blue' }, FLOW_EDGE);
     expect(layer.edges[KEY]).toEqual({ line: 'dotted', bend: [0.5, 0.2], color: 'blue' });
+  });
+});
+
+describe('pinned ends', () => {
+  it('writes an angle as whole degrees within one turn, and frees the end on null', () => {
+    const layer = emptyCanvasLayer();
+    setEdgeStyle(layer, KEY, { startAngle: -90.4, endAngle: 450 }, FLOW_EDGE);
+    expect(layer.edges[KEY]).toEqual({ startAngle: 270, endAngle: 90 });
+    setEdgeStyle(layer, KEY, { startAngle: null, endAngle: null }, FLOW_EDGE);
+    expect(layer.edges[KEY]).toBeUndefined();
+  });
+
+  it('reads anything but a finite number as a free end', () => {
+    const style = edgeStyleOf(layerWith({ startAngle: 'bottom', endAngle: 720.5 }), KEY, FLOW_EDGE);
+    expect(style.startAngle).toBeNull();
+    expect(style.endAngle).toBeCloseTo(0.5, 6);
+    expect(readEdgeAngle(Number.NaN)).toBeNull();
+  });
+
+  it('measures angles clockwise from the top', () => {
+    const center = { x: 0, y: 0 };
+    expect(angleToward(center, { x: 0, y: -5 })).toBeCloseTo(0, 6);
+    expect(angleToward(center, { x: 5, y: 0 })).toBeCloseTo(90, 6);
+    expect(angleToward(center, { x: 0, y: 5 })).toBeCloseTo(180, 6);
+    expect(angleToward(center, { x: -5, y: 0 })).toBeCloseTo(270, 6);
+    expect(angleToward(center, center)).toBeNull();
+    const bottom = anchorDirectionOf(180);
+    expect(bottom.x).toBeCloseTo(0, 6);
+    expect(bottom.y).toBeCloseTo(1, 6);
+  });
+
+  it('snaps near a side or a diagonal, and keeps whole degrees elsewhere', () => {
+    expect(snapAnchorAngle(176.2)).toBe(180);
+    expect(snapAnchorAngle(357)).toBe(0);
+    expect(snapAnchorAngle(48.6)).toBe(45);
+    expect(snapAnchorAngle(120.4)).toBe(120);
   });
 });

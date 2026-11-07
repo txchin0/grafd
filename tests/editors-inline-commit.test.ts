@@ -111,6 +111,7 @@ const ELEMENT_IDS = [
   'ee-start-head',
   'ee-end-head',
   'ee-straighten',
+  'ee-reset-ends',
   'title-editor',
   'text-drawing-editor',
   'region-name-editor',

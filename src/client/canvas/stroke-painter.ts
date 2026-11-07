@@ -11,6 +11,12 @@ export function drawingInkColor(layerColor: string | null): string {
   return layerColor ? resolveLayerColor(layerColor) : canvasPalette.ink;
 }
 
+// A free arrow without a colour of its own is drawn in the edges' colour, so it reads as the same
+// kind of mark as the edges beside it.
+export function arrowInkColor(layerColor: string | null): string {
+  return layerColor ? resolveLayerColor(layerColor) : canvasPalette.edge;
+}
+
 export function inkStroke(ctx: CanvasRenderingContext2D, points: readonly Point[], color: string, lineWidth: number): void {
   if (points.length === 0) return;
   ctx.save();

@@ -20,6 +20,7 @@ import type { TextEditRequest } from '../src/client/text-drawing-editor.js';
 import type { ResizeHandle } from '../src/client/canvas/resize-handles.js';
 import type { GraphUnit } from '../src/client/paste-transplant.js';
 import type { HeadlessEditor } from './editor-harness.js';
+import { ARROW_KIND, type ArrowDrawing } from '../src/shared/canvas-arrow.js';
 
 // What a pick can aim at. Handles, ports and grips are all one kind, `affordance`, resolved
 // against what the view itself reports is on screen (`CanvasView.affordances`), so a target never
@@ -36,6 +37,7 @@ export const TARGET_KINDS = [
   'stroke',
   'text',
   'image',
+  'arrow',
   'affordance',
   'empty',
   'frame-inside',
@@ -49,7 +51,7 @@ export interface TargetPick {
   nudge: Point;
 }
 
-export const TOOLS = ['select', 'node', 'context', 'draw', 'text'] as const satisfies readonly Tool[];
+export const TOOLS = ['select', 'node', 'context', 'draw', 'text', 'arrow'] as const satisfies readonly Tool[];
 
 // Every keyboard command the page binds, from the same table it binds them with.
 export const COMMANDS = EDITOR_COMMANDS;
@@ -110,6 +112,9 @@ export type SessionAction =
   | { type: 'wiggle'; from: TargetPick; by: Point }
   // Pressed and carried away, then Escape before letting go.
   | { type: 'abandoned-drag'; from: TargetPick; by: Point }
+  // Pressed and carried away while another tool rewrites the open file and puts it back, then let go:
+  // the files end as they were, but every object the drag began on has been rebuilt.
+  | { type: 'drag-through-external-write'; from: TargetPick; by: Point }
   // Clicks something, then drags one of the affordances that selecting it put on screen — the only
   // way to a corner handle or a bend grip that does not wait on an earlier step to select it.
   | { type: 'grab-affordance'; owner: TargetPick; affordance: number; by: Point }
@@ -139,8 +144,11 @@ export interface ActionTrace {
   textRequest: TextEditRequest | null;
   // The corner or side a grab-affordance step dragged, when the affordance was a resize handle.
   grabbedHandle: ResizeHandle | null;
-  // What the press that began a drag landed on, as the view settled it just before pressing.
+  // What the press that began a drag or a click landed on, as the view settled it just before
+  // pressing.
   pressedKind: PressTargetKind | null;
+  // Whether a right-click opened a menu.
+  menuOpened: boolean | null;
   // The graph a paste was asked into — the one under the pointer as the paste began.
   pastedInto: GraphUnit | null;
   // Where an image was pasted, in the coordinates of the graph it was pasted into.
@@ -188,6 +196,7 @@ export const sessionAction: fc.Arbitrary<SessionAction> = fc.oneof(
   { weight: 3, arbitrary: fc.record({ type: fc.constant('nudge' as const), from: targetPick, by: dragOffset, shift: fc.boolean() }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('wiggle' as const), from: targetPick, by: dragOffset }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('abandoned-drag' as const), from: targetPick, by: dragOffset }) },
+  { weight: 1, arbitrary: fc.record({ type: fc.constant('drag-through-external-write' as const), from: targetPick, by: dragOffset }) },
   { weight: 2, arbitrary: fc.record({ type: fc.constant('grab-affordance' as const), owner: targetPick, affordance: fc.nat(MAX_AFFORDANCE_INDEX), by: dragOffset }) },
   { weight: 2, arbitrary: fc.record({ type: fc.constant('menu' as const), target: targetPick, choice: fc.nat(12) }) },
   { weight: 1, arbitrary: fc.record({ type: fc.constant('rename' as const), target: targetPick, name: fc.nat(TYPED_NAMES.length - 1) }) },
@@ -254,6 +263,10 @@ function anchorOf(editor: HeadlessEditor, pick: TargetPick): Point | null {
       const image = itemAt((model.visuals?.drawings() ?? []).filter((drawing): drawing is ImageDrawing => drawing.kind === IMAGE_KIND), pick.index);
       return image ? { x: image.box.x + image.box.w / 2, y: image.box.y + image.box.h / 2 } : null;
     }
+    case 'arrow': {
+      const arrow = itemAt((model.visuals?.drawings() ?? []).filter((drawing): drawing is ArrowDrawing => drawing.kind === ARROW_KIND), pick.index);
+      return arrow ? { x: (arrow.points[0].x + arrow.points[1].x) / 2, y: (arrow.points[0].y + arrow.points[1].y) / 2 } : null;
+    }
 
     case 'empty':
       return { x: EMPTY_ORIGIN.x + pick.index * EMPTY_SPACING, y: EMPTY_ORIGIN.y };
@@ -317,7 +330,7 @@ export function choosableItems(menu: readonly MenuItem[]): { label: string; onSe
 }
 
 function emptyTrace(): ActionTrace {
-  return { path: null, menuAt: null, menuItem: null, editedNode: null, typed: null, textRequest: null, grabbedHandle: null, pressedKind: null, pastedInto: null, pastedImageAt: null };
+  return { path: null, menuAt: null, menuItem: null, editedNode: null, typed: null, textRequest: null, grabbedHandle: null, pressedKind: null, menuOpened: null, pastedInto: null, pastedImageAt: null };
 }
 
 export async function performAction(editor: HeadlessEditor, action: SessionAction): Promise<ActionTrace> {
@@ -330,6 +343,7 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       const point = resolveTarget(editor, action.target);
       if (!point) return trace;
       trace.path = [point];
+      trace.pressedKind = editor.core.view.pressTargetKindAt(point, action.shift);
       await editor.click(point, { shiftKey: action.shift });
       return trace;
     }
@@ -378,6 +392,23 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       await editor.settle();
       return trace;
     }
+    case 'drag-through-external-write': {
+      const from = resolveTarget(editor, action.from);
+      const openPath = editor.core.openFlow()?.path;
+      const openText = openPath ? editor.workspace.file(openPath) : null;
+      if (!from || !openPath || openText == null) return trace;
+      trace.path = pathBetween(from, { x: from.x + action.by.x, y: from.y + action.by.y });
+      trace.pressedKind = editor.core.view.pressTargetKindAt(from);
+      const halfway = Math.floor(trace.path.length / 2);
+      editor.press(from);
+      for (const point of trace.path.slice(1, halfway + 1)) editor.moveTo(point);
+      editor.workspace.writeExternally(openPath, `${openText}\n# rewritten by another tool\n`);
+      editor.workspace.writeExternally(openPath, openText);
+      for (const point of trace.path.slice(halfway + 1)) editor.moveTo(point);
+      editor.release(trace.path[trace.path.length - 1]);
+      await editor.settle();
+      return trace;
+    }
     case 'grab-affordance': {
       const owner = resolveTarget(editor, action.owner);
       if (!owner) return trace;
@@ -394,8 +425,10 @@ export async function performAction(editor: HeadlessEditor, action: SessionActio
       const point = resolveTarget(editor, action.target);
       if (!point) return trace;
       const menusBefore = editor.menus.length;
+      trace.pressedKind = editor.core.view.pressTargetKindAt(point);
       await editor.rightClick(point);
-      if (editor.menus.length === menusBefore) return trace;
+      trace.menuOpened = editor.menus.length > menusBefore;
+      if (!trace.menuOpened) return trace;
       const choices = choosableItems(editor.menus[editor.menus.length - 1]);
       if (choices.length === 0) return trace;
       const choice = choices[action.choice % choices.length];

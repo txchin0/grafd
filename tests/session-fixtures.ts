@@ -3,7 +3,8 @@
 // nested inside another that lists its member too, edges,
 // a subgraph host, an edge to a node that does not exist yet (drawn as a ghost), loose strokes and
 // a group of them, text loose, wrapped, inside a region, inside a subgraph and grouped with a
-// stroke, and images placed the same ways — so that a sequence of gestures has every pairing of kind and destination within
+// stroke, images placed the same ways, a free arrow loose and one inside a subgraph, and an edge
+// with a pinned end — so that a sequence of gestures has every pairing of kind and destination within
 // reach. A kind added to the canvas belongs here too, or no session ever touches it; the coverage
 // test in editor-sessions.test.ts fails until one is.
 
@@ -69,6 +70,7 @@ graph: Delta
 const SESSION_LAYER = {
   format: 'grafd-canvas/1',
   nodes: { 'beta-1': { shape: 'diamond' } },
+  edges: { 'beta-1 -> #delta-1': { startAngle: 180 } },
   drawings: [
     { id: 'loose-stroke', kind: 'stroke', width: 'medium', points: [[460, 560], [520, 600], [600, 620], [680, 610]] },
     { id: 'grouped-a', kind: 'stroke', width: 'thin', points: [[1300, 100], [1360, 140], [1420, 120]] },
@@ -85,6 +87,8 @@ const SESSION_LAYER = {
     { id: 'inner-image', kind: 'image', graph: 'Delta', box: [80, 120, 60, 40], src: ONE_PIXEL_PNG },
     { id: 'pictured', kind: 'image', box: [1500, 100, 80, 60], src: ONE_PIXEL_PNG },
     { id: 'picture-frame', kind: 'stroke', width: 'thin', points: [[1500, 175], [1580, 175]] },
+    { id: 'loose-arrow', kind: 'arrow', points: [[1100, 640], [1240, 560]] },
+    { id: 'inner-arrow', kind: 'arrow', graph: 'Delta', width: 'thin', endHead: 'triangle', points: [[180, 120], [260, 160]] },
   ],
   groups: [
     { id: 'pair', members: [{ kind: 'drawing', id: 'grouped-a' }, { kind: 'drawing', id: 'grouped-b' }] },

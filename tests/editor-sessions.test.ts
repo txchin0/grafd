@@ -75,6 +75,10 @@ const WEST_SIDE_HANDLE = CORNER_HANDLES + 3;
 const SOUTH_SIDE_HANDLE_OF_A_FLAT_REGION = CORNER_HANDLES + 1;
 const TOP_PORT_OF_A_SELECTED_NODE = CORNER_HANDLES + SIDE_HANDLES;
 const RIGHT_PORT_OF_A_SELECTED_NODE = CORNER_HANDLES + SIDE_HANDLES + 1;
+// A lone selected edge's affordances: the dot at its start, the dot at its end, then its grip.
+const START_DOT_OF_A_SELECTED_EDGE = 0;
+const END_DOT_OF_A_SELECTED_EDGE = 1;
+const SELECT_AN_EDGE: SessionAction = { type: 'click', target: { kind: 'edge-line', index: 0, nudge: { x: 0, y: 0 } }, shift: false };
 const FIRST_NODE_TO_EMPTY_CANVAS: SessionAction = {
   type: 'drag',
   from: { kind: 'node', index: 0, nudge: { x: 0, y: 0 } },
@@ -212,6 +216,18 @@ const SESSION_REGRESSIONS: [SessionAction[]][] = [
     { type: 'menu', target: nodePick(1), choice: 3 },
     { type: 'nudge', from: { kind: 'region-border', index: 4, nudge: { x: 0, y: 0 } }, by: { x: 0, y: 68 }, shift: false },
   ]],
+  // A double-click with the arrow tool made a node: only the pen was kept from double-click's edits.
+  [[{ type: 'tool', tool: 'arrow' }, { type: 'double-click', target: { kind: 'empty', index: 0, nudge: { x: 0, y: 0 } } }]],
+  // Right-clicking an edge's end dot opened no menu.
+  [[SELECT_AN_EDGE, { type: 'menu', target: affordancePick(START_DOT_OF_A_SELECTED_EDGE), choice: 0 }]],
+  // Shift-clicking an edge's end dot left the edge selected.
+  [[SELECT_AN_EDGE, { type: 'click', target: affordancePick(START_DOT_OF_A_SELECTED_EDGE), shift: true }]],
+  // A file rewritten on disk while an edge's end was being pulled off left the edge in the .flow,
+  // beside the arrow that replaced it: the release deleted the edge object the drag began with.
+  [[SELECT_AN_EDGE, { type: 'drag-through-external-write', from: affordancePick(END_DOT_OF_A_SELECTED_EDGE), by: { x: 0, y: 160 } }]],
+  // A node pressed while its file was rewritten on disk, and let go where it was pressed, became the
+  // selection as the object the rewrite had replaced.
+  [[{ type: 'drag-through-external-write', from: nodePick(0), by: { x: 0, y: 0 } }]],
 ];
 const TOOL_PARITY_REGRESSIONS: [SessionAction[], TargetPick, Tool][] = [
   // The node and region tools drew a new node or region over a stroke instead of dragging it.
@@ -241,6 +257,8 @@ function cursorGrabs(cursor: string): boolean {
 // the view's PressTarget does not compile here until it is listed — and once it is, the coverage
 // test below fails until a session target can reach it.
 const EVERY_PRESS_TARGET: Record<PressTargetKind, true> = {
+  'edge-end-handle': true,
+  'arrow-end-handle': true,
   'port': true,
   'drawing-handle': true,
   'selected-edge-grip': true,

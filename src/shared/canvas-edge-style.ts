@@ -1,12 +1,12 @@
-// How an edge is drawn: its colour, the line it is drawn with, the heads at either end, and the
-// bend a user dragged into it. This module owns an edge's canvas-layer entry; canvas-layer.ts only
+// How an edge is drawn: its colour, the line it is drawn with, the heads at either end, the
+// bend a user dragged into it, and the angle either end is pinned to. This module owns an edge's canvas-layer entry; canvas-layer.ts only
 // keys it, re-keys it with the edge and copies it with the edge.
 //
 // A default is never written: an entry holds only what differs from how the edge would be drawn
 // anyway. An error edge is drawn dashed by default, so what counts as a default depends on the
 // edge's kind, which is why both reads and writes are told it.
 
-import { isLayerColor, setEntryField, type CanvasLayer } from './canvas-layer.js';
+import { isLayerColor, setEntryField, type CanvasLayer, type LayerColorSlot } from './canvas-layer.js';
 import type { Point } from './rect-math.js';
 
 export type EdgeKind = 'flow' | 'error';
@@ -31,6 +31,21 @@ const MAX_BEND_ALONG = 1;
 // Stored to a thousandth of the chord: finer than any screen shows, and it keeps diffs quiet.
 const BEND_PRECISION = 1000;
 
+// Where a pinned end meets its node: the angle, in degrees, of the ray from the node's centre that
+// it leaves along — clockwise from straight up, so 90 is the right side and 180 the bottom. A
+// geometric angle rather than a fraction of the outline, so the end stays on the side it was put
+// on however the node is resized.
+const FULL_TURN_DEGREES = 360;
+// Pinned ends snap to the sides and the corners' diagonals when dragged this near them.
+const ANCHOR_SNAP_STEP_DEGREES = 45;
+const ANCHOR_SNAP_DEGREES = 6;
+
+export type EdgeEnd = 'start' | 'end';
+
+// The colour slot that marks an edge as leading into an error, wherever one has to be written —
+// the theme's own error colour has no slot, so a layer cannot name it.
+export const ERROR_EDGE_COLOR: LayerColorSlot = 'red';
+
 export interface EdgeStyle {
   // Null draws the edge kind's own colour, which the theme decides.
   color: string | null;
@@ -38,12 +53,15 @@ export interface EdgeStyle {
   startHead: Arrowhead;
   endHead: Arrowhead;
   bend: EdgeBend | null;
+  // Null leaves the end where the edge's route puts it.
+  startAngle: number | null;
+  endAngle: number | null;
 }
 
 // A field set to null returns it to its default; a field left out is untouched.
 export type EdgeStylePatch = { [Field in keyof EdgeStyle]?: EdgeStyle[Field] | null };
 
-const EDGE_STYLE_FIELDS = ['color', 'line', 'startHead', 'endHead', 'bend'] as const satisfies readonly (keyof EdgeStyle)[];
+const EDGE_STYLE_FIELDS = ['color', 'line', 'startHead', 'endHead', 'bend', 'startAngle', 'endAngle'] as const satisfies readonly (keyof EdgeStyle)[];
 
 export function defaultEdgeStyle(kind: EdgeKind): EdgeStyle {
   return {
@@ -52,7 +70,13 @@ export function defaultEdgeStyle(kind: EdgeKind): EdgeStyle {
     startHead: 'none',
     endHead: 'arrow',
     bend: null,
+    startAngle: null,
+    endAngle: null,
   };
+}
+
+export function angleFieldOf(end: EdgeEnd): 'startAngle' | 'endAngle' {
+  return end === 'start' ? 'startAngle' : 'endAngle';
 }
 
 export function isLineStyle(value: unknown): value is LineStyle {
@@ -103,6 +127,36 @@ function chordBetween(fromCenter: Point, toCenter: Point): { vector: Point; acro
   return { vector, across: { x: -vector.y, y: vector.x }, squaredLength };
 }
 
+// The unit vector a pinned end leaves its node's centre along.
+export function anchorDirectionOf(angle: number): Point {
+  const radians = (angle * Math.PI) / 180;
+  return { x: Math.sin(radians), y: -Math.cos(radians) };
+}
+
+// The angle of the ray from `center` through `point`; null when they coincide.
+export function angleToward(center: Point, point: Point): number | null {
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+  if (dx === 0 && dy === 0) return null;
+  return normalizedAngle((Math.atan2(dx, -dy) * 180) / Math.PI);
+}
+
+// Near a side or a diagonal the angle lands exactly on it; elsewhere it is kept to a whole degree.
+export function snapAnchorAngle(angle: number): number {
+  const nearestStep = Math.round(angle / ANCHOR_SNAP_STEP_DEGREES) * ANCHOR_SNAP_STEP_DEGREES;
+  const snapped = Math.abs(angle - nearestStep) <= ANCHOR_SNAP_DEGREES ? nearestStep : Math.round(angle);
+  return normalizedAngle(snapped);
+}
+
+function normalizedAngle(angle: number): number {
+  return ((angle % FULL_TURN_DEGREES) + FULL_TURN_DEGREES) % FULL_TURN_DEGREES;
+}
+
+// An angle is any finite number of degrees, read into one turn; anything else leaves the end free.
+export function readEdgeAngle(raw: unknown): number | null {
+  return typeof raw === 'number' && Number.isFinite(raw) ? normalizedAngle(raw) : null;
+}
+
 // A bend is written as `[along, across]`; anything else reads as no bend.
 export function readEdgeBend(raw: unknown): EdgeBend | null {
   if (!Array.isArray(raw) || raw.length !== 2) return null;
@@ -123,6 +177,8 @@ export function edgeStyleOf(layer: CanvasLayer | null, edgeKey: string | null, k
     startHead: isArrowhead(entry.startHead) ? entry.startHead : defaults.startHead,
     endHead: isArrowhead(entry.endHead) ? entry.endHead : defaults.endHead,
     bend: readEdgeBend(entry.bend),
+    startAngle: readEdgeAngle(entry.startAngle),
+    endAngle: readEdgeAngle(entry.endAngle),
   };
 }
 
@@ -136,9 +192,12 @@ export function setEdgeStyle(layer: CanvasLayer, edgeKey: string, patch: EdgeSty
   }
 }
 
-// A bend is the one field held as an object; it is written as a rounded pair.
+// A bend is the one field held as an object; it is written as a rounded pair. An angle is written
+// to a whole degree, within one turn.
 function storedFieldValue(value: NonNullable<EdgeStyle[keyof EdgeStyle]>): unknown {
-  return typeof value === 'object' ? storedBend(value) : value;
+  if (typeof value === 'object') return storedBend(value);
+  if (typeof value === 'number') return normalizedAngle(Math.round(value));
+  return value;
 }
 
 function storedBend(bend: EdgeBend): [number, number] {
